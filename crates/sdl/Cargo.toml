@@ -1,0 +1,18 @@
+[package]
+name = "sdl"
+description = "Terminal UI: Spotify to library to Snowsky card"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sdl-core.workspace = true
+sdl-spotify.workspace = true
+sdl-youtube.workspace = true
+sdl-library.workspace = true
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
+crossterm = { workspace = true, features = ["event-stream"] }
+tui-input.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
+color-eyre.workspace = true
+futures.workspace = true

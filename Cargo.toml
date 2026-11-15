@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+publish = false
+
+[workspace.dependencies]
+sdl-core = { path = "crates/sdl-core" }
+sdl-spotify = { path = "crates/sdl-spotify" }
+sdl-youtube = { path = "crates/sdl-youtube" }
+sdl-library = { path = "crates/sdl-library" }
+
+rspotify = "0.16.1"
+yt-dlp = "2.10.0"
+musicbrainz_rs = { version = "0.14.0", features = ["async", "rate_limit", "rustls"] }
+lofty = "0.25.5"
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+tui-input = "0.15.5"
+tokio = "1.54.1"
+reqwest = "0.13.5"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.1"
+thiserror = "2.0.21"
+color-eyre = "0.6.5"
+directories = "6.0.0"
+strsim = "0.11.1"
+sanitize-filename = "0.6.0"
+walkdir = "2.5.0"
+open = "5.4.5"
+futures = "0.3.34"
+url = "2.5.8"
+tempfile = "3.27.0"

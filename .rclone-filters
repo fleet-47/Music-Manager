@@ -1,0 +1,5 @@
+# rclone bisync filters for snowsky-sync. Changing this file makes bisync require a --resync.
+# macOS clutter: AppleDouble metadata, Finder view state, localisation marker.
+- ._*
+- .DS_Store
+- .localized

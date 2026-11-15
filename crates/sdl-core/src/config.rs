@@ -1,0 +1,168 @@
+//! `~/.config/sdl/config.toml`.
+
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
+
+use directories::{BaseDirs, UserDirs};
+use serde::Deserialize;
+
+const DEFAULT_DOWNLOAD_JOBS: NonZeroUsize = match NonZeroUsize::new(4) {
+    Some(jobs) => jobs,
+    None => NonZeroUsize::MIN,
+};
+
+/// Errors loading the config. Every variant names the config path.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// No home directory could be determined.
+    #[error("cannot determine the home directory to locate the config file")]
+    NoHome,
+    /// The file is missing or unreadable.
+    #[error("cannot read config file {}", path.display())]
+    Read {
+        /// The config path.
+        path: PathBuf,
+        /// Underlying error.
+        source: std::io::Error,
+    },
+    /// The file is not valid TOML or lacks a required key.
+    #[error("malformed config file {}", path.display())]
+    Parse {
+        /// The config path.
+        path: PathBuf,
+        /// Underlying error.
+        source: toml::de::Error,
+    },
+}
+
+/// Settings from the config file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Config {
+    /// Spotify developer app client ID.
+    pub client_id: String,
+    /// Music library root (default `~/Music`).
+    pub music_root: PathBuf,
+    /// Volume UUID of the Snowsky SD card.
+    pub card_uuid: String,
+    /// Parallel song downloads (default 4). Zero is a parse error.
+    pub download_jobs: NonZeroUsize,
+}
+
+#[derive(Deserialize)]
+struct RawConfig {
+    client_id: String,
+    music_root: Option<PathBuf>,
+    card_uuid: String,
+    download_jobs: Option<NonZeroUsize>,
+}
+
+impl Config {
+    /// Path of the config file, `~/.config/sdl/config.toml`.
+    ///
+    /// # Errors
+    /// [`ConfigError::NoHome`] when the home directory is unknown.
+    pub fn path() -> Result<PathBuf, ConfigError> {
+        let base = BaseDirs::new().ok_or(ConfigError::NoHome)?;
+        Ok(base
+            .home_dir()
+            .join(".config")
+            .join("sdl")
+            .join("config.toml"))
+    }
+
+    /// Load the config from [`Config::path`].
+    ///
+    /// # Errors
+    /// A missing, unreadable or malformed file, naming the path.
+    pub fn load() -> Result<Self, ConfigError> {
+        let path = Self::path()?;
+        let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        Self::parse(&text, &path)
+    }
+
+    /// Parse config text; `path` is only used to name the file in errors.
+    ///
+    /// # Errors
+    /// Invalid TOML or a missing required key.
+    pub fn parse(text: &str, path: &Path) -> Result<Self, ConfigError> {
+        let raw: RawConfig = toml::from_str(text).map_err(|source| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let music_root = match raw.music_root {
+            Some(root) => root,
+            None => UserDirs::new()
+                .and_then(|dirs| dirs.audio_dir().map(Path::to_path_buf))
+                .ok_or(ConfigError::NoHome)?,
+        };
+        Ok(Self {
+            client_id: raw.client_id,
+            music_root,
+            card_uuid: raw.card_uuid,
+            download_jobs: raw.download_jobs.unwrap_or(DEFAULT_DOWNLOAD_JOBS),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn full_file_parses() -> TestResult {
+        let text =
+            "client_id = \"abc\"\ncard_uuid = \"U-1\"\nmusic_root = \"/m\"\ndownload_jobs = 2\n";
+        let cfg = Config::parse(text, Path::new("/c.toml"))?;
+        assert_eq!(cfg.client_id, "abc");
+        assert_eq!(cfg.card_uuid, "U-1");
+        assert_eq!(cfg.music_root, PathBuf::from("/m"));
+        assert_eq!(cfg.download_jobs.get(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn defaults_apply() -> TestResult {
+        let cfg = Config::parse(
+            "client_id = \"a\"\ncard_uuid = \"u\"\n",
+            Path::new("/c.toml"),
+        )?;
+        assert_eq!(cfg.download_jobs.get(), 4);
+        assert!(cfg.music_root.ends_with("Music"));
+        Ok(())
+    }
+
+    #[test]
+    fn missing_key_names_path() {
+        let err = Config::parse("client_id = \"a\"\n", Path::new("/x/config.toml"));
+        let msg = err.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(msg.contains("/x/config.toml"), "{msg}");
+    }
+
+    #[test]
+    fn zero_jobs_is_malformed() {
+        let err = Config::parse(
+            "client_id = \"a\"\ncard_uuid = \"u\"\ndownload_jobs = 0\n",
+            Path::new("/c.toml"),
+        );
+        assert!(matches!(err, Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn malformed_names_path() {
+        let err = Config::parse("not toml ===", Path::new("/y/config.toml"));
+        assert!(matches!(err, Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn example_file_parses() -> TestResult {
+        let text = include_str!("../../../config.example.toml");
+        let cfg = Config::parse(text, Path::new("config.example.toml"))?;
+        assert_eq!(cfg.download_jobs.get(), 4);
+        Ok(())
+    }
+}

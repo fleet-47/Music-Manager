@@ -1,0 +1,7 @@
+# References only; values stay in Bitwarden (item "Spotify-DL"). Unlock first: export BW_SESSION="$(bw unlock --raw)"
+[providers.bitwarden]
+type = "bitwarden"
+
+[secrets]
+SPOTIFY_CLIENT_ID = { provider = "bitwarden", value = "Spotify-DL/username" }
+SPOTIFY_CLIENT_SECRET = { provider = "bitwarden", value = "Spotify-DL/password" }
