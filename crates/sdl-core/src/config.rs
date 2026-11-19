@@ -3,7 +3,7 @@
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
-use directories::{BaseDirs, UserDirs};
+use directories::BaseDirs;
 use serde::Deserialize;
 
 const DEFAULT_DOWNLOAD_JOBS: NonZeroUsize = match NonZeroUsize::new(4) {
@@ -40,7 +40,7 @@ pub enum ConfigError {
 pub struct Config {
     /// Spotify developer app client ID.
     pub client_id: String,
-    /// Music library root (default `~/Music`).
+    /// Music library root (default `~/Music`); a leading `~` is expanded.
     pub music_root: PathBuf,
     /// Volume UUID of the Snowsky SD card.
     pub card_uuid: String,
@@ -56,18 +56,31 @@ struct RawConfig {
     download_jobs: Option<NonZeroUsize>,
 }
 
+/// Expand a leading `~` component of `path` to `home`. `~user` and a `~` elsewhere are left alone.
+#[must_use]
+pub fn expand_home(path: &Path, home: &Path) -> PathBuf {
+    match path.strip_prefix("~") {
+        Ok(rest) => home.join(rest),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+/// The directory that holds `config.toml` and `state.toml`, `~/.config/sdl`.
+///
+/// # Errors
+/// [`ConfigError::NoHome`] when the home directory is unknown.
+pub fn config_dir() -> Result<PathBuf, ConfigError> {
+    let base = BaseDirs::new().ok_or(ConfigError::NoHome)?;
+    Ok(base.home_dir().join(".config").join("sdl"))
+}
+
 impl Config {
     /// Path of the config file, `~/.config/sdl/config.toml`.
     ///
     /// # Errors
     /// [`ConfigError::NoHome`] when the home directory is unknown.
     pub fn path() -> Result<PathBuf, ConfigError> {
-        let base = BaseDirs::new().ok_or(ConfigError::NoHome)?;
-        Ok(base
-            .home_dir()
-            .join(".config")
-            .join("sdl")
-            .join("config.toml"))
+        Ok(config_dir()?.join("config.toml"))
     }
 
     /// Load the config from [`Config::path`].
@@ -83,20 +96,27 @@ impl Config {
         Self::parse(&text, &path)
     }
 
-    /// Parse config text; `path` is only used to name the file in errors.
+    /// Parse config text with the real home directory; `path` only names the file in errors.
+    ///
+    /// # Errors
+    /// Invalid TOML or a missing required key, or an unknown home directory.
+    pub fn parse(text: &str, path: &Path) -> Result<Self, ConfigError> {
+        let base = BaseDirs::new().ok_or(ConfigError::NoHome)?;
+        Self::parse_with_home(text, path, base.home_dir())
+    }
+
+    /// Parse config text, expanding `~` to `home`; `path` only names the file in errors.
     ///
     /// # Errors
     /// Invalid TOML or a missing required key.
-    pub fn parse(text: &str, path: &Path) -> Result<Self, ConfigError> {
+    pub fn parse_with_home(text: &str, path: &Path, home: &Path) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(text).map_err(|source| ConfigError::Parse {
             path: path.to_path_buf(),
             source,
         })?;
         let music_root = match raw.music_root {
-            Some(root) => root,
-            None => UserDirs::new()
-                .and_then(|dirs| dirs.audio_dir().map(Path::to_path_buf))
-                .ok_or(ConfigError::NoHome)?,
+            Some(root) => expand_home(&root, home),
+            None => home.join("Music"),
         };
         Ok(Self {
             client_id: raw.client_id,
@@ -134,6 +154,42 @@ mod tests {
         assert_eq!(cfg.download_jobs.get(), 4);
         assert!(cfg.music_root.ends_with("Music"));
         Ok(())
+    }
+
+    #[test]
+    fn default_music_root_is_home_music() -> TestResult {
+        let cfg = Config::parse_with_home(
+            "client_id = \"a\"\ncard_uuid = \"u\"\n",
+            Path::new("/c.toml"),
+            Path::new("/home/me"),
+        )?;
+        assert_eq!(cfg.music_root, PathBuf::from("/home/me/Music"));
+        Ok(())
+    }
+
+    #[test]
+    fn leading_tilde_is_expanded() -> TestResult {
+        let cfg = Config::parse_with_home(
+            "client_id = \"a\"\ncard_uuid = \"u\"\nmusic_root = \"~/Tunes\"\n",
+            Path::new("/c.toml"),
+            Path::new("/home/me"),
+        )?;
+        assert_eq!(cfg.music_root, PathBuf::from("/home/me/Tunes"));
+        Ok(())
+    }
+
+    #[test]
+    fn only_a_leading_tilde_component_is_expanded() {
+        let home = Path::new("/h");
+        assert_eq!(expand_home(Path::new("~"), home), PathBuf::from("/h"));
+        assert_eq!(
+            expand_home(Path::new("~bob/x"), home),
+            PathBuf::from("~bob/x")
+        );
+        assert_eq!(
+            expand_home(Path::new("/a/~/b"), home),
+            PathBuf::from("/a/~/b")
+        );
     }
 
     #[test]

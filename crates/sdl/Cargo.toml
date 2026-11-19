@@ -11,8 +11,12 @@ sdl-spotify.workspace = true
 sdl-youtube.workspace = true
 sdl-library.workspace = true
 ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
-crossterm = { workspace = true, features = ["event-stream"] }
+crossterm = { workspace = true, features = ["event-stream", "bracketed-paste"] }
 tui-input.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
+catppuccin.workspace = true
+throbber-widgets-tui.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "sync", "time"] }
 color-eyre.workspace = true
 futures.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true

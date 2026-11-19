@@ -14,7 +14,10 @@ sdl-youtube = { path = "crates/sdl-youtube" }
 sdl-library = { path = "crates/sdl-library" }
 
 rspotify = "0.16.1"
-yt-dlp = "2.10.0"
+innertube-rs = "0.12.0"
+catppuccin = { version = "2.9.1", features = ["ratatui"] }
+throbber-widgets-tui = "0.11.1"
+httpdate = "1.0.3"
 musicbrainz_rs = { version = "0.14.0", features = ["async", "rate_limit", "rustls"] }
 lofty = "0.25.5"
 ratatui = "0.30.2"

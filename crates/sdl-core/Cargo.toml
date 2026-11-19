@@ -1,6 +1,6 @@
 [package]
 name = "sdl-core"
-description = "Shared types, events, config and path rules for sdl"
+description = "Shared types, events, config, state file and path rules for sdl"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
@@ -12,3 +12,6 @@ thiserror.workspace = true
 directories.workspace = true
 sanitize-filename.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tempfile.workspace = true

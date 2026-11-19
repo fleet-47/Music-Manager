@@ -1,5 +1,7 @@
-//! Path rules: FAT-safe components with leading dots stripped, and the library path builders.
+//! Path rules. Every path component is FAT-safe, has leading dots stripped, is capped so a file
+//! name fits 255 bytes, and falls back to the Spotify or video ID when it would be empty.
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use sanitize_filename::{Options, sanitize_with_options};
@@ -9,10 +11,23 @@ use crate::Track;
 /// List name used for Liked Songs.
 pub const SAVED_TRACKS: &str = "Saved tracks";
 
+/// Name of the temp directory under the music root. A dot name, so card sync never copies it.
+pub const TMP_DIR: &str = ".sdl-tmp";
+
 /// Longest stem that still fits the 255-byte name limit once `.opus` is appended.
 const STEM_MAX: usize = 250;
 
-/// Make one path component FAT-safe and strip leading dots, so no dot-directory can be created.
+/// A name and its ID, for a playlist whose ID is the fallback when the name is unusable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NameId<'a> {
+    /// Display name.
+    pub name: &'a str,
+    /// ID used when the name is empty after sanitising.
+    pub id: &'a str,
+}
+
+/// Make one path component FAT-safe (at most 255 bytes) and strip leading dots, so no
+/// dot-directory can be created. May be empty; see [`component_or`].
 #[must_use]
 pub fn component(name: &str) -> String {
     let safe = sanitize_with_options(
@@ -26,8 +41,19 @@ pub fn component(name: &str) -> String {
     safe.trim_start_matches('.').to_owned()
 }
 
+/// [`component`] of `name`, or of `fallback_id` when that is empty.
+#[must_use]
+pub fn component_or(name: &str, fallback_id: &str) -> String {
+    let safe = component(name);
+    if safe.is_empty() {
+        component(fallback_id)
+    } else {
+        safe
+    }
+}
+
 /// A FAT-safe file stem ([`component`]) cut to fit the 255-byte name limit once `.opus` is
-/// appended.
+/// appended. May be empty; see [`file_stem_or`].
 #[must_use]
 pub fn file_stem(name: &str) -> String {
     let mut stem = component(name);
@@ -37,25 +63,47 @@ pub fn file_stem(name: &str) -> String {
     stem
 }
 
-/// `<music_root>/Spotify/<list name>/<artists> - <title>.opus`
+/// [`file_stem`] of `name`, or of `fallback_id` when that is empty.
+#[must_use]
+pub fn file_stem_or(name: &str, fallback_id: &str) -> String {
+    let stem = file_stem(name);
+    if stem.is_empty() {
+        file_stem(fallback_id)
+    } else {
+        stem
+    }
+}
+
+/// `<music_root>/Spotify/<list name>/<artists> - <title>.opus`. The list component falls back to
+/// the list ID, the file stem to the Spotify track ID.
 #[must_use]
 pub fn spotify_track_path(music_root: &Path, track: &Track) -> PathBuf {
-    let stem = file_stem(&format!("{} - {}", track.artists_joined(), track.title));
+    let stem = file_stem_or(
+        &format!("{} - {}", track.artists_joined(), track.title),
+        &track.spotify_id,
+    );
     music_root
         .join("Spotify")
-        .join(component(&track.list_name))
+        .join(component_or(&track.list_name, &track.list_id))
         .join(format!("{stem}.opus"))
 }
 
-/// `<music_root>/<Site>/`, plus a subfolder named after the playlist for a playlist link.
-/// `site` is yt-dlp's extractor name.
+/// `<music_root>/<Site>/<item>.opus`, with a subfolder named after the playlist for a playlist link.
+/// `site` is yt-dlp's extractor key. An empty name falls back to its ID; the video ID is the
+/// fallback for an empty item stem and for an empty site.
 #[must_use]
-pub fn link_dir(music_root: &Path, site: &str, playlist: Option<&str>) -> PathBuf {
-    let dir = music_root.join(component(site));
-    match playlist {
-        Some(name) => dir.join(component(name)),
-        None => dir,
+pub fn link_item_path(
+    music_root: &Path,
+    site: &str,
+    playlist: Option<NameId<'_>>,
+    title: &str,
+    video_id: &str,
+) -> PathBuf {
+    let mut dir = music_root.join(component_or(site, video_id));
+    if let Some(list) = playlist {
+        dir = dir.join(component_or(list.name, list.id));
     }
+    dir.join(format!("{}.opus", file_stem_or(title, video_id)))
 }
 
 /// `<card>/Music/`, the mirror of the music root on the card.
@@ -64,10 +112,36 @@ pub fn card_music_dir(card_mount: &Path) -> PathBuf {
     card_mount.join("Music")
 }
 
+/// `<music_root>/.sdl-tmp`, on the same volume as the library so the final rename is atomic.
+#[must_use]
+pub fn tmp_dir(music_root: &Path) -> PathBuf {
+    music_root.join(TMP_DIR)
+}
+
+/// Remove [`tmp_dir`] when it is empty. A missing or non-empty directory is not an error.
+///
+/// # Errors
+/// The directory could not be removed for another reason.
+pub fn remove_tmp_dir_if_empty(music_root: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir(tmp_dir(music_root)) {
+        Err(error)
+            if !matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Err(error)
+        }
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn track(list: &str) -> Track {
         Track {
@@ -81,8 +155,9 @@ mod tests {
             isrc: None,
             duration: Duration::from_secs(1),
             cover_url: None,
-            spotify_id: String::new(),
+            spotify_id: "sid".into(),
             list_name: list.into(),
+            list_id: "lid".into(),
         }
     }
 
@@ -101,6 +176,18 @@ mod tests {
     }
 
     #[test]
+    fn component_is_capped_at_255_bytes() {
+        assert!(component(&"é".repeat(300)).len() <= 255);
+    }
+
+    #[test]
+    fn empty_names_fall_back_to_the_id() {
+        assert_eq!(component_or("...", "abc123"), "abc123");
+        assert_eq!(file_stem_or("???", "vid"), "vid");
+        assert_eq!(component_or("ok", "abc123"), "ok");
+    }
+
+    #[test]
     fn spotify_path_layout() {
         let p = spotify_track_path(Path::new("/m"), &track(SAVED_TRACKS));
         assert_eq!(
@@ -116,6 +203,17 @@ mod tests {
     }
 
     #[test]
+    fn spotify_path_falls_back_to_ids() {
+        let mut t = track("...");
+        t.title = "...".into();
+        t.artists = Vec::new();
+        // The stem is " - ..." before sanitising: not empty, so only the list falls back.
+        let p = spotify_track_path(Path::new("/m"), &t);
+        assert_eq!(p.parent(), Some(Path::new("/m/Spotify/lid")));
+        assert_eq!(file_stem_or("..", &t.spotify_id), "sid");
+    }
+
+    #[test]
     fn spotify_file_name_fits_255_bytes() {
         let mut t = track(SAVED_TRACKS);
         t.title = "é".repeat(200);
@@ -126,12 +224,31 @@ mod tests {
     }
 
     #[test]
-    fn link_dir_layout() {
+    fn link_item_layout() {
         let root = Path::new("/m");
-        assert_eq!(link_dir(root, "Youtube", None), PathBuf::from("/m/Youtube"));
         assert_eq!(
-            link_dir(root, "Soundcloud", Some("My: List")),
-            PathBuf::from("/m/Soundcloud/My List")
+            link_item_path(root, "Youtube", None, "Song: 1", "v1"),
+            PathBuf::from("/m/Youtube/Song 1.opus")
+        );
+        let list = NameId {
+            name: "My: List",
+            id: "PL1",
+        };
+        assert_eq!(
+            link_item_path(root, "Soundcloud", Some(list), "S", "v1"),
+            PathBuf::from("/m/Soundcloud/My List/S.opus")
+        );
+    }
+
+    #[test]
+    fn link_item_falls_back_to_ids() {
+        let list = NameId {
+            name: "..",
+            id: "PL1",
+        };
+        assert_eq!(
+            link_item_path(Path::new("/m"), "Youtube", Some(list), "?", "v1"),
+            PathBuf::from("/m/Youtube/PL1/v1.opus")
         );
     }
 
@@ -141,5 +258,20 @@ mod tests {
             card_music_dir(Path::new("/Volumes/X")),
             PathBuf::from("/Volumes/X/Music")
         );
+    }
+
+    #[test]
+    fn tmp_dir_is_removed_only_when_empty() -> TestResult {
+        let root = tempfile::tempdir()?;
+        remove_tmp_dir_if_empty(root.path())?; // missing: fine
+        let file = tmp_dir(root.path()).join("x.opus");
+        std::fs::create_dir_all(tmp_dir(root.path()))?;
+        std::fs::write(&file, b"x")?;
+        remove_tmp_dir_if_empty(root.path())?; // not empty: stays
+        assert!(tmp_dir(root.path()).exists());
+        std::fs::remove_file(&file)?;
+        remove_tmp_dir_if_empty(root.path())?;
+        assert!(!tmp_dir(root.path()).exists());
+        Ok(())
     }
 }

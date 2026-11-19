@@ -29,6 +29,9 @@ pub struct Track {
     pub spotify_id: String,
     /// Name of the list the song came from (`Saved tracks` for Liked Songs).
     pub list_name: String,
+    /// Id of that list ([`crate::event::LIKED_SONGS_ID`] for Liked Songs); the path fallback when
+    /// the name is empty after sanitising.
+    pub list_id: String,
 }
 
 impl Track {
@@ -36,12 +39,5 @@ impl Track {
     #[must_use]
     pub fn artists_joined(&self) -> String {
         self.artists.join(", ")
-    }
-
-    /// Row key for [`crate::Event::Song`]: `<list name>/<spotify id>`. The same song can be in
-    /// several lists, so the id alone is not unique.
-    #[must_use]
-    pub fn key(&self) -> String {
-        format!("{}/{}", self.list_name, self.spotify_id)
     }
 }

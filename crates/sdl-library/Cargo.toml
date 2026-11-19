@@ -1,6 +1,6 @@
 [package]
 name = "sdl-library"
-description = "Genre lookup, tagging and Snowsky card sync for sdl"
+description = "MusicBrainz lookup, tags and Snowsky card sync for sdl"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
@@ -12,7 +12,8 @@ lofty.workspace = true
 reqwest.workspace = true
 walkdir.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "rt", "sync"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
