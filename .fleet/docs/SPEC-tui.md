@@ -61,6 +61,5 @@ per-song pipeline with bounded concurrency). Library crates do not depend on eac
 - Tests cover pure logic only (matching, path rules, config parsing). No invented API fixtures.
 
 ## mise
-`.mise/config.toml` gains one task, `tui`, that runs the built binary with mise's yt-dlp, ffmpeg and
-deno on `PATH`. The existing tasks, `.fnox.toml` and the other tools stay untouched until the first
-live run has passed.
+`.mise/config.toml` holds the tools (yt-dlp, ffmpeg, deno) and one task, `tui`, that runs the built
+binary with them on `PATH`.
