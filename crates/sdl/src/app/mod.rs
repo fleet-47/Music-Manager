@@ -112,6 +112,9 @@ pub struct App {
     pub ended: Vec<TaskId>,
     /// Spinner step, advanced on each [`Msg::Wake`]; every spinner on screen shows this frame.
     pub spin: usize,
+    /// The devices Sync device last offered, so the eject question can name the one that was
+    /// synced (`state.last_device`) after the run.
+    pub devices: Vec<sdl_core::Device>,
     /// Set when the app should leave the loop.
     pub quit: bool,
 }
@@ -132,6 +135,7 @@ impl App {
             hits: Hits::default(),
             ended: Vec::new(),
             spin: 0,
+            devices: Vec::new(),
             quit: false,
         }
     }

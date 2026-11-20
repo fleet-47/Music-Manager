@@ -3,23 +3,20 @@
 //!
 //! Modules: [`tags`] (F6), [`playlists`] (F7), [`converter`] and [`convert`] (F9). Devices (F10)
 //! are the `sdl-devices` crate, which uses this crate's converter and playlist writer.
-//!
-//! Bodies marked "not built yet" return [`LibraryError::NotBuilt`]; their doc comments are the
-//! contract.
 
 pub mod convert;
 pub mod converter;
 pub mod playlists;
 pub mod tags;
 
+#[cfg(test)]
+mod testkit;
+
 use std::path::PathBuf;
 
 /// Errors from the library crate. Messages are plain words fit for the error popup.
 #[derive(Debug, thiserror::Error)]
 pub enum LibraryError {
-    /// This part of the contract has a signature but no body yet.
-    #[error("{0} is not built yet")]
-    NotBuilt(&'static str),
     /// `MusicBrainz` request failed.
     #[error("MusicBrainz lookup failed: {0}")]
     MusicBrainz(String),

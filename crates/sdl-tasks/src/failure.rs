@@ -24,10 +24,7 @@ pub(crate) fn error_info(error: &TaskError) -> ErrorInfo {
         "Check that the folder named above exists and has free space, then try again.";
     const NOT_BUILT: &str = "This part of sdl is still being built.";
     let advice = match error {
-        TaskError::NotBuilt(_)
-        | TaskError::Youtube(YoutubeError::NotBuilt(_))
-        | TaskError::Library(LibraryError::NotBuilt(_))
-        | TaskError::Devices(DevicesError::NotBuilt(_)) => NOT_BUILT,
+        TaskError::NotBuilt(_) => NOT_BUILT,
         TaskError::Youtube(YoutubeError::YtDlpNotFound)
         | TaskError::Library(LibraryError::FfmpegNotFound)
         | TaskError::Devices(DevicesError::Library(LibraryError::FfmpegNotFound)) => {

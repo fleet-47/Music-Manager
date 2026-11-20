@@ -74,8 +74,11 @@ pub(crate) fn load_or_default<T: DeserializeOwned + Default>(path: &Path) -> Res
     }
 }
 
-/// Write `value` to `path` as TOML, creating its directory if needed.
+/// Write `value` to `path` as TOML, atomically (F11): the text goes to a temp file in the same
+/// folder (`tempfile`), which is then renamed over `path` (`persist`). A crash leaves either the
+/// old file or the new one, never half of either. Creates the folder if needed.
 pub(crate) fn save<T: Serialize>(value: &T, path: &Path) -> Result<(), StoreError> {
+    use std::io::Write;
     let text = toml::to_string_pretty(value).map_err(|source| StoreError::Encode {
         path: path.to_path_buf(),
         source,
@@ -84,10 +87,16 @@ pub(crate) fn save<T: Serialize>(value: &T, path: &Path) -> Result<(), StoreErro
         path: path.to_path_buf(),
         source,
     };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(write)?;
-    }
-    std::fs::write(path, text).map_err(write)
+    let folder = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(folder).map_err(write)?;
+    let mut temp = tempfile::NamedTempFile::new_in(folder).map_err(write)?;
+    temp.write_all(text.as_bytes()).map_err(write)?;
+    temp.as_file().sync_all().map_err(write)?;
+    temp.persist(path).map_err(|failure| write(failure.error))?;
+    Ok(())
 }
 
 /// A `Option<Duration>` stored as whole seconds (TOML has no duration type). Sub-second parts are
@@ -112,5 +121,26 @@ pub(crate) mod opt_secs {
         deserializer: D,
     ) -> Result<Option<Duration>, D::Error> {
         Ok(Option::<u64>::deserialize(deserializer)?.map(Duration::from_secs))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn a_save_replaces_the_file_whole_and_leaves_no_temp_file() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("state.toml");
+        std::fs::write(&path, "old = 1\n")?;
+        save(&std::collections::BTreeMap::from([("new", 2)]), &path)?;
+        assert_eq!(std::fs::read_to_string(&path)?, "new = 2\n");
+        let names: Vec<_> = std::fs::read_dir(dir.path())?
+            .map(|entry| entry.map(|e| e.file_name()))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(names, ["state.toml"]);
+        Ok(())
     }
 }

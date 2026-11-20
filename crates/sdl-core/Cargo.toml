@@ -12,6 +12,4 @@ thiserror.workspace = true
 directories.workspace = true
 sanitize-filename.workspace = true
 tokio = { workspace = true, features = ["sync"] }
-
-[dev-dependencies]
 tempfile.workspace = true

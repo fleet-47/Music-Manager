@@ -12,6 +12,7 @@
 //!
 //! No per-song call is made: track, artist and album endpoints are never called.
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use futures::TryStreamExt;
@@ -23,10 +24,11 @@ use rspotify::model::{FullTrack, PlayableItem, PlaylistId};
 use rspotify::prelude::Id;
 use rspotify::scopes;
 use rspotify::{AuthCodePkceSpotify, ClientError, ClientResult};
-use rspotify::{Config, Credentials, OAuth};
+use rspotify::{CallbackError, Config, Credentials, OAuth, TokenCallback};
 use sdl_core::event::{LIKED_SONGS_ID, LIKED_SONGS_NAME};
 
 mod keychain;
+use keychain::{Keychain, TokenStore};
 use sdl_core::{EventKind, EventSender, ListChoice, SignInState, SongSource, WantedSong};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -171,18 +173,28 @@ pub struct SignedIn {
 }
 
 /// Sign in without the browser (F4): read the refresh token from the macOS Keychain (service
-/// `sdl`, account `spotify`), exchange it with rspotify's refresh call, and keep the new refresh
-/// token Spotify returns in its place (when the response carries none, the stored one is kept,
-/// both in the Keychain and in the in-memory token so later automatic refreshes still work).
+/// `sdl`, account `spotify`) and exchange it with rspotify's refresh call. The new refresh token
+/// Spotify returns replaces the stored one (the client's token callback writes it); when the
+/// response carries none, the stored one stays in the Keychain and in the in-memory token so a
+/// later automatic refresh still works.
 ///
-/// Never starts the browser and never opens the sign-in listener. Not tested against the real
-/// Keychain or Spotify by the contract engineer (hard limit); only compiled.
+/// Never starts the browser and never opens the sign-in listener.
 ///
 /// # Errors
 /// An API or network failure that is not a refusal ([`SpotifyError::Api`]). A refusal (HTTP 400 or
 /// 401 from the token call) is `Ok` with no session.
 pub async fn resume(client_id: &str) -> Result<Resumed, SpotifyError> {
-    let stored = match blocking_keychain(keychain::read).await {
+    resume_with(Arc::new(Keychain), client_id).await
+}
+
+/// [`resume`] over any [`TokenStore`].
+async fn resume_with(store: Arc<dyn TokenStore>, client_id: &str) -> Result<Resumed, SpotifyError> {
+    let reader = Arc::clone(&store);
+    let stored = match tokio::task::spawn_blocking(move || reader.read())
+        .await
+        .map_err(|error| format!("the Keychain call did not finish: {error}"))
+        .and_then(|read| read)
+    {
         Ok(Some(token)) => token,
         Ok(None) => {
             return Ok(Resumed {
@@ -197,7 +209,7 @@ pub async fn resume(client_id: &str) -> Result<Resumed, SpotifyError> {
             });
         }
     };
-    let client = new_client(client_id);
+    let (client, problem) = new_client(client_id, store);
     set_token(
         &client,
         Token {
@@ -216,21 +228,20 @@ pub async fn resume(client_id: &str) -> Result<Resumed, SpotifyError> {
         }
         Err(error) => return Err(classify(error).await),
     }
-    let kept = keep_refresh_token(&client, &stored).await?;
-    let keychain_problem = remember(kept).await;
+    keep_refresh_token(&client, &stored).await?;
     Ok(Resumed {
         session: Some(Session { client }),
-        keychain_problem,
+        keychain_problem: take_problem(&problem),
     })
 }
 
 /// Sign in with the browser (F4): authorize URL opened with `open`, code received on our own
-/// `tokio::net::TcpListener` at `127.0.0.1:9900`, then `request_token`, then the refresh token is
-/// stored in the Keychain. Sends `SignIn(WaitingForBrowser)` on `events` once the browser is
-/// open. The listener is dropped on every way out (success, failure, and the task being aborted),
-/// so the port is always freed. The caller asks "Sync Spotify opens your browser" first (it sends
-/// `SignIn(NeedsBrowser)` and waits for `Go`), and sends `SignIn(SignedIn)` after either way of
-/// signing in.
+/// `tokio::net::TcpListener` at `127.0.0.1:9900`, then `request_token`; the refresh token is
+/// stored in the Keychain by the client's token callback. Sends `SignIn(WaitingForBrowser)` on
+/// `events` once the browser is open. The listener is dropped on every way out (success, failure,
+/// and the task being aborted), so the port is always freed. The caller asks "Sync Spotify opens
+/// your browser" first (it sends `SignIn(NeedsBrowser)` and waits for `Go`), and sends
+/// `SignIn(SignedIn)` after either way of signing in.
 ///
 /// # Errors
 /// Sign-in failed. The caller ends the task with it, which is the one message the owner sees.
@@ -238,19 +249,48 @@ pub async fn sign_in_browser(
     client_id: &str,
     events: &EventSender,
 ) -> Result<SignedIn, SpotifyError> {
-    let client = authorize(client_id, events).await?;
-    let keychain_problem = match client_refresh_token(&client).await {
-        Some(token) => remember(token).await,
-        None => None,
-    };
+    sign_in_with(Arc::new(Keychain), client_id, events).await
+}
+
+async fn sign_in_with(
+    store: Arc<dyn TokenStore>,
+    client_id: &str,
+    events: &EventSender,
+) -> Result<SignedIn, SpotifyError> {
+    let (client, problem) = authorize(store, client_id, events).await?;
     Ok(SignedIn {
         session: Session { client },
-        keychain_problem,
+        keychain_problem: take_problem(&problem),
     })
 }
 
-/// A PKCE client with the scopes and redirect, holding no token yet.
-fn new_client(client_id: &str) -> AuthCodePkceSpotify {
+/// The first reason a Keychain write failed, kept for the caller to show once.
+type Problem = Arc<Mutex<Option<String>>>;
+
+fn take_problem(problem: &Problem) -> Option<String> {
+    problem.lock().ok()?.take()
+}
+
+/// Remember the refresh token of every token rspotify obtains (sign-in, the refresh at start and
+/// each automatic refresh later), so the stored token is rotated after every refresh. A response
+/// with no refresh token leaves the stored one alone. A failed write never fails the call: the
+/// first reason is kept in `problem`.
+fn rotate(store: &dyn TokenStore, problem: &Problem, token: &Token) {
+    let Some(refresh) = token.refresh_token.as_deref() else {
+        return;
+    };
+    if let Err(reason) = store.write(refresh)
+        && let Ok(mut slot) = problem.lock()
+    {
+        slot.get_or_insert(reason);
+    }
+}
+
+/// A PKCE client with the scopes and redirect, holding no token yet, and the slot where a
+/// failed Keychain write is recorded. Its token callback rotates the stored refresh token.
+fn new_client(client_id: &str, store: Arc<dyn TokenStore>) -> (AuthCodePkceSpotify, Problem) {
+    let problem: Problem = Arc::default();
+    let seen = Arc::clone(&problem);
     let oauth = OAuth {
         redirect_uri: REDIRECT_URI.to_owned(),
         scopes: scopes!(SCOPES),
@@ -258,9 +298,18 @@ fn new_client(client_id: &str) -> AuthCodePkceSpotify {
     };
     let config = Config {
         token_cached: false,
+        token_callback_fn: Arc::new(Some(TokenCallback(Box::new(
+            move |token| -> Result<(), CallbackError> {
+                rotate(store.as_ref(), &seen, &token);
+                Ok(())
+            },
+        )))),
         ..Config::default()
     };
-    AuthCodePkceSpotify::with_config(Credentials::new_pkce(client_id), oauth, config)
+    (
+        AuthCodePkceSpotify::with_config(Credentials::new_pkce(client_id), oauth, config),
+        problem,
+    )
 }
 
 /// Replace the client's in-memory token.
@@ -273,19 +322,12 @@ async fn set_token(client: &AuthCodePkceSpotify, token: Token) -> Result<(), Spo
     Ok(())
 }
 
-/// The client's current refresh token, if it has one.
-async fn client_refresh_token(client: &AuthCodePkceSpotify) -> Option<String> {
-    let token_slot = client.get_token();
-    let guard = token_slot.lock().await.ok()?;
-    guard.as_ref()?.refresh_token.clone()
-}
-
 /// After a refresh: make sure the in-memory token still carries a refresh token (Spotify may omit
-/// it, and rspotify would then fail its next refresh) and return the one to remember.
+/// it, and rspotify would then fail its next refresh).
 async fn keep_refresh_token(
     client: &AuthCodePkceSpotify,
     stored: &str,
-) -> Result<String, SpotifyError> {
+) -> Result<(), SpotifyError> {
     let token_slot = client.get_token();
     let Ok(mut guard) = token_slot.lock().await else {
         return Err(SpotifyError::Api(ClientError::InvalidToken));
@@ -293,11 +335,8 @@ async fn keep_refresh_token(
     let token = guard
         .as_mut()
         .ok_or(SpotifyError::Api(ClientError::InvalidToken))?;
-    let kept = token
-        .refresh_token
-        .get_or_insert_with(|| stored.to_owned())
-        .clone();
-    Ok(kept)
+    token.refresh_token.get_or_insert_with(|| stored.to_owned());
+    Ok(())
 }
 
 /// Whether a failed token call means Spotify refused the stored refresh token (HTTP 400 or 401).
@@ -311,28 +350,13 @@ fn is_refusal(error: &ClientError) -> bool {
     )
 }
 
-/// Write the refresh token to the Keychain; the plain reason when that fails.
-async fn remember(token: String) -> Option<String> {
-    blocking_keychain(move || keychain::write(&token))
-        .await
-        .err()
-}
-
-/// Run a Keychain call off the async threads; a task that failed to run is a plain reason.
-async fn blocking_keychain<T: Send + 'static>(
-    call: impl FnOnce() -> Result<T, String> + Send + 'static,
-) -> Result<T, String> {
-    tokio::task::spawn_blocking(call)
-        .await
-        .map_err(|error| format!("the Keychain call did not finish: {error}"))?
-}
-
 /// The PKCE flow: authorize URL, browser, code on the listener, token.
 async fn authorize(
+    store: Arc<dyn TokenStore>,
     client_id: &str,
     events: &EventSender,
-) -> Result<AuthCodePkceSpotify, SpotifyError> {
-    let mut client = new_client(client_id);
+) -> Result<(AuthCodePkceSpotify, Problem), SpotifyError> {
+    let (mut client, problem) = new_client(client_id, store);
     let url = client.get_authorize_url(None).map_err(SpotifyError::Api)?;
     let listener = TcpListener::bind(LISTEN_ADDR)
         .await
@@ -342,7 +366,7 @@ async fn authorize(
     let code = wait_for_code(&listener, &client).await?;
     drop(listener);
     api(client.request_token(&code)).await?;
-    Ok(client)
+    Ok((client, problem))
 }
 
 /// Accept connections until one carries a request with `code=` that rspotify's
@@ -569,6 +593,118 @@ pub async fn list_songs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// An in-memory stand-in for the Keychain: never touches the real one.
+    #[derive(Default)]
+    struct Memory {
+        token: Mutex<Option<String>>,
+        read_fails: bool,
+        write_fails: bool,
+    }
+
+    impl Memory {
+        fn holding(token: &str) -> Self {
+            Self {
+                token: Mutex::new(Some(token.to_owned())),
+                ..Self::default()
+            }
+        }
+
+        fn kept(&self) -> Option<String> {
+            self.token.lock().ok()?.clone()
+        }
+    }
+
+    impl TokenStore for Memory {
+        fn read(&self) -> Result<Option<String>, String> {
+            if self.read_fails {
+                return Err("cannot read".to_owned());
+            }
+            Ok(self.kept())
+        }
+
+        fn write(&self, token: &str) -> Result<(), String> {
+            if self.write_fails {
+                return Err("cannot save".to_owned());
+            }
+            *self.token.lock().map_err(|_| "poisoned".to_owned())? = Some(token.to_owned());
+            Ok(())
+        }
+    }
+
+    fn token(refresh: Option<&str>) -> Token {
+        Token {
+            refresh_token: refresh.map(str::to_owned),
+            ..Token::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn no_stored_token_asks_for_the_browser_without_a_problem() -> TestResult {
+        let resumed = resume_with(Arc::new(Memory::default()), "client").await?;
+        assert!(resumed.session.is_none());
+        assert_eq!(resumed.keychain_problem, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_keychain_read_failure_asks_for_the_browser_and_says_why() -> TestResult {
+        let store = Memory {
+            read_fails: true,
+            ..Memory::default()
+        };
+        let resumed = resume_with(Arc::new(store), "client").await?;
+        assert!(resumed.session.is_none());
+        assert_eq!(resumed.keychain_problem.as_deref(), Some("cannot read"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_refresh_replaces_the_stored_token() {
+        let store = Memory::holding("old");
+        let problem = Problem::default();
+        rotate(&store, &problem, &token(Some("new")));
+        assert_eq!(store.kept().as_deref(), Some("new"));
+        assert_eq!(take_problem(&problem), None);
+    }
+
+    #[test]
+    fn a_refresh_without_a_token_keeps_the_stored_one() {
+        let store = Memory::holding("old");
+        let problem = Problem::default();
+        rotate(&store, &problem, &token(None));
+        assert_eq!(store.kept().as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn a_failed_save_is_remembered_once_and_does_not_fail() {
+        let store = Memory {
+            write_fails: true,
+            ..Memory::default()
+        };
+        let problem = Problem::default();
+        rotate(&store, &problem, &token(Some("a")));
+        rotate(&store, &problem, &token(Some("b")));
+        assert_eq!(take_problem(&problem).as_deref(), Some("cannot save"));
+        assert_eq!(take_problem(&problem), None);
+    }
+
+    #[test]
+    fn the_client_rotates_the_token_on_every_new_token() -> TestResult {
+        let store = Arc::new(Memory::holding("old"));
+        let (client, _problem) = new_client("client", store.clone());
+        let callback = client
+            .get_config()
+            .token_callback_fn
+            .as_ref()
+            .as_ref()
+            .ok_or("no token callback")?;
+        (callback.0)(token(Some("rotated")))?;
+        assert_eq!(store.kept().as_deref(), Some("rotated"));
+        Ok(())
+    }
 
     #[test]
     fn retry_after_seconds() {

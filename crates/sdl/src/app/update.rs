@@ -1,44 +1,29 @@
 //! `App::update`: the one place a [`Msg`] changes the app and asks for [`Cmd`]s.
 //!
-//! First pass, enough for the main screen: selecting, opening a function's dialog, closing
-//! popups, folding task events, errors, quit. The screen engineer completes it:
-//!
-//! * **Keys** (every key is also on the help popup; keep `screen::keys` the one table): Up, Down,
-//!   `j`, `k` select; Enter runs the selected function (opens its dialog) unless it is running;
-//!   `s` asks `Confirm::Stop` for a running function; `a` opens the attention list of the
-//!   selected function (the current run's items while it runs, otherwise the saved last run's);
-//!   `?` opens help; `q` and Ctrl-C quit: with a function running, `Confirm::Quit` first, then
-//!   `Stop` for every running one, `Discard` for every one still at its form, then `Quit`. Esc
-//!   closes the top popup (a dialog sends `Cancel` through its own reaction; a `Waiting::Browser`
-//!   sends `Cancel`).
-//! * **Task events** (`Msg::Task`): fold into the view, route to the function's dialog, flash the
-//!   row when a run ended ([`App::ended`]). `SignIn(NeedsBrowser)` pushes `Confirm::Browser` (Yes
-//!   sends `Go`, No sends `Cancel` and closes the dialog); `SignIn(WaitingForBrowser)` pushes
-//!   `Waiting::Browser`; `SignIn(SignedIn)` pops it; `SignIn(KeychainProblem)` shows its reason
-//!   once as an error popup that does not end the task. `Error` closes the function's dialog and
-//!   pushes `Popup::Error`; `RateLimited` does the same with the wait from `Retry-After` ("Spotify
-//!   asks you to wait about 5 minutes", or "wait unknown"). `Finished` of Sync device pushes
-//!   `Confirm::Eject` naming the device (its clean-up also empties the device's Trash); Yes
-//!   sends `Cmd::Eject` and shows `Waiting::Eject` until `Msg::Ejected`.
-//! * **Mouse**: tested against [`App::hits`], topmost first: a popup's own targets (`Hits::popup`
-//!   or, for a dialog, `Dialog::mouse` with `Hits::form`), else the main screen's (`Hits::main`:
-//!   a click selects a row, a second click runs it); the wheel scrolls a list under it. A click
-//!   outside a popup does nothing. Every mouse action has a key.
-//! * **Wake**: advance the spinner of the top dialog's form ([`sdl_form::Form::tick`]).
-//! * **Plain popups** (`screen::popups`): `y`/Enter answers Yes and `n` No on a confirmation; Esc
-//!   and `q` close the rest. `Waiting::Browser`'s Cancel (button or Esc) sends `Cancel` and closes
-//!   the Sync Spotify dialog under it. Help and the attention list scroll with Up, Down, Page Up,
-//!   Page Down, Home, End and the wheel, and have a `Close` button like every popup except
-//!   `Waiting::Eject`, so a mouse-only walk can always leave. Attention reasons wrap to the popup
-//!   width (`Paragraph` with `Wrap`; the scroll length is the wrapped line count).
-//! * **Effects**: a popup opening fades in, the running panel slides in when the first task
-//!   starts, and each row in [`App::take_ended`] flashes once; none when `App::animations` is off.
+//! * **Keys** (the table is `screen::keys`, which the footer and the help read): Up, Down, `j`,
+//!   `k` choose a function; Enter runs the chosen one (opens its dialog) unless it is open; `s`
+//!   asks to stop a running one; `a` opens the attention list; `?` opens help; `q` and Ctrl-C
+//!   quit, asking first while a function runs. A popup on top takes every key.
+//! * **Task events** fold into the function's view and go to its dialog. The ending events
+//!   (`Finished`, `Stopped`, `Error`, `RateLimited`) close the dialog and are the app's own: an
+//!   error or a rate limit becomes an error popup, a finished device sync asks to eject, and
+//!   Spotify's sign-in events become the browser question and the waiting popup.
+//! * **Mouse** is tested against the rectangles the last frame drew ([`App::hits`]); see
+//!   `update/mouse.rs`. **Plain popups** (questions, errors, help, the attention list) are in
+//!   `update/popups.rs`.
+
+mod mouse;
+mod popups;
+
+use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use sdl_core::{EventKind, TaskId};
+use sdl_core::{ErrorInfo, EventKind, SignInState, TaskId};
+use sdl_tasks::Command;
 
-use super::{App, Clock, Cmd, Confirm, Msg, Popup};
+use super::{App, Clock, Cmd, Confirm, FunctionView, Msg, Phase, Popup, Waiting};
 use crate::dialogs::{Dialog, Step};
+use crate::fmt::duration_text;
 
 impl App {
     /// Apply one message at time `clock`; the commands are for the loop to run, in order.
@@ -56,10 +41,10 @@ impl App {
             Msg::Task(event) => self.on_task(event.task, &event.kind),
             Msg::Key(key) => self.on_key(key),
             Msg::Paste(text) => self.on_paste(&text),
-            Msg::Mouse(_) => Vec::new(),
+            Msg::Mouse(event) => self.on_mouse(event),
             Msg::Ejected(result) => {
                 self.popups
-                    .retain(|popup| !matches!(popup, Popup::Waiting(_)));
+                    .retain(|popup| !matches!(popup, Popup::Waiting(Waiting::Eject(_))));
                 if let Err(info) = result {
                     self.popups.push(Popup::Error(info));
                 }
@@ -77,16 +62,43 @@ impl App {
 
     fn on_task(&mut self, task: TaskId, kind: &EventKind) -> Vec<Cmd> {
         let now = self.clock.instant;
-        let ended = self
+        if self
             .view_mut(task)
-            .is_some_and(|view| view.apply(kind, now));
-        if ended {
+            .is_some_and(|view| view.apply(kind, now))
+        {
             self.ended.push(task);
         }
-        if let EventKind::Error(info) = kind {
-            self.close_dialog(task);
-            self.popups.push(Popup::Error(info.clone()));
-            return Vec::new();
+        match kind {
+            EventKind::Error(info) => {
+                self.finish(task);
+                self.popups.push(Popup::Error(info.clone()));
+                return Vec::new();
+            }
+            EventKind::RateLimited { wait } => {
+                self.finish(task);
+                self.popups.push(Popup::Error(rate_limit(*wait)));
+                return Vec::new();
+            }
+            EventKind::Finished => {
+                self.finish(task);
+                if task == TaskId::SyncDevice {
+                    let device = self.synced_device();
+                    self.popups.push(Popup::Confirm(Confirm::Eject { device }));
+                }
+                return Vec::new();
+            }
+            EventKind::Stopped => {
+                self.finish(task);
+                return Vec::new();
+            }
+            EventKind::Devices(devices) => self.devices.clone_from(devices),
+            EventKind::SignIn(state) => {
+                let app_only = self.on_sign_in(state);
+                if app_only {
+                    return Vec::new();
+                }
+            }
+            _ => {}
         }
         let settings = &self.settings;
         let mut commands = Vec::new();
@@ -110,6 +122,51 @@ impl App {
         commands
     }
 
+    /// A sign-in event; `true` when it was the app's alone (the dialog does not see it).
+    fn on_sign_in(&mut self, state: &SignInState) -> bool {
+        match state {
+            SignInState::NeedsBrowser => {
+                self.drop_browser_popups();
+                self.popups.push(Popup::Confirm(Confirm::Browser));
+                true
+            }
+            SignInState::WaitingForBrowser => {
+                self.drop_browser_popups();
+                self.popups.push(Popup::Waiting(Waiting::Browser));
+                true
+            }
+            SignInState::SignedIn => {
+                self.drop_browser_popups();
+                false
+            }
+            SignInState::KeychainProblem(reason) => {
+                self.popups.push(Popup::Error(ErrorInfo {
+                    message: reason.clone(),
+                    advice: "The sync goes on. You may be asked to sign in again next time."
+                        .to_owned(),
+                }));
+                true
+            }
+        }
+    }
+
+    fn drop_browser_popups(&mut self) {
+        self.popups.retain(|popup| {
+            !matches!(
+                popup,
+                Popup::Confirm(Confirm::Browser) | Popup::Waiting(Waiting::Browser)
+            )
+        });
+    }
+
+    /// The function's run is over: its dialog and its sign-in popups have nothing left to say.
+    fn finish(&mut self, task: TaskId) {
+        self.close_dialog(task);
+        if task == TaskId::SyncSpotify {
+            self.drop_browser_popups();
+        }
+    }
+
     fn close_dialog(&mut self, task: TaskId) {
         self.popups.retain(|popup| match popup {
             Popup::Dialog(dialog) => dialog.task() != task,
@@ -117,18 +174,42 @@ impl App {
         });
     }
 
+    /// What a dialog's answer means for the app: stay, or close it, with its commands.
+    fn apply_step(&mut self, task: TaskId, step: Step) -> Vec<Cmd> {
+        match step {
+            Step::Stay(commands) => commands,
+            Step::Close(commands) => {
+                self.close_dialog(task);
+                commands
+            }
+        }
+    }
+
+    /// The name of the device the last Sync device run wrote to, for the eject question.
+    fn synced_device(&self) -> String {
+        self.settings
+            .state
+            .last_device
+            .as_deref()
+            .and_then(|id| self.devices.iter().find(|device| device.id() == id))
+            .map_or_else(|| "the device".to_owned(), |device| device.name.clone())
+    }
+
     fn on_paste(&mut self, text: &str) -> Vec<Cmd> {
         let settings = &self.settings;
-        match self.popups.last_mut() {
-            Some(Popup::Dialog(dialog)) => match dialog.paste(text, settings) {
-                Step::Stay(commands) | Step::Close(commands) => commands,
-            },
-            _ => Vec::new(),
-        }
+        let step = match self.popups.last_mut() {
+            Some(Popup::Dialog(dialog)) => Some((dialog.task(), dialog.paste(text, settings))),
+            _ => None,
+        };
+        step.map_or_else(Vec::new, |(task, step)| self.apply_step(task, step))
     }
 
     fn on_key(&mut self, key: KeyEvent) -> Vec<Cmd> {
         if key.kind == KeyEventKind::Release {
+            return Vec::new();
+        }
+        // Ejecting ends by itself; leaving now could cut the clean-up short.
+        if matches!(self.top(), Some(Popup::Waiting(Waiting::Eject(_)))) {
             return Vec::new();
         }
         let control_c =
@@ -136,26 +217,12 @@ impl App {
         if control_c {
             return self.quit();
         }
-        match self.popups.last_mut() {
-            Some(Popup::Dialog(dialog)) => {
-                let task = dialog.task();
-                let step = dialog.key(key, &self.settings);
-                match step {
-                    Step::Stay(commands) => commands,
-                    Step::Close(commands) => {
-                        self.close_dialog(task);
-                        commands
-                    }
-                }
-            }
-            Some(_) => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
-                    self.popups.pop();
-                }
-                Vec::new()
-            }
-            None => self.on_main_key(key),
-        }
+        let step = match self.popups.last_mut() {
+            Some(Popup::Dialog(dialog)) => Some((dialog.task(), dialog.key(key, &self.settings))),
+            Some(_) => return self.on_popup_key(key),
+            None => return self.on_main_key(key),
+        };
+        step.map_or_else(Vec::new, |(task, step)| self.apply_step(task, step))
     }
 
     fn on_main_key(&mut self, key: KeyEvent) -> Vec<Cmd> {
@@ -165,14 +232,28 @@ impl App {
                 self.popups.push(Popup::Help { scroll: 0 });
                 Vec::new()
             }
-            KeyCode::Up | KeyCode::Char('k') => self.select(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.select(1),
+            KeyCode::Char('a') => {
+                self.popups.push(Popup::Attention {
+                    task: self.selected,
+                    scroll: 0,
+                });
+                Vec::new()
+            }
+            KeyCode::Char('s') => {
+                let task = self.selected;
+                if self.view(task).is_some_and(FunctionView::is_running) {
+                    self.popups.push(Popup::Confirm(Confirm::Stop(task)));
+                }
+                Vec::new()
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.select_by(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.select_by(1),
             KeyCode::Enter => self.run_selected(),
             _ => Vec::new(),
         }
     }
 
-    fn select(&mut self, step: isize) -> Vec<Cmd> {
+    fn select_by(&mut self, step: isize) -> Vec<Cmd> {
         let at = TaskId::ALL
             .iter()
             .position(|task| *task == self.selected)
@@ -187,7 +268,7 @@ impl App {
 
     fn run_selected(&mut self) -> Vec<Cmd> {
         let task = self.selected;
-        if self.view(task).is_none_or(super::FunctionView::is_open) {
+        if self.view(task).is_none_or(FunctionView::is_open) {
             return Vec::new();
         }
         if let Some(view) = self.view_mut(task) {
@@ -198,7 +279,7 @@ impl App {
         commands
     }
 
-    /// Quit now when nothing runs; otherwise ask first.
+    /// Ask the owner to quit while a function runs; otherwise quit now.
     fn quit(&mut self) -> Vec<Cmd> {
         if self.shows_running_panel() {
             if !matches!(self.top(), Some(Popup::Confirm(Confirm::Quit))) {
@@ -206,14 +287,46 @@ impl App {
             }
             return Vec::new();
         }
+        self.quit_now()
+    }
+
+    /// Stop what runs, end what only waits at its form, and leave the loop.
+    fn quit_now(&mut self) -> Vec<Cmd> {
         self.quit = true;
-        let mut commands: Vec<Cmd> = TaskId::ALL
-            .into_iter()
-            .filter(|task| self.view(*task).is_some_and(super::FunctionView::is_open))
-            .map(Cmd::Discard)
+        let mut commands: Vec<Cmd> = self
+            .views
+            .iter()
+            .filter_map(|view| match view.phase {
+                Phase::Running => Some(Cmd::Stop(view.task)),
+                Phase::AtForm => Some(Cmd::Discard(view.task)),
+                Phase::Idle => None,
+            })
             .collect();
         commands.push(Cmd::Quit);
         commands
+    }
+
+    /// The owner left the sign-in: the task is told, and the form that waited for it goes.
+    fn cancel_sign_in(&mut self) -> Vec<Cmd> {
+        self.close_dialog(TaskId::SyncSpotify);
+        vec![Cmd::Send(TaskId::SyncSpotify, Command::Cancel)]
+    }
+}
+
+/// What the error popup says for a Spotify 429 (F4): the wait from `Retry-After`, or that it is
+/// not known.
+fn rate_limit(wait: Option<Duration>) -> ErrorInfo {
+    let advice = match wait {
+        Some(wait) => format!(
+            "Spotify asks you to wait {}. Then run Sync Spotify again; what is finished stays.",
+            duration_text(wait)
+        ),
+        None => "Spotify did not say how long to wait. Try again later; what is finished stays."
+            .to_owned(),
+    };
+    ErrorInfo {
+        message: "Spotify is limiting requests, so the sync stopped.".to_owned(),
+        advice,
     }
 }
 
@@ -223,29 +336,41 @@ mod tests {
 
     use crossterm::event::KeyEventState;
     use ratatui::layout::Size;
-    use sdl_core::Event;
+    use sdl_core::{Device, Event};
 
     use super::*;
     use crate::app::Settings;
 
-    fn clock() -> Clock {
+    pub(super) fn clock() -> Clock {
         Clock {
             instant: Instant::now(),
             epoch: 0,
         }
     }
 
-    fn app() -> App {
+    pub(super) fn app() -> App {
         App::new(Settings::default(), true, Size::new(100, 30), clock())
     }
 
-    fn key(code: KeyCode) -> Msg {
+    pub(super) fn key(code: KeyCode) -> Msg {
         Msg::Key(KeyEvent {
             code,
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         })
+    }
+
+    pub(super) fn task(app: &mut App, task: TaskId, kind: EventKind) -> Vec<Cmd> {
+        app.update(Msg::Task(Event { task, kind }), clock())
+    }
+
+    /// A function that runs, with no dialog.
+    pub(super) fn running(app: &mut App, id: TaskId) {
+        if let Some(view) = app.view_mut(id) {
+            view.begin();
+        }
+        let _ = task(app, id, EventKind::Started);
     }
 
     #[test]
@@ -257,47 +382,252 @@ mod tests {
     }
 
     #[test]
-    fn q_while_a_function_runs_asks_first() {
+    fn q_while_a_function_runs_asks_first_and_yes_stops_it_and_quits() {
         let mut app = app();
-        let now = clock();
-        let started = Event {
-            task: TaskId::Convert,
-            kind: EventKind::Started,
-        };
-        if let Some(view) = app.view_mut(TaskId::Convert) {
-            view.begin();
-        }
-        let _ = app.update(Msg::Task(started), now);
-        assert_eq!(app.update(key(KeyCode::Char('q')), now), Vec::<Cmd>::new());
+        running(&mut app, TaskId::Convert);
+        assert_eq!(app.update(key(KeyCode::Char('q')), clock()), Vec::new());
         assert!(matches!(app.top(), Some(Popup::Confirm(Confirm::Quit))));
         assert!(!app.quit);
+        // Asking again does not stack a second question.
+        let _ = app.update(key(KeyCode::Char('q')), clock());
+        assert_eq!(app.popups.len(), 1);
+        let commands = app.update(key(KeyCode::Char('y')), clock());
+        assert_eq!(commands, vec![Cmd::Stop(TaskId::Convert), Cmd::Quit]);
+        assert!(app.quit);
     }
 
     #[test]
-    fn enter_opens_the_selected_functions_dialog_and_starts_its_task() {
+    fn no_to_quitting_keeps_going() {
+        let mut app = app();
+        running(&mut app, TaskId::Convert);
+        let _ = app.update(key(KeyCode::Char('q')), clock());
+        assert_eq!(app.update(key(KeyCode::Char('n')), clock()), Vec::new());
+        assert!(app.popups.is_empty() && !app.quit);
+    }
+
+    #[test]
+    fn quitting_discards_a_function_still_at_its_form() {
+        let mut app = app();
+        let _ = app.update(key(KeyCode::Down), clock());
+        let _ = app.update(key(KeyCode::Enter), clock());
+        let _ = app.update(key(KeyCode::Char('c')), clock());
+        // A dialog takes `c`; Ctrl-C is the way out.
+        let control_c = Msg::Key(KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        });
+        let commands = app.update(control_c, clock());
+        assert_eq!(
+            commands,
+            vec![Cmd::Discard(TaskId::DownloadLink), Cmd::Quit]
+        );
+    }
+
+    #[test]
+    fn enter_opens_the_chosen_functions_dialog_and_starts_its_task() {
         let mut app = app();
         let _ = app.update(key(KeyCode::Down), clock());
         assert_eq!(app.selected, TaskId::DownloadLink);
         let commands = app.update(key(KeyCode::Enter), clock());
         assert_eq!(commands, vec![Cmd::Start(TaskId::DownloadLink)]);
         assert!(matches!(app.top(), Some(Popup::Dialog(_))));
-        // Opening it again does nothing: the same function is not started twice.
-        assert_eq!(app.update(key(KeyCode::Enter), clock()), Vec::<Cmd>::new());
+        assert_eq!(app.popups.len(), 1);
+    }
+
+    #[test]
+    fn s_asks_to_stop_only_a_running_function() {
+        let mut app = app();
+        let _ = app.update(key(KeyCode::Char('s')), clock());
+        assert!(app.popups.is_empty());
+        running(&mut app, TaskId::SyncSpotify);
+        let _ = app.update(key(KeyCode::Char('s')), clock());
+        assert!(matches!(
+            app.top(),
+            Some(Popup::Confirm(Confirm::Stop(TaskId::SyncSpotify)))
+        ));
+        assert_eq!(
+            app.update(key(KeyCode::Char('y')), clock()),
+            vec![Cmd::Stop(TaskId::SyncSpotify)]
+        );
+        assert!(app.popups.is_empty());
+    }
+
+    #[test]
+    fn a_and_question_mark_open_their_popups_and_esc_closes_them() {
+        let mut app = app();
+        let _ = app.update(key(KeyCode::Char('a')), clock());
+        assert!(matches!(
+            app.top(),
+            Some(Popup::Attention {
+                task: TaskId::SyncSpotify,
+                ..
+            })
+        ));
+        let _ = app.update(key(KeyCode::Esc), clock());
+        let _ = app.update(key(KeyCode::Char('?')), clock());
+        assert!(matches!(app.top(), Some(Popup::Help { .. })));
+        let _ = app.update(key(KeyCode::Esc), clock());
+        assert!(app.popups.is_empty());
     }
 
     #[test]
     fn an_error_closes_the_dialog_and_says_what_to_do() {
         let mut app = app();
         let _ = app.update(key(KeyCode::Enter), clock());
-        let event = Event {
-            task: TaskId::SyncSpotify,
-            kind: EventKind::Error(sdl_core::ErrorInfo {
-                message: "It broke".into(),
-                advice: "Try again".into(),
-            }),
-        };
-        let _ = app.update(Msg::Task(event), clock());
+        let error = EventKind::Error(ErrorInfo {
+            message: "It broke".into(),
+            advice: "Try again".into(),
+        });
+        let _ = task(&mut app, TaskId::SyncSpotify, error);
         assert!(matches!(app.top(), Some(Popup::Error(_))));
         assert_eq!(app.popups.len(), 1);
+    }
+
+    fn advice(app: &App) -> Result<String, &'static str> {
+        match app.top() {
+            Some(Popup::Error(info)) => Ok(info.advice.clone()),
+            _ => Err("no error popup"),
+        }
+    }
+
+    #[test]
+    fn a_rate_limit_says_the_wait_or_that_it_is_unknown() -> Result<(), &'static str> {
+        let mut app = app();
+        running(&mut app, TaskId::SyncSpotify);
+        let wait = Some(Duration::from_mins(5));
+        let _ = task(
+            &mut app,
+            TaskId::SyncSpotify,
+            EventKind::RateLimited { wait },
+        );
+        assert!(advice(&app)?.contains("about 5 min"));
+        let _ = app.update(key(KeyCode::Esc), clock());
+        running(&mut app, TaskId::SyncSpotify);
+        let none = EventKind::RateLimited { wait: None };
+        let _ = task(&mut app, TaskId::SyncSpotify, none);
+        assert!(advice(&app)?.contains("did not say"));
+        Ok(())
+    }
+
+    #[test]
+    fn the_browser_question_sends_go_or_cancels_and_the_waiting_popup_follows() {
+        let mut app = app();
+        let _ = app.update(key(KeyCode::Enter), clock());
+        let sign_in = |state| EventKind::SignIn(state);
+        let _ = task(
+            &mut app,
+            TaskId::SyncSpotify,
+            sign_in(SignInState::NeedsBrowser),
+        );
+        assert!(matches!(app.top(), Some(Popup::Confirm(Confirm::Browser))));
+        let go = app.update(key(KeyCode::Enter), clock());
+        assert_eq!(go, vec![Cmd::Send(TaskId::SyncSpotify, Command::Go)]);
+        let _ = task(
+            &mut app,
+            TaskId::SyncSpotify,
+            sign_in(SignInState::WaitingForBrowser),
+        );
+        assert!(matches!(app.top(), Some(Popup::Waiting(Waiting::Browser))));
+        let cancel = app.update(key(KeyCode::Esc), clock());
+        assert_eq!(
+            cancel,
+            vec![Cmd::Send(TaskId::SyncSpotify, Command::Cancel)]
+        );
+        // The form that waited for the sign-in is gone with it.
+        assert!(app.popups.is_empty());
+    }
+
+    #[test]
+    fn declining_the_browser_cancels_the_task_and_closes_the_form() {
+        let mut app = app();
+        let _ = app.update(key(KeyCode::Enter), clock());
+        let _ = task(
+            &mut app,
+            TaskId::SyncSpotify,
+            EventKind::SignIn(SignInState::NeedsBrowser),
+        );
+        let cancel = app.update(key(KeyCode::Char('n')), clock());
+        assert_eq!(
+            cancel,
+            vec![Cmd::Send(TaskId::SyncSpotify, Command::Cancel)]
+        );
+        assert!(app.popups.is_empty());
+    }
+
+    #[test]
+    fn a_keychain_problem_is_shown_once_and_does_not_end_the_task() {
+        let mut app = app();
+        let _ = app.update(key(KeyCode::Enter), clock());
+        let _ = task(
+            &mut app,
+            TaskId::SyncSpotify,
+            EventKind::SignIn(SignInState::KeychainProblem(
+                "The Keychain is locked".into(),
+            )),
+        );
+        assert!(matches!(app.top(), Some(Popup::Error(_))));
+        assert_eq!(app.popups.len(), 2);
+        assert!(
+            app.view(TaskId::SyncSpotify)
+                .is_some_and(FunctionView::is_open)
+        );
+    }
+
+    #[test]
+    fn a_finished_device_sync_asks_to_eject_and_yes_waits_for_the_result() {
+        let mut app = app();
+        let device = Device {
+            name: "SNOWSKY".into(),
+            mount_point: "/Volumes/SNOWSKY".into(),
+            volume_uuid: Some("AAAA".into()),
+            free_bytes: 0,
+        };
+        let _ = task(
+            &mut app,
+            TaskId::SyncDevice,
+            EventKind::Devices(vec![device]),
+        );
+        app.settings.state.last_device = Some("AAAA".into());
+        running(&mut app, TaskId::SyncDevice);
+        let _ = task(&mut app, TaskId::SyncDevice, EventKind::Finished);
+        assert_eq!(
+            app.top().map(|popup| matches!(popup, Popup::Confirm(Confirm::Eject { device }) if device == "SNOWSKY")),
+            Some(true)
+        );
+        assert_eq!(
+            app.update(key(KeyCode::Char('y')), clock()),
+            vec![Cmd::Eject]
+        );
+        assert!(matches!(app.top(), Some(Popup::Waiting(Waiting::Eject(_)))));
+        // No key leaves while it ejects, not even Ctrl-C.
+        assert_eq!(app.update(key(KeyCode::Esc), clock()), Vec::new());
+        assert_eq!(app.update(key(KeyCode::Char('q')), clock()), Vec::new());
+        assert!(matches!(app.top(), Some(Popup::Waiting(Waiting::Eject(_)))));
+        let _ = app.update(Msg::Ejected(Ok(())), clock());
+        assert!(app.popups.is_empty());
+    }
+
+    #[test]
+    fn a_failed_eject_says_what_to_do() {
+        let mut app = app();
+        app.popups.push(Popup::Waiting(Waiting::Eject("X".into())));
+        let info = ErrorInfo {
+            message: "m".into(),
+            advice: "a".into(),
+        };
+        let _ = app.update(Msg::Ejected(Err(info.clone())), clock());
+        assert_eq!(app.popups.len(), 1);
+        assert!(matches!(app.top(), Some(Popup::Error(shown)) if *shown == info));
+    }
+
+    #[test]
+    fn a_run_that_ends_flashes_its_row_once() {
+        let mut app = app();
+        running(&mut app, TaskId::Convert);
+        let _ = task(&mut app, TaskId::Convert, EventKind::Finished);
+        assert_eq!(app.take_ended(), vec![TaskId::Convert]);
+        assert_eq!(app.take_ended(), Vec::<TaskId>::new());
     }
 }

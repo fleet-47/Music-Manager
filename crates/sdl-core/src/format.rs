@@ -62,17 +62,38 @@ impl Format {
     pub fn holds(self, path: &Path) -> bool {
         has_extension(path, self.extension())
     }
+
+    /// The format `path`'s extension names (case-insensitive); `None` for any other file.
+    #[must_use]
+    pub fn of(path: &Path) -> Option<Self> {
+        Self::ALL.into_iter().find(|format| format.holds(path))
+    }
+
+    /// Every format, in the order a song's file is looked for: Opus, MP3, M4A.
+    const ALL: [Self; 3] = [Self::Opus, Self::Mp3, Self::M4a];
 }
 
-/// The extensions of the audio files the library, a device and Convert deal with: `opus`, `mp3`,
-/// `m4a`. The same three decide whether a song is present in any format
-/// ([`crate::Place::present`]).
-pub const AUDIO_EXTENSIONS: [&str; 3] = ["opus", "mp3", "m4a"];
+/// The format of the file that exists beside `path` with the same name in `.opus`, `.mp3` or
+/// `.m4a`, tried in that order (`path` itself counts). Only `path`'s own extension is replaced,
+/// so a title with a dot keeps its whole name; `path` must therefore end in an extension. This
+/// is what "present in any format" means everywhere (F7, F9, F10).
+///
+/// # Errors
+/// A folder that exists but cannot be read. A missing folder or file is `Ok(None)`.
+pub fn existing_format(path: &Path) -> std::io::Result<Option<Format>> {
+    for format in Format::ALL {
+        if path.with_extension(format.extension()).try_exists()? {
+            return Ok(Some(format));
+        }
+    }
+    Ok(None)
+}
 
-/// Whether `path` names an audio file ([`AUDIO_EXTENSIONS`], case-insensitive).
+/// Whether `path` names an audio file the library, a device and Convert deal with (`.opus`,
+/// `.mp3`, `.m4a`, case-insensitive).
 #[must_use]
 pub fn is_audio_file(path: &Path) -> bool {
-    AUDIO_EXTENSIONS.iter().any(|ext| has_extension(path, ext))
+    Format::of(path).is_some()
 }
 
 fn has_extension(path: &Path, ext: &str) -> bool {
@@ -115,6 +136,26 @@ mod tests {
         assert!(!is_audio_file(Path::new("a.flac")));
         assert!(!is_audio_file(Path::new("a.opus.part")));
         assert!(!is_audio_file(Path::new(".DS_Store")));
+    }
+
+    #[test]
+    fn the_format_of_a_path_is_its_extension() {
+        assert_eq!(Format::of(Path::new("a/b.M4A")), Some(Format::M4a));
+        assert_eq!(Format::of(Path::new("a/b.webm")), None);
+    }
+
+    #[test]
+    fn a_file_is_found_in_any_format_and_a_dotted_title_keeps_its_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let wanted = dir.path().join("Mr. Brightside.opus");
+        assert_eq!(existing_format(&wanted)?, None);
+        std::fs::write(dir.path().join("Mr.mp3"), b"x")?;
+        assert_eq!(existing_format(&wanted)?, None, "another song's file");
+        std::fs::write(dir.path().join("Mr. Brightside.m4a"), b"x")?;
+        assert_eq!(existing_format(&wanted)?, Some(Format::M4a));
+        assert_eq!(existing_format(&dir.path().join("no/such.opus"))?, None);
+        Ok(())
     }
 
     #[test]

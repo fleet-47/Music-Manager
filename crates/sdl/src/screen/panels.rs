@@ -17,6 +17,12 @@ use crate::app::{App, Hits, MIN_DETAIL_ROWS, MIN_SIDE_BY_SIDE_COLS, MainTarget};
 /// Rows the running panel asks for per task: name and headline, bar, estimate and attention.
 const RUN_TASK_ROWS: u16 = 4;
 
+/// Rows the main panel needs to show every function: two lines each, and the border.
+const MAIN_ROWS: u16 = 12;
+
+/// Rows the main panel needs with one line per function.
+const SHORT_ROWS: u16 = 5;
+
 /// Where the parts of the main screen go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Areas {
@@ -54,10 +60,17 @@ pub fn areas(area: Rect, running_tasks: usize) -> Areas {
         );
         (main, running)
     } else {
-        let [main, running] = body.layout(&Layout::vertical([
-            Constraint::Fill(1),
-            Constraint::Length(wanted.min(body.height.saturating_sub(5))),
-        ]));
+        // Below the main panel: the main panel keeps the rows it needs for two lines per
+        // function; a screen too short for that gives it one line per function instead.
+        let constraints = if body.height >= MAIN_ROWS.saturating_add(3) {
+            [
+                Constraint::Fill(1),
+                Constraint::Length(wanted.min(body.height.saturating_sub(MAIN_ROWS))),
+            ]
+        } else {
+            [Constraint::Length(SHORT_ROWS), Constraint::Fill(1)]
+        };
+        let [main, running] = body.layout(&Layout::vertical(constraints));
         (main, running)
     };
     Areas {
@@ -67,8 +80,9 @@ pub fn areas(area: Rect, running_tasks: usize) -> Areas {
     }
 }
 
-/// Draw the main screen and record what each rectangle means into `hits`.
-pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) {
+/// Draw the main screen and record what each rectangle means into `hits`. Returns where the
+/// running panel went, so an effect can slide it in.
+pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Option<Rect> {
     let area = frame.area();
     let rows = running_rows(app);
     let places = areas(area, rows.len());
@@ -79,6 +93,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) {
         draw_running(buf, running, &rows, app.spin, theme, hits);
     }
     draw_footer(buf, places.footer, app, theme);
+    places.running
 }
 
 fn outcome_style(theme: Theme, outcome: RunOutcome) -> ratatui::style::Style {
@@ -91,7 +106,7 @@ fn outcome_style(theme: Theme, outcome: RunOutcome) -> ratatui::style::Style {
 }
 
 fn draw_main(buf: &mut Buffer, area: Rect, app: &App, theme: Theme, hits: &mut Hits) {
-    let tall = area.height >= MIN_DETAIL_ROWS;
+    let tall = area.height >= MAIN_ROWS;
     let inner = if tall {
         let block = Block::new()
             .borders(Borders::ALL)
@@ -134,15 +149,19 @@ fn draw_row(buf: &mut Buffer, rect: Rect, row: &RowView, app: &App, selected: bo
     let mut first = vec![
         Span::styled(if selected { "› " } else { "  " }, theme.emphasis()),
         Span::styled(row.name, name_style),
-        Span::styled(format!("  {}", row.selection), theme.secondary()),
     ];
-    if let Some(held) = row.held.filter(|held| *held > 0) {
-        first.push(Span::styled(format!("  {held} held"), theme.attention()));
-    }
+    // On a short screen the running count comes first: it is what must not be cut off.
     if rect.height < 2
         && let Some(run) = running_rows(app).iter().find(|run| run.task == row.task)
     {
         first.push(Span::styled(format!("  {}", run.count), theme.running()));
+    }
+    first.push(Span::styled(
+        format!("  {}", row.selection),
+        theme.secondary(),
+    ));
+    if let Some(held) = row.held.filter(|held| *held > 0) {
+        first.push(Span::styled(format!("  {held} held"), theme.attention()));
     }
     Line::from(first).render(Rect::new(rect.x, rect.y, rect.width, 1), buf);
     if rect.height >= 2 {
@@ -174,15 +193,29 @@ fn draw_running(
         .title(Line::styled(" Running ", theme.heading()));
     let inner = block.inner(area);
     block.render(area, buf);
-    for (index, task) in tasks.iter().enumerate() {
+    // What does not fit is counted, never silently dropped.
+    let fits = usize::from(inner.height / RUN_TASK_ROWS);
+    let shown = if tasks.len() > fits {
+        fits.saturating_sub(1)
+    } else {
+        tasks.len()
+    };
+    if shown < tasks.len() {
+        let y = inner.y.saturating_add(
+            u16::try_from(shown)
+                .unwrap_or(0)
+                .saturating_mul(RUN_TASK_ROWS),
+        );
+        let more = tasks.len().saturating_sub(shown);
+        Line::styled(format!("+{more} more running"), theme.secondary())
+            .render(Rect::new(inner.x, y, inner.width, 1), buf);
+    }
+    for (index, task) in tasks.iter().take(shown).enumerate() {
         let y = inner.y.saturating_add(
             u16::try_from(index)
                 .unwrap_or(u16::MAX)
                 .saturating_mul(RUN_TASK_ROWS),
         );
-        if y.saturating_add(RUN_TASK_ROWS) > inner.bottom() {
-            break;
-        }
         let rect = Rect::new(inner.x, y, inner.width, RUN_TASK_ROWS);
         hits.main.push(rect, MainTarget::Running(task.task));
         let line = |n: u16| Rect::new(rect.x, rect.y.saturating_add(n), rect.width, 1);
@@ -205,20 +238,19 @@ fn draw_running(
             ])
             .render(line(1), buf);
         }
-        let mut third = vec![Span::styled(task.estimate.as_str(), theme.secondary())];
+        Line::styled(task.estimate.as_str(), theme.secondary()).render(line(2), buf);
         if let Some(attention) = &task.attention {
-            third.push(Span::styled(format!("  {attention}"), theme.attention()));
+            Line::styled(attention.as_str(), theme.attention()).render(line(3), buf);
         }
-        Line::from(third).render(line(2), buf);
     }
 }
 
 fn draw_footer(buf: &mut Buffer, area: Rect, app: &App, theme: Theme) {
     let mut spans = Vec::new();
-    for hint in keys::footer(app) {
+    for hint in keys::fit(&keys::footer(app), area.width) {
         spans.push(Span::styled(hint.key, theme.emphasis()));
         spans.push(Span::styled(
-            format!(" {}   ", hint.what),
+            format!(" {}{}", hint.what, " ".repeat(keys::GAP)),
             theme.secondary(),
         ));
     }

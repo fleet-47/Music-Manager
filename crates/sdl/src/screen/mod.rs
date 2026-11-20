@@ -18,19 +18,19 @@ use std::time::Instant;
 use color_eyre::eyre::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event as TermEvent, EventStream, KeyEventKind,
+    Event as TermEvent, EventStream, KeyEventKind, MouseEventKind,
 };
 use crossterm::execute;
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use ratatui::layout::Size;
-use sdl_core::{Config, ErrorInfo, EventReceiver, channel};
+use sdl_core::{Config, ErrorInfo, EventReceiver, TaskId, channel};
 use sdl_tasks::Runner;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::app::wake::next_wake;
-use crate::app::{App, Clock, Cmd, Hits, Msg, Settings};
-use effects::Effects;
+use crate::app::{App, Clock, Cmd, Hits, MainTarget, Msg, Settings};
+use effects::{Effects, Scene};
 use theme::Theme;
 
 /// Run the screen until the owner quits.
@@ -46,16 +46,31 @@ pub async fn run(config: Config) -> Result<()> {
     let runner = Runner::new(config, tx)?;
     // `try_init` can fail after raw mode is on, so the terminal is restored on every path.
     let result = match ratatui::try_init() {
-        Ok(mut terminal) => match execute!(stdout(), EnableBracketedPaste, EnableMouseCapture) {
-            Ok(()) => event_loop(&mut terminal, runner, events, animations, music_root).await,
-            Err(error) => Err(error.into()),
-        },
+        Ok(mut terminal) => {
+            // After `try_init`, which installs the hook that leaves raw mode and the alternate
+            // screen: this one, running first, gives back the mouse and paste modes too.
+            release_input_on_panic();
+            match execute!(stdout(), EnableBracketedPaste, EnableMouseCapture) {
+                Ok(()) => event_loop(&mut terminal, runner, events, animations, music_root).await,
+                Err(error) => Err(error.into()),
+            }
+        }
         Err(error) => Err(error.into()),
     };
     // Best effort: the terminal is being given back, and there is no better place to report this.
     let _ = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     result
+}
+
+/// A panic must not leave the terminal reporting every mouse move to the shell.
+fn release_input_on_panic() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Best effort: the panic report is what matters now.
+        let _ = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
+        previous(info);
+    }));
 }
 
 fn now() -> Clock {
@@ -109,13 +124,14 @@ async fn event_loop(
     loop {
         if dirty {
             let frame_start = Instant::now();
-            draw(
-                terminal,
-                &mut app,
-                &mut effects,
-                theme,
-                frame_start.duration_since(last_frame),
-            )?;
+            // An effect that has just started has played for no time yet; only a frame that
+            // follows another frame of an effect counts the time between them.
+            let elapsed = if app.animating {
+                frame_start.duration_since(last_frame)
+            } else {
+                std::time::Duration::ZERO
+            };
+            draw(terminal, &mut app, &mut effects, theme, elapsed)?;
             last_frame = frame_start;
             dirty = false;
         }
@@ -154,7 +170,9 @@ async fn event_loop(
 fn from_terminal(event: TermEvent) -> Option<Msg> {
     match event {
         TermEvent::Key(key) if key.kind != KeyEventKind::Release => Some(Msg::Key(key)),
-        TermEvent::Mouse(mouse) => Some(Msg::Mouse(mouse)),
+        // Moves change nothing, and the terminal sends one for every cell the pointer crosses: a
+        // redraw for each would break "draw only after something changed".
+        TermEvent::Mouse(mouse) if mouse.kind != MouseEventKind::Moved => Some(Msg::Mouse(mouse)),
         TermEvent::Paste(text) => Some(Msg::Paste(text)),
         TermEvent::Resize(width, height) => Some(Msg::Resize(Size::new(width, height))),
         _ => None,
@@ -170,10 +188,29 @@ fn draw(
     theme: Theme,
     elapsed: std::time::Duration,
 ) -> Result<()> {
+    let ended = app.take_ended();
     let mut hits = Hits::default();
     terminal.draw(|frame| {
-        panels::draw(frame, app, theme, &mut hits);
-        popups::draw(frame, app, theme, &mut hits);
+        let running = panels::draw(frame, app, theme, &mut hits);
+        let top = popups::draw(frame, app, theme, &mut hits);
+        if app.animations
+            && let Some(base) = theme.base()
+        {
+            let scene = Scene {
+                popups: app.popups.len(),
+                top,
+                running,
+                ended: ended
+                    .iter()
+                    .filter_map(|task| {
+                        let at = TaskId::ALL.iter().position(|each| each == task)?;
+                        let area = hits.main.area_of(&MainTarget::Row(*task))?;
+                        Some((at, area))
+                    })
+                    .collect(),
+            };
+            effects.begin(&scene, base);
+        }
         let area = frame.area();
         effects.process(elapsed, frame.buffer_mut(), area);
     })?;
@@ -217,60 +254,4 @@ async fn run_cmd(
 }
 
 #[cfg(test)]
-mod tests {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-    use sdl_core::TaskId;
-
-    use super::*;
-    use crate::app::{Popup, Settings};
-    use crate::dialogs::Dialog;
-
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-    fn screen_text(terminal: &Terminal<TestBackend>) -> String {
-        let buffer = terminal.backend().buffer();
-        buffer
-            .content()
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
-            .collect()
-    }
-
-    fn app() -> App {
-        App::new(Settings::default(), false, Size::new(100, 30), now())
-    }
-
-    #[test]
-    fn the_main_panel_shows_every_function_and_the_footer() -> TestResult {
-        let app = app();
-        let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
-        let mut hits = Hits::default();
-        terminal.draw(|frame| panels::draw(frame, &app, Theme::new(false), &mut hits))?;
-        let text = screen_text(&terminal);
-        for task in TaskId::ALL {
-            assert!(text.contains(task.name()), "{}", task.name());
-        }
-        assert!(text.contains("q quit"));
-        assert_eq!(hits.main.len(), 5);
-        Ok(())
-    }
-
-    #[test]
-    fn a_dialog_is_drawn_in_a_popup_and_its_buttons_can_be_clicked() -> TestResult {
-        let mut app = app();
-        let (dialog, _commands) = Dialog::open(TaskId::DownloadLink, &app.settings);
-        app.popups.push(Popup::Dialog(Box::new(dialog)));
-        let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
-        let mut hits = Hits::default();
-        terminal.draw(|frame| {
-            panels::draw(frame, &app, Theme::new(false), &mut hits);
-            popups::draw(frame, &app, Theme::new(false), &mut hits);
-        })?;
-        let text = screen_text(&terminal);
-        assert!(text.contains("Paste a link"));
-        assert!(text.contains("Start"));
-        assert!(hits.form.area_of(&sdl_form::Target::Primary).is_some());
-        Ok(())
-    }
-}
+mod tests;

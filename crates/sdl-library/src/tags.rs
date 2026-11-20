@@ -261,10 +261,37 @@ fn fill_tag(tag: &mut Tag, song: &WantedSong, enrichment: &Enrichment) {
 /// no artist tag; the caller then files it under `Unsorted` (F10).
 ///
 /// # Errors
-/// [`LibraryError::NotBuilt`] until built; later, a file that cannot be read.
+/// [`LibraryError::Tag`] when the file cannot be read.
 pub fn place_from_tags(file: &Path, music_root: &Path) -> Result<Option<Place>, LibraryError> {
-    let _ = (file, music_root);
-    Err(LibraryError::NotBuilt("reading a file's tags to place it"))
+    let tagged = lofty::read_from_path(file).map_err(|e| LibraryError::Tag {
+        path: file.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
+        return Ok(None);
+    };
+    let text = |key| {
+        tag.get_strings(key)
+            .map(str::trim)
+            .find(|value| !value.is_empty())
+    };
+    let Some(title) = text(ItemKey::TrackTitle) else {
+        return Ok(None);
+    };
+    let Some(artist) = text(ItemKey::AlbumArtist).or_else(|| text(ItemKey::TrackArtist)) else {
+        return Ok(None);
+    };
+    let stem = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok(Some(Place::new(
+        music_root,
+        artist,
+        text(ItemKey::AlbumTitle),
+        title,
+        &stem,
+    )))
 }
 
 #[cfg(test)]
@@ -298,5 +325,175 @@ mod tests {
         let cache = ReleaseCache::default();
         assert!(Arc::ptr_eq(&cache.cell("r"), &cache.cell("r")));
         assert!(!Arc::ptr_eq(&cache.cell("r"), &cache.cell("q")));
+    }
+
+    use crate::testkit::{TestResult, make_audio, make_cover};
+    use sdl_core::SongSource;
+
+    fn wanted(source: SongSource) -> WantedSong {
+        WantedSong {
+            source,
+            title: "Blue in Green".into(),
+            artists: vec!["Miles Davis".into(), "Bill Evans".into()],
+            album: Some("Kind of Blue".into()),
+            album_artist: Some("Miles Davis".into()),
+            track_number: Some(3),
+            disc_number: Some(1),
+            date: Some("1959-08-17".into()),
+            isrc: None,
+            duration: None,
+            cover_url: None,
+        }
+    }
+
+    fn spotify() -> WantedSong {
+        let mut song = wanted(SongSource::Spotify {
+            track_id: "trk".into(),
+        });
+        song.isrc = Some("USSM15900001".into());
+        song
+    }
+
+    fn link() -> WantedSong {
+        wanted(SongSource::Link {
+            item_url: "https://music.youtube.com/watch?v=abc".into(),
+            video_id: "abc".into(),
+            direct: true,
+        })
+    }
+
+    /// Serve `body` as `image/png` to the first request on a local port; returns its URL.
+    fn serve_once(body: Vec<u8>) -> Result<String, Box<dyn std::error::Error>> {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/cover.png", listener.local_addr()?);
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+            }
+        });
+        Ok(url)
+    }
+
+    fn read_tag(file: &Path) -> Result<Tag, Box<dyn std::error::Error>> {
+        let tagged = lofty::read_from_path(file)?;
+        Ok(tagged.primary_tag().ok_or("no tag")?.clone())
+    }
+
+    #[tokio::test]
+    async fn a_spotify_song_gets_every_tag_and_its_cover() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("t.opus");
+        make_audio(&file, 1)?;
+        let mut song = spotify();
+        song.cover_url = Some(serve_once(make_cover(&dir.path().join("c.png"))?)?);
+        let enrichment = Enrichment {
+            genre: Some("Jazz".into()),
+            track_total: Some(5),
+            disc_total: Some(1),
+        };
+        write_tags(&file, &song, &enrichment).await?;
+        let tag = read_tag(&file)?;
+        assert_eq!(tag.title().as_deref(), Some("Blue in Green"));
+        assert_eq!(
+            tag.get_strings(ItemKey::TrackArtist).collect::<Vec<_>>(),
+            ["Miles Davis", "Bill Evans"]
+        );
+        assert_eq!(tag.album().as_deref(), Some("Kind of Blue"));
+        assert_eq!(tag.get_string(ItemKey::AlbumArtist), Some("Miles Davis"));
+        assert_eq!((tag.track(), tag.track_total()), (Some(3), Some(5)));
+        assert_eq!((tag.disk(), tag.disk_total()), (Some(1), Some(1)));
+        assert_eq!(tag.get_string(ItemKey::Isrc), Some("USSM15900001"));
+        assert_eq!(tag.genre().as_deref(), Some("Jazz"));
+        assert!(
+            tag.get_string(ItemKey::RecordingDate)
+                .is_some_and(|d| d.starts_with("1959"))
+        );
+        assert_eq!(
+            tag.get_picture_type(PictureType::CoverFront)
+                .map(|p| p.data().is_empty()),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_link_song_is_tagged_from_its_own_fields_with_no_lookup() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("t.opus");
+        make_audio(&file, 1)?;
+        let song = link();
+        // No ISRC: nothing is asked of MusicBrainz, so nothing can fail and nothing is found.
+        let found = lookup(&song, &ReleaseCache::default()).await?;
+        assert_eq!(found, Enrichment::default());
+        write_tags(&file, &song, &found).await?;
+        let tag = read_tag(&file)?;
+        assert_eq!(tag.title().as_deref(), Some("Blue in Green"));
+        assert_eq!(tag.album().as_deref(), Some("Kind of Blue"));
+        assert_eq!(tag.genre(), None);
+        assert_eq!(tag.get_string(ItemKey::Isrc), None);
+        assert_eq!(tag.track_total(), None);
+        assert!(tag.get_picture_type(PictureType::CoverFront).is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_cover_download_fails_the_song_before_anything_is_written() -> TestResult {
+        // The ruling waiting on the owner (core contract amendment 4b), kept in this one place.
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("t.opus");
+        make_audio(&file, 1)?;
+        let mut song = link();
+        song.cover_url = Some("http://127.0.0.1:1/none.png".into());
+        let result = write_tags(&file, &song, &Enrichment::default()).await;
+        assert!(matches!(result, Err(LibraryError::Cover(_))), "{result:?}");
+        assert_eq!(read_tag(&file)?.title(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_tagged_file_belongs_at_album_artist_album_title() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("lib");
+        let file = dir.path().join("x.opus");
+        make_audio(&file, 1)?;
+        let mut song = link();
+        song.album_artist = None;
+        let tagged = lofty::read_from_path(&file)?;
+        let mut tag = Tag::new(tagged.primary_tag_type());
+        fill_tag(&mut tag, &song, &Enrichment::default());
+        tag.save_to_path(&file, WriteOptions::default())?;
+        let place = place_from_tags(&file, &root)?.ok_or("no place")?;
+        // No album artist tag: the first artist.
+        assert_eq!(place, Place::of(&root, &song));
+        assert_eq!(
+            place.path(sdl_core::Format::Opus),
+            root.join("Miles Davis/Kind of Blue/Blue in Green.opus")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_without_title_or_artist_has_no_place() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let bare = dir.path().join("bare.opus");
+        make_audio(&bare, 1)?;
+        assert_eq!(place_from_tags(&bare, dir.path())?, None);
+        let half = dir.path().join("half.opus");
+        make_audio(&half, 1)?;
+        let mut tag = Tag::new(lofty::read_from_path(&half)?.primary_tag_type());
+        tag.set_title("Only a title".to_owned());
+        tag.save_to_path(&half, WriteOptions::default())?;
+        assert_eq!(place_from_tags(&half, dir.path())?, None);
+        let missing = place_from_tags(&dir.path().join("gone.opus"), dir.path());
+        assert!(matches!(missing, Err(LibraryError::Tag { .. })));
+        Ok(())
     }
 }

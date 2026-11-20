@@ -230,19 +230,16 @@ impl Matcher {
             .map(String::as_str)
             .chain([text_query.as_str()]);
         for query in queries {
-            let results = match self.search(query).await {
-                Ok(results) => results,
+            match self.search(query).await {
+                Ok(results) => {
+                    if let Some(hit) = settle(&wanted, &mut seen, results) {
+                        return MatchOutcome::Matched(hit);
+                    }
+                }
                 Err(error) => return MatchOutcome::Failed(error.to_string()),
-            };
-            if let Some(hit) = best_match(&wanted, &results).and_then(|index| results.get(index)) {
-                return MatchOutcome::Matched(hit.to_candidate());
             }
-            merge_found(&mut seen, results);
         }
-        MatchOutcome::Held {
-            reason: held_reason(&wanted, &seen),
-            candidates: seen.iter().map(Found::to_candidate).collect(),
-        }
+        held(&wanted, &seen)
     }
 
     async fn search(&self, query: &str) -> Result<Vec<Found>, YoutubeError> {
@@ -263,6 +260,25 @@ impl Matcher {
                 duration: song.duration_ms.map(Duration::from_millis),
             })
             .collect())
+    }
+}
+
+/// One round of the rule (pure): the best passing result of `results` as a candidate, or `None`
+/// after adding them to `seen` (the candidates [`held`] shows when no round passes).
+fn settle(wanted: &Wanted<'_>, seen: &mut Vec<Found>, results: Vec<Found>) -> Option<Candidate> {
+    if let Some(hit) = best_match(wanted, &results).and_then(|index| results.get(index)) {
+        return Some(hit.to_candidate());
+    }
+    merge_found(seen, results);
+    None
+}
+
+/// The outcome when no round passed (pure): [`MatchOutcome::Held`] with the results seen (the ISRC
+/// query's first, then the text query's, each once, at most 5) and the plain reason.
+fn held(wanted: &Wanted<'_>, seen: &[Found]) -> MatchOutcome {
+    MatchOutcome::Held {
+        reason: held_reason(wanted, seen),
+        candidates: seen.iter().map(Found::to_candidate).collect(),
     }
 }
 
@@ -563,5 +579,64 @@ mod tests {
         assert_eq!(best_match(&spotify, &results), None);
         assert!(held_reason(&spotify, &results).contains("not known"));
         assert!(held_reason(&spotify, &[]).contains("no songs"));
+    }
+
+    fn with_id(id: &str, mut result: Found) -> Found {
+        result.video_id = id.into();
+        result
+    }
+
+    #[test]
+    fn a_passing_first_round_matches_without_a_second() {
+        let artists = names(&["Daft Punk"]);
+        let mut seen = Vec::new();
+        let hit = settle(
+            &wanted(&artists),
+            &mut seen,
+            vec![with_id("isrc-hit", plain_get_lucky())],
+        );
+        assert_eq!(hit.map(|c| c.video_id), Some("isrc-hit".to_owned()));
+        assert_eq!(seen, Vec::new());
+    }
+
+    #[test]
+    fn nothing_passing_in_two_rounds_is_held_with_both_rounds_once_each() -> Result<(), String> {
+        let artists = names(&["Daft Punk"]);
+        let wanted = wanted(&artists);
+        let off = |id: &str| with_id(id, found("Other", &["X"], None, 10));
+        let mut seen = Vec::new();
+        assert!(settle(&wanted, &mut seen, vec![off("a"), off("b")]).is_none());
+        assert!(settle(&wanted, &mut seen, vec![off("b"), off("c")]).is_none());
+        let (candidates, reason) = held_parts(held(&wanted, &seen))?;
+        let ids: Vec<&str> = candidates.iter().map(|c| c.video_id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+        assert!(reason.contains("closely enough"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_text_round_can_rescue_an_isrc_round_that_found_nothing_usable() {
+        let artists = names(&["Daft Punk"]);
+        let wanted = wanted(&artists);
+        let mut seen = Vec::new();
+        assert!(settle(&wanted, &mut seen, Vec::new()).is_none());
+        let hit = settle(&wanted, &mut seen, vec![plain_get_lucky()]);
+        assert!(hit.is_some());
+    }
+
+    #[test]
+    fn nothing_found_at_all_is_held_with_no_candidates() -> Result<(), String> {
+        let artists = names(&["Daft Punk"]);
+        let (candidates, reason) = held_parts(held(&wanted(&artists), &[]))?;
+        assert_eq!(candidates, Vec::new());
+        assert!(reason.contains("no songs"));
+        Ok(())
+    }
+
+    fn held_parts(outcome: MatchOutcome) -> Result<(Vec<Candidate>, String), String> {
+        match outcome {
+            MatchOutcome::Held { candidates, reason } => Ok((candidates, reason)),
+            other => Err(format!("expected held, got {other:?}")),
+        }
     }
 }

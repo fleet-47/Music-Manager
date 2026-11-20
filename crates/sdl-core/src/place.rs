@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use sanitize_filename::{Options, sanitize_with_options};
 
-use crate::format::is_audio_file;
+use crate::format::{existing_format, is_audio_file};
 use crate::{Format, WantedSong};
 
 /// Folder of songs that have no album.
@@ -25,7 +25,8 @@ const TMP_DIR: &str = ".sdl-tmp";
 const COMPONENT_MAX: usize = 150;
 
 /// One path component made safe: FAT-illegal characters removed (`sanitize-filename`), leading
-/// dots stripped (so no dot-directory can be made), cut to [`COMPONENT_MAX`] bytes on a character
+/// dots stripped (so no dot-directory can be made), leading `#` and blanks stripped (so a
+/// playlist line never reads as a comment), cut to [`COMPONENT_MAX`] bytes on a character
 /// boundary, trailing spaces and dots trimmed. May be empty; see [`Place::new`] for the ID
 /// fallback.
 #[must_use]
@@ -38,7 +39,12 @@ pub fn component(name: &str) -> String {
             replacement: "",
         },
     );
-    let mut safe = safe.trim_start_matches('.').to_owned();
+    // A leading `#` or space would make the playlist line that starts with this name a comment
+    // or get trimmed by Disco's reader (`import_m3u_file` skips `#` lines and strips leading
+    // blanks), so the song would be missing from the playlist.
+    let mut safe = safe
+        .trim_start_matches(|c: char| c == '.' || c == '#' || c.is_whitespace())
+        .to_owned();
     if let Some(end) = (0..=COMPONENT_MAX)
         .rev()
         .find(|&index| safe.is_char_boundary(index))
@@ -157,12 +163,7 @@ impl Place {
     /// # Errors
     /// A folder that exists but cannot be read. A missing folder or file is `Ok(None)`.
     pub fn present(&self) -> std::io::Result<Option<Format>> {
-        for format in [Format::Opus, Format::Mp3, Format::M4a] {
-            if self.path(format).try_exists()? {
-                return Ok(Some(format));
-            }
-        }
-        Ok(None)
+        existing_format(&self.path(Format::Opus))
     }
 }
 
@@ -312,6 +313,13 @@ mod tests {
         assert_eq!(component("name. "), "name");
         assert_eq!(component("."), "");
         assert_eq!(component(".."), "");
+    }
+
+    #[test]
+    fn no_component_can_start_a_playlist_comment() {
+        assert_eq!(component("#1 Dads"), "1 Dads");
+        assert_eq!(component(" # .x"), "x");
+        assert_eq!(component("Track #1"), "Track #1");
     }
 
     #[test]

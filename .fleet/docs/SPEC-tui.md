@@ -33,7 +33,8 @@ report it; do not substitute another crate or hand-write the capability.
   - *Folder field*: a text field plus a Browse action that opens `ratatui-explorer` to choose a
     folder.
   - *Buttons*: `Continue` (or `Start` on the last step) and `Cancel`, reachable by Tab and click.
-  - A summary line, and under it what is still missing when the form cannot continue.
+  - A summary line, and under it what is still missing when the form cannot continue. These
+    lines and a field's message wrap; they are never cut off.
   - Keys: Tab and Shift+Tab move between fields; Up/Down move inside a field; Enter continues;
     Esc clears a non-empty filter, otherwise cancels. Fields are pre-filled from what was
     remembered. A field's options can change while the form is open (a device is plugged in, a
@@ -159,7 +160,9 @@ report it; do not substitute another crate or hand-write the capability.
   playlist, its name and order. A flat listing can lack fields, so each item's own metadata is read
   at its turn with `yt-dlp --dump-single-json --no-playlist -- <item url>` and becomes a wanted
   song: title = `track`, else `title`; artist = `artist`, else `uploader`; `album`; `duration`;
-  cover = `thumbnail`. YouTube Music items download directly; every other item goes through
+  cover = the best JPEG or PNG in `thumbnails`, else `thumbnail` (the tag library cannot store
+  WebP). An entry the site reports as unavailable (private or removed) is a failed item with that
+  reason. YouTube Music items download directly; every other item goes through
   matching and is held for review when nothing passes (F3).
 - A playlist link also writes a playlist file named after it (F7).
 - **Not:** no Spotify links (they are F4), no format field, no confirmation step.
@@ -172,7 +175,7 @@ report it; do not substitute another crate or hand-write the capability.
   its first artist's. Track total and disc total from the release whose title matches the album.
 - `lofty` 0.25, one write to the temp file through its format-independent tag interface: title,
   artists, album, album artist, track number and total, disc number and total, date, ISRC, genre,
-  and the cover (fetched with `reqwest`) as the front cover.
+  and the cover (fetched with `reqwest`, giving up after 20 seconds) as the front cover.
 - A failed or empty lookup leaves those tags empty and the song still completes. The last-run line
   counts songs left without a genre. A failed tag write fails the song.
 - **Not:** no Last.fm, no Spotify genre, no lyrics, no ReplayGain, no retagging of files already in
@@ -267,8 +270,8 @@ report it; do not substitute another crate or hand-write the capability.
 - Stopping is cooperative here and in Convert: the file in hand is finished, then the run stops;
   the device stays mounted.
 - Clean up and eject: remove `.Spotlight-V100`, `.Trashes`, `.fseventsd` and `.TemporaryItems`
-  from the device root and every `.DS_Store`; remove a `._X` file only when `sdl` wrote `X` in this
-  run and the file starts with the AppleDouble signature (bytes `00 05 16 07`); then
+  from the device root and every `.DS_Store`; remove a `._X` file only when `sdl` created the file
+  or folder `X` in this run and the `._X` file starts with the AppleDouble signature (bytes `00 05 16 07`); then
   `diskutil unmount <mount point>`.
 - **Not:** not a two-way merge in one run, never deletes a song on either side, removes nothing
   from a device except the macOS items named in clean-up, does not mount or format anything, no folder-per-playlist arrangement,
@@ -322,7 +325,8 @@ binary.
   -D clippy::disallowed_methods -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
   -D clippy::arithmetic_side_effects -D clippy::cast_possible_truncation -D clippy::cast_possible_wrap
   -D clippy::cast_sign_loss -F unsafe_code -D clippy::allow_attributes
-  -D clippy::allow_attributes_without_reason`, `cargo build`, `cargo test`.
+  -D clippy::allow_attributes_without_reason`, `cargo build`, and `cargo test` run as
+  `mise x -- cargo test …`, because tests use the real `ffmpeg`, which is on `PATH` only through mise.
 - No `#[allow]` or `#[expect]` anywhere. Tests return `Result` and use `?`.
 - Tests cover pure logic and file operations in temp directories. No invented API fixtures.
 

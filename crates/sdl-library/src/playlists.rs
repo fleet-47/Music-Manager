@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use sdl_core::format::existing_format;
 use sdl_core::playlist::PLAYLIST_EXTENSION;
 use sdl_core::{Format, Place, Playlist, WantedSong};
 
@@ -117,17 +118,9 @@ pub fn write_for_destination(
     let library = Playlist::parse(&text, stem);
     let mut entries = Vec::new();
     for entry in &library.entries {
-        let wanted = entry.with_extension("");
-        for format in [Format::Opus, Format::Mp3, Format::M4a] {
-            let candidate = wanted.with_extension(format.extension());
-            if dest_music_dir
-                .join(&candidate)
-                .try_exists()
-                .map_err(io_err(dest_music_dir))?
-            {
-                entries.push(candidate);
-                break;
-            }
+        let there = dest_music_dir.join(entry);
+        if let Some(format) = existing_format(&there).map_err(io_err(&there))? {
+            entries.push(entry.with_extension(format.extension()));
         }
     }
     let count = entries.len();
@@ -235,8 +228,94 @@ mod tests {
             "#EXTM3U\n#PLAYLIST:Mix\nA/Al/a.mp3\nA/Al/c.opus\n"
         );
         assert_eq!(write_for_destination(root.path(), &dest, "Nope")?, 0);
+        // A title with a dot keeps its whole name on the device.
+        write(root.path(), "Dot", "i", &[song("4", "Mr. Brightside")])?;
+        touch(&dest.join("A/Al/Mr. Brightside.mp3"))?;
+        assert_eq!(write_for_destination(root.path(), &dest, "Dot")?, 1);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("Dot.m3u8"))?,
+            "#EXTM3U\n#PLAYLIST:Dot\nA/Al/Mr. Brightside.mp3\n"
+        );
         assert!(!dest.join("Nope.m3u8").exists());
         let _: PathBuf = dest;
+        Ok(())
+    }
+
+    /// What Disco's `import_m3u_file` (`ui/musicdb.c`, read-only reference) needs of a file:
+    /// no BOM (it strips one, but a name check scans the header first), `\n` or `\r\n` lines,
+    /// `#PLAYLIST:` in the header (header lines are read into 192 bytes, longer ones end the
+    /// header scan), `\` read as `/`, an entry is any non-blank line not starting with `#`, a
+    /// relative entry is joined to the playlist's folder as `<dir>/<entry>` and that must fit 700
+    /// bytes, and a line is read into 700 bytes (an entry of 699 bytes or more is skipped).
+    #[test]
+    fn the_file_has_the_form_disco_imports() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let long = "é".repeat(300);
+        let mut songs = vec![
+            song("1", "one"),
+            song("2", &long),
+            song("3", "Mr. Brightside"),
+        ];
+        songs[1].artists = vec![long.clone()];
+        songs[1].album = Some(long.clone());
+        songs[2].artists = vec!["#1 Dads".into()];
+        write(root.path(), "Road trip", "id", &songs)?;
+        let bytes = std::fs::read(root.path().join("Road trip.m3u8"))?;
+        assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "no BOM");
+        assert!(
+            !bytes.contains(&b'\r') && !bytes.contains(&b'\\'),
+            "LF lines, forward slashes"
+        );
+        let text = String::from_utf8(bytes)?;
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "#EXTM3U");
+        assert_eq!(lines[1], "#PLAYLIST:Road trip");
+        assert!(
+            lines[1].len() < 192,
+            "header lines past 191 bytes are not read as a directive"
+        );
+        let entries = &lines[2..];
+        assert_eq!(entries.len(), songs.len());
+        let mut longest = 0;
+        for entry in entries {
+            assert!(
+                !entry.starts_with(['#', '/', ' ', '\t']),
+                "{entry}: read as an entry, relative"
+            );
+            assert!(
+                entry.len() < 699,
+                "{} bytes: fits Disco's line buffer",
+                entry.len()
+            );
+            // Folders are capped at 150 bytes; the file name is a 150-byte stem plus `.opus`.
+            let parts: Vec<&str> = entry.split('/').collect();
+            assert_eq!(parts.len(), 3, "{entry}");
+            assert!(
+                parts
+                    .iter()
+                    .all(|p| !p.is_empty() && *p != ".." && p.len() <= 155)
+            );
+            longest = longest.max(entry.len());
+        }
+        // The longest possible entry (three 150-byte components, two slashes, `.opus`) leaves
+        // room in the 700-byte joined path for a playlist folder of over 200 bytes.
+        let worst = 3 * 150 + 2 + ".opus".len();
+        assert!(
+            longest <= worst && 700 > worst + 1 + 200,
+            "worst entry {worst} bytes"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_very_long_name_still_gets_a_short_safe_file_name() -> TestResult {
+        // Disco reads the name from the header only when the line is under 192 bytes; otherwise
+        // it names the playlist after the file, which `Playlist::file_name` made safe.
+        let root = tempfile::tempdir()?;
+        let name = "n".repeat(400);
+        write(root.path(), &name, "id", &[song("1", "one")])?;
+        let file = root.path().join(Playlist::file_name(&name, "id"));
+        assert!(file.exists() && file.file_name().is_some_and(|f| f.len() <= 155));
         Ok(())
     }
 }

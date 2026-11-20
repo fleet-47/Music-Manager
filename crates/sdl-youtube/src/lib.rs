@@ -1,17 +1,17 @@
 //! `YouTube` Music matching (`innertube-rs`), link listing and downloading (the `yt-dlp` binary,
 //! run directly with `tokio::process::Command`).
 //!
-//! - [`matching`] (F3): a wanted song against `YouTube` Music; built from the earlier design and
-//!   adapted to return candidates.
+//! - [`matching`] (F3): a wanted song against `YouTube` Music, returning a match or the candidates
+//!   held for review.
 //! - [`download`] (F3): a match's audio as Opus, or a link's own audio as served.
 //! - [`link`] (F5): what a pasted link contains, as wanted songs.
 //!
-//! Bodies marked "not built yet" return [`YoutubeError::NotBuilt`]; their doc comments are the
-//! contract.
+//! `ytdlp` is the one place the `yt-dlp` binary is run.
 
 pub mod download;
 pub mod link;
 pub mod matching;
+mod ytdlp;
 
 pub use download::{Downloaded, download_opus, download_own_audio};
 pub use link::{LinkItem, LinkListing, PlaylistInfo, is_music_link, list_link, read_item};
@@ -20,9 +20,6 @@ pub use matching::Matcher;
 /// Errors from the `YouTube` crate. Messages are plain words fit for the error popup.
 #[derive(Debug, thiserror::Error)]
 pub enum YoutubeError {
-    /// This part of the contract has a signature but no body yet.
-    #[error("{0} is not built yet")]
-    NotBuilt(&'static str),
     /// The `YouTube` Music search client could not be made.
     #[error("YouTube Music search failed: {0}")]
     Search(String),

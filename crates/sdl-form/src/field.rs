@@ -170,6 +170,16 @@ impl Rows {
         rank(&labels, self.filter.value())
     }
 
+    /// How many of the options shown now are ticked. Ticks kept for options that went away
+    /// are not counted, so the count never exceeds the options and never says something is
+    /// ticked that the owner cannot see.
+    pub(crate) fn ticked_count(&self) -> usize {
+        self.options
+            .iter()
+            .filter(|option| self.ticked.contains(&option.id))
+            .count()
+    }
+
     /// Move the highlight by `delta` rows among the listed rows, staying inside them, and scroll
     /// so it stays visible inside `rows` rows.
     pub(crate) fn step(&mut self, delta: isize, rows: usize) {
@@ -440,8 +450,13 @@ impl Field {
         let unmet = match &self.kind {
             Kind::Text(text) => text.input.value().trim().is_empty(),
             Kind::Folder(folder) => folder.text.input.value().trim().is_empty(),
-            Kind::Dropdown(pick) | Kind::Radio(pick) => pick.chosen.is_none(),
-            Kind::Ticks(rows) => rows.ticked.is_empty(),
+            // What counts is what the owner can see: a chosen id or a tick whose option is not
+            // offered (yet, or any more) does not fill the field.
+            Kind::Dropdown(pick) | Kind::Radio(pick) => !pick
+                .chosen
+                .as_ref()
+                .is_some_and(|id| pick.options.iter().any(|option| &option.id == id)),
+            Kind::Ticks(rows) => rows.ticked_count() == 0,
             Kind::List(_) | Kind::Toggle(_) => false,
         };
         unmet.then(|| needs.clone())
@@ -481,6 +496,22 @@ mod tests {
             field.value(),
             Some(Value::Ticked(vec!["a".into(), "b".into()]))
         );
+    }
+
+    #[test]
+    fn only_offered_options_count_as_ticked_or_chosen() {
+        let mut ticks = Field::ticks("t", "T").needs("Tick one");
+        ticks.set(Value::Ticked(vec!["gone".into()]));
+        ticks.replace_options(options());
+        assert_eq!(ticks.missing().as_deref(), Some("Tick one"));
+        if let Kind::Ticks(rows) = &ticks.kind {
+            assert_eq!(rows.ticked_count(), 0);
+        }
+        let mut radio = Field::radio("r", "R").options(options()).needs("Choose");
+        radio.set(Value::Choice(Some("gone".into())));
+        assert_eq!(radio.missing().as_deref(), Some("Choose"));
+        radio.set(Value::Choice(Some("a".into())));
+        assert_eq!(radio.missing(), None);
     }
 
     #[test]

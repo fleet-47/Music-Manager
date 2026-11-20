@@ -526,7 +526,7 @@ fn draw_rows(
     }
     let count = Rect::new(area.x, list.y.saturating_add(LIST_ROWS), area.width, 1);
     let text = if ticks {
-        format!("{} of {} ticked", rows.ticked.len(), rows.options.len())
+        format!("{} of {} ticked", rows.ticked_count(), rows.options.len())
     } else if typed.is_empty() {
         format!("{} in the list", rows.options.len())
     } else {
@@ -582,7 +582,14 @@ fn draw_browser(
     hits: &mut HitMap<Target>,
 ) {
     let head = Rect::new(area.x, area.y, area.width, 1);
-    Line::styled(browser.cwd().display().to_string(), style.label).render(head, buf);
+    // The end of the path names the folder shown; a path too long for the row loses its start
+    // (a right-aligned line that does not fit is cut on the left).
+    let path = Line::styled(browser.cwd().display().to_string(), style.label);
+    if path.width() > usize::from(head.width) {
+        path.right_aligned().render(head, buf);
+    } else {
+        path.render(head, buf);
+    }
     let files = browser.files();
     let rows = usize::from(BROWSER_ROWS.min(area.height.saturating_sub(3)).max(1));
     let first = browser

@@ -228,11 +228,21 @@ impl Form {
 
     /// Show or hide field `key`. Focus on a field that is hidden moves to the next stop.
     pub fn set_visible(&mut self, key: Key, visible: bool) {
+        let before = self.stops();
         if let Some(field) = self.field_mut(key) {
             field.visible = visible;
         }
-        if !self.stops().contains(&self.focus) {
-            self.focus = self.stops().into_iter().next().unwrap_or(Focus::Primary);
+        let after = self.stops();
+        if !after.contains(&self.focus) {
+            let at = before
+                .iter()
+                .position(|stop| stop == &self.focus)
+                .unwrap_or(0);
+            self.focus = before
+                .into_iter()
+                .skip(at)
+                .find(|stop| after.contains(stop))
+                .unwrap_or(Focus::Primary);
         }
     }
 
@@ -668,6 +678,18 @@ impl Form {
     }
 
     fn click(&mut self, target: &Target, event: MouseEvent, hits: &HitMap<Target>) -> Reaction {
+        // A click anywhere but on an open dropdown closes it, as moving the keyboard away does.
+        let own = match target {
+            Target::Field(key) | Target::Row { field: key, .. } => Some(*key),
+            _ => None,
+        };
+        for field in &mut self.fields {
+            if let Kind::Dropdown(pick) = &mut field.kind
+                && own != Some(field.key)
+            {
+                pick.open = false;
+            }
+        }
         match target.clone() {
             Target::Primary => {
                 self.focus = Focus::Primary;
@@ -763,13 +785,22 @@ impl Form {
             ) => Some(*key),
             _ => None,
         };
-        if let Some(Kind::Ticks(rows) | Kind::List(rows)) = key
+        match key
             .and_then(|key| self.field_mut(key))
             .map(|field| &mut field.kind)
         {
-            let most = rows.listed().len().saturating_sub(usize::from(LIST_ROWS));
-            rows.offset = rows.offset.saturating_add_signed(delta).min(most);
-            return Reaction::Handled;
+            Some(Kind::Ticks(rows) | Kind::List(rows)) => {
+                let most = rows.listed().len().saturating_sub(usize::from(LIST_ROWS));
+                rows.offset = rows.offset.saturating_add_signed(delta).min(most);
+                return Reaction::Handled;
+            }
+            // An open dropdown's list scrolls under the wheel as Up and Down move it.
+            Some(Kind::Dropdown(pick)) if pick.open => {
+                let last = pick.options.len().saturating_sub(1);
+                pick.cursor = pick.cursor.saturating_add_signed(delta).min(last);
+                return Reaction::Handled;
+            }
+            _ => {}
         }
         // Anywhere else on the form the wheel moves through it as Tab and Shift+Tab do, so the
         // drawn part follows the focus and a form taller than the popup can be read to its end.
