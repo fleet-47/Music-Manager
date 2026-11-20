@@ -2,36 +2,40 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Wrap,
+    Block, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
-use sdl_core::{ErrorInfo, SignInState, TaskId};
+use sdl_core::{AttentionKind, ErrorInfo, SignInState, TaskId};
 
-use crate::app::{App, ListPopup, ListStage, Popup, task_name};
+use crate::app::{App, Popup};
 use crate::fmt;
-use crate::keys::{HELP, KEY_WIDTH};
+use crate::form;
+use crate::keys::{self, HELP, Hint, KEY_WIDTH};
+use crate::tasks::task_name;
 use crate::theme::Theme;
-use crate::ui::{numbered, spinner};
+use crate::ui::spinner;
 
 const NARROW: u16 = 56;
 const WIDE: u16 = 72;
 
 /// The key hints for the screen as it is now: the footer line and the line at a popup's foot.
 /// When they do not fit in `width` columns, the first hints go (moving keys come first), so the
-/// keys that start, stop, cancel and quit stay visible.
+/// keys that start, stop, cancel and quit, and the note on what is missing, stay visible.
 #[must_use]
 pub fn hint_line(app: &App, theme: Theme, width: u16) -> Line<'static> {
     let hints = app.hints();
-    let len = |hints: &[(&str, &str)]| {
+    let len = |hints: &[Hint]| {
         hints
             .iter()
-            .map(|(key, what)| {
-                key.chars()
+            .map(|hint| match hint {
+                Hint::Key(key, what) => key
+                    .chars()
                     .count()
                     .saturating_add(what.chars().count())
-                    .saturating_add(3)
+                    .saturating_add(3),
+                Hint::Missing(text) => text.chars().count().saturating_add(2),
             })
             .fold(1, usize::saturating_add)
             // The last hint needs no gap after it.
@@ -42,9 +46,14 @@ pub fn hint_line(app: &App, theme: Theme, width: u16) -> Line<'static> {
         from = from.saturating_add(1);
     }
     let mut spans = vec![Span::raw(" ")];
-    for (key, what) in hints.into_iter().skip(from) {
-        spans.push(Span::styled(key, theme.emphasis()));
-        spans.push(Span::styled(format!(" {what}  "), theme.secondary()));
+    for hint in hints.into_iter().skip(from) {
+        match hint {
+            Hint::Key(key, what) => {
+                spans.push(Span::styled(key, theme.emphasis()));
+                spans.push(Span::styled(format!(" {what}  "), theme.secondary()));
+            }
+            Hint::Missing(text) => spans.push(Span::styled(text, theme.attention())),
+        }
     }
     Line::from(spans)
 }
@@ -63,43 +72,50 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             "Sign in to Spotify",
             sign_in_lines(state, app, theme),
         ),
-        Popup::Lists(list) => render_lists(frame, area, app, theme, list),
-        Popup::Link(input) => render_link(frame, area, app, theme, input),
-        Popup::CardPlan(None) => text_popup(
-            frame,
-            area,
-            app,
-            theme,
-            "Sync card",
-            vec![busy("Mounting the card…", app, theme)],
-        ),
-        Popup::CardPlan(Some(plan)) => {
-            let text = format!(
-                "{} files to copy, {} already on the card",
-                fmt::thousands(plan.to_copy),
-                fmt::thousands(plan.already)
+        Popup::Looking(task) => {
+            let text = match task {
+                TaskId::SyncDevice => "Looking for devices…",
+                _ => "Looking at your music folders…",
+            };
+            text_popup(
+                frame,
+                area,
+                app,
+                theme,
+                task_name(*task),
+                vec![busy(text, app, theme)],
             );
-            let lines = vec![Line::from(numbered(&text, theme.body(), theme))];
-            text_popup(frame, area, app, theme, "Sync card", lines);
         }
-        Popup::UnmountConfirm => text_popup(
+        Popup::Form(dialog) => {
+            let width = form::view::WIDTH.min(area.width).saturating_sub(4);
+            let hints = hint_line(app, theme, width);
+            form::view::render(
+                frame,
+                area,
+                theme,
+                dialog.form(),
+                hints,
+                &spinner(app, theme),
+            );
+        }
+        Popup::EjectConfirm(name) => text_popup(
             frame,
             area,
             app,
             theme,
-            "Clean up and unmount?",
+            &format!("Clean up and eject {name}?"),
             vec![Line::styled(
-                "Remove .Spotlight-V100, .Trashes and .fseventsd from the card, then unmount it.",
+                "Remove .Spotlight-V100, .Trashes and .fseventsd from the device, then unmount it.",
                 theme.body(),
             )],
         ),
-        Popup::Unmounting => text_popup(
+        Popup::Ejecting => text_popup(
             frame,
             area,
             app,
             theme,
-            "Sync card",
-            vec![busy("Cleaning up and unmounting the card…", app, theme)],
+            "Sync device",
+            vec![busy("Cleaning up and unmounting the device…", app, theme)],
         ),
         Popup::Attention { task, cursor } => {
             render_attention(frame, area, app, theme, *task, *cursor);
@@ -156,10 +172,13 @@ fn sign_in_lines(state: &SignInState, app: &App, theme: Theme) -> Vec<Line<'stat
                 theme,
             )]
         }
-        SignInState::SignedIn => vec![Line::from(vec![
-            Span::styled("✓ ", theme.done()),
-            Span::styled("Signed in. Loading your lists…", theme.body()),
-        ])],
+        SignInState::SignedIn => vec![
+            Line::from(vec![
+                Span::styled("✓ ", theme.done()),
+                Span::styled("Signed in.", theme.body()),
+            ]),
+            busy("Loading your lists…", app, theme),
+        ],
         SignInState::Failed(reason) => vec![
             Line::from(vec![
                 Span::styled("✗ ", theme.failed()),
@@ -184,7 +203,7 @@ fn error_lines(info: &ErrorInfo, theme: Theme) -> Vec<Line<'static>> {
     ]
 }
 
-fn centred(area: Rect, width: u16, height: u16) -> Rect {
+pub(crate) fn centred(area: Rect, width: u16, height: u16) -> Rect {
     let [row] = Layout::vertical([Constraint::Length(height.min(area.height))])
         .flex(Flex::Center)
         .areas(area);
@@ -195,7 +214,7 @@ fn centred(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 /// Clear the area and draw the popup's frame; returns the room inside.
-fn frame_popup(frame: &mut Frame, rect: Rect, theme: Theme, title: &str) -> Rect {
+pub(crate) fn frame_popup(frame: &mut Frame, rect: Rect, theme: Theme, title: &str) -> Rect {
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
         .title(Line::styled(format!(" {title} "), theme.heading()))
@@ -212,7 +231,7 @@ fn render_hints(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     frame.render_widget(Paragraph::new(hint_line(app, theme, area.width)), area);
 }
 
-fn scrollbar(frame: &mut Frame, area: Rect, theme: Theme, len: usize, at: usize) {
+pub(crate) fn scrollbar(frame: &mut Frame, area: Rect, theme: Theme, len: usize, at: usize) {
     let mut state = ScrollbarState::new(len).position(at);
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight).style(theme.border()),
@@ -244,116 +263,12 @@ fn text_popup(
     frame.render_widget(paragraph, inner);
 }
 
-fn render_lists(frame: &mut Frame, area: Rect, app: &App, theme: Theme, list: &ListPopup) {
-    let rows = u16::try_from(list.choices.len().min(10)).unwrap_or(10);
-    let rect = centred(area, NARROW, rows.saturating_add(6));
-    let inner = frame_popup(frame, rect, theme, "Sync Spotify: choose lists");
-    let [intro, body, _, status, hint] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
-    frame.render_widget(
-        Paragraph::new(Span::styled("Tick the lists to sync.", theme.secondary())),
-        intro,
-    );
-    let [choices, bar] =
-        Layout::horizontal([Constraint::Fill(1), Constraint::Length(1)]).areas(body);
-    // Counts line up on the right: names get the room left by the marker, the tick box, a gap
-    // and the widest count.
-    let count_width = list
-        .choices
-        .iter()
-        .map(|choice| fmt::thousands(choice.count).chars().count())
-        .max()
-        .unwrap_or(0);
-    let name_width = usize::from(choices.width)
-        .saturating_sub(8)
-        .saturating_sub(count_width);
-    let items: Vec<ListItem> = list
-        .choices
-        .iter()
-        .zip(&list.ticked)
-        .map(|(choice, on)| {
-            let (mark, style) = if *on {
-                ("[x] ", theme.done())
-            } else {
-                ("[ ] ", theme.secondary())
-            };
-            let name: String = choice.name.chars().take(name_width).collect();
-            ListItem::new(Line::from(vec![
-                Span::styled(mark, style),
-                Span::styled(format!("{name:<name_width$}  "), theme.body()),
-                Span::styled(
-                    format!("{:>count_width$}", fmt::thousands(choice.count)),
-                    theme.emphasis(),
-                ),
-            ]))
-        })
-        .collect();
-    let widget = List::new(items)
-        .highlight_style(theme.selected())
-        .highlight_symbol(Line::styled("▶ ", theme.emphasis()));
-    let mut state = ListState::default().with_selected(Some(list.cursor));
-    frame.render_stateful_widget(widget, choices, &mut state);
-    if list.choices.len() > usize::from(choices.height) {
-        scrollbar(frame, bar, theme, list.choices.len(), list.cursor);
+/// Unmatched items are yellow, failed ones red.
+fn reason_style(kind: AttentionKind, theme: Theme) -> Style {
+    match kind {
+        AttentionKind::Unmatched => theme.attention(),
+        AttentionKind::Failed => theme.failed(),
     }
-    frame.render_widget(Paragraph::new(list_status(list, app, theme)), status);
-    render_hints(frame, hint, app, theme);
-}
-
-fn list_status(list: &ListPopup, app: &App, theme: Theme) -> Line<'static> {
-    match list.stage {
-        ListStage::Choosing => {
-            let ticked = list.chosen().len();
-            let text = format!(
-                "{ticked} ticked, {} songs",
-                fmt::thousands(list.ticked_songs())
-            );
-            Line::from(numbered(&text, theme.body(), theme))
-        }
-        ListStage::Listing => busy("Listing the songs…", app, theme),
-        ListStage::Ready { new, total } => {
-            let text = format!("{} new of {}", fmt::thousands(new), fmt::thousands(total));
-            Line::from(numbered(&text, theme.body(), theme))
-        }
-    }
-}
-
-fn render_link(frame: &mut Frame, area: Rect, app: &App, theme: Theme, input: &tui_input::Input) {
-    let rect = centred(area, WIDE, 6);
-    let inner = frame_popup(frame, rect, theme, "Download link");
-    let [intro, field, _, hint] = Layout::vertical([Constraint::Length(1); 4]).areas(inner);
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            "Paste or type a link, then press Enter.",
-            theme.secondary(),
-        )),
-        intro,
-    );
-    let [prompt, text] =
-        Layout::horizontal([Constraint::Length(2), Constraint::Fill(1)]).areas(field);
-    frame.render_widget(Paragraph::new(Span::styled("> ", theme.emphasis())), prompt);
-    let scroll = input.visual_scroll(usize::from(text.width));
-    let offset = u16::try_from(scroll).unwrap_or(0);
-    frame.render_widget(
-        Paragraph::new(input.value())
-            .style(theme.body().patch(theme.selected()))
-            .scroll((0, offset)),
-        text,
-    );
-    let cursor = u16::try_from(input.visual_cursor().saturating_sub(scroll)).unwrap_or(0);
-    frame.set_cursor_position((
-        text.x
-            .saturating_add(cursor)
-            .min(text.right().saturating_sub(1)),
-        text.y,
-    ));
-    render_hints(frame, hint, app, theme);
 }
 
 fn render_attention(
@@ -365,7 +280,7 @@ fn render_attention(
     cursor: usize,
 ) {
     let items = &app.view(task).state.attention;
-    let rect = centred(area, WIDE, 18);
+    let rect = centred(area, WIDE, 20);
     let title = format!(
         "{}: {} need attention",
         task_name(task),
@@ -374,32 +289,96 @@ fn render_attention(
     let inner = frame_popup(frame, rect, theme, &title);
     let [body, hint] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
     let [rows, bar] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(1)]).areas(body);
-    let list_items: Vec<ListItem> = items
+    // Each item is its title line and its reason, wrapped to the width.
+    let reason_width = rows.width.saturating_sub(2);
+    let reasons: Vec<Paragraph> = items
         .iter()
         .map(|item| {
-            let mut first = vec![Span::styled(item.title.clone(), theme.body())];
-            if !item.artist.is_empty() {
-                first.push(Span::styled(
-                    format!(" · {}", item.artist),
-                    theme.secondary(),
-                ));
-            }
-            ListItem::new(vec![
-                Line::from(first),
-                Line::styled(format!("  {}", item.reason), theme.attention()),
-            ])
+            Paragraph::new(Line::styled(
+                item.reason.clone(),
+                reason_style(item.kind, theme),
+            ))
+            .wrap(Wrap { trim: false })
         })
         .collect();
-    let list = List::new(list_items)
-        .highlight_style(theme.selected())
-        .highlight_symbol(Line::styled("▶ ", theme.emphasis()));
-    frame.render_stateful_widget(
-        list,
-        rows,
-        &mut ListState::default().with_selected(Some(cursor)),
-    );
+    let heights: Vec<usize> = reasons
+        .iter()
+        .map(|reason| {
+            reason
+                .line_count(reason_width.max(1))
+                .max(1)
+                .saturating_add(1)
+        })
+        .collect();
+    let top = window_top(items.len(), cursor, usize::from(rows.height), |at| {
+        heights.get(at).copied().unwrap_or(1)
+    });
+    let mut y = rows.y;
+    for (at, (item, reason)) in items.iter().zip(reasons).enumerate().skip(top) {
+        let height = u16::try_from(heights.get(at).copied().unwrap_or(1)).unwrap_or(u16::MAX);
+        let slot = Rect::new(rows.x, y, rows.width, height).intersection(rows);
+        if slot.is_empty() {
+            break;
+        }
+        let here = at == cursor;
+        if here {
+            frame.render_widget(Block::new().style(theme.selected()), slot);
+        }
+        let mut first = vec![
+            Span::styled(if here { "▶ " } else { "  " }, theme.emphasis()),
+            Span::styled(item.title.clone(), theme.body()),
+        ];
+        if !item.artist.is_empty() {
+            first.push(Span::styled(
+                format!(" · {}", item.artist),
+                theme.secondary(),
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(first)),
+            Rect::new(slot.x, slot.y, slot.width, 1),
+        );
+        let text = Rect::new(
+            slot.x.saturating_add(2),
+            slot.y.saturating_add(1),
+            slot.width.saturating_sub(2),
+            slot.height.saturating_sub(1),
+        );
+        frame.render_widget(reason, text);
+        y = y.saturating_add(height);
+    }
     scrollbar(frame, bar, theme, items.len(), cursor);
     render_hints(frame, hint, app, theme);
+}
+
+/// First entry shown, for a list of `len` entries (`height` gives each one's lines) in `room`
+/// lines with the cursor on entry `cursor`: the cursor sits near the middle, and room left over at
+/// the end of the list goes above it, so the window never shows blank space it could fill.
+#[must_use]
+pub fn window_top(
+    len: usize,
+    cursor: usize,
+    room: usize,
+    height: impl Fn(usize) -> usize,
+) -> usize {
+    let cursor = cursor.min(len.saturating_sub(1));
+    let above_budget = room.saturating_sub(height(cursor)) / 2;
+    let mut top = cursor;
+    let mut above = 0_usize;
+    while top > 0 && above.saturating_add(height(top.saturating_sub(1))) <= above_budget {
+        top = top.saturating_sub(1);
+        above = above.saturating_add(height(top));
+    }
+    let below = (cursor.saturating_add(1)..len)
+        .map(&height)
+        .fold(0, usize::saturating_add);
+    let used = above.saturating_add(height(cursor));
+    let mut spare = room.saturating_sub(used).saturating_sub(below);
+    while top > 0 && height(top.saturating_sub(1)) <= spare {
+        top = top.saturating_sub(1);
+        spare = spare.saturating_sub(height(top));
+    }
+    top
 }
 
 fn help_lines(theme: Theme) -> Vec<Line<'static>> {
@@ -409,14 +388,27 @@ fn help_lines(theme: Theme) -> Vec<Line<'static>> {
             lines.push(Line::default());
         }
         lines.push(Line::styled(group.title, theme.heading()));
-        for (key, what) in group.keys {
+        for key in group.keys {
             lines.push(Line::from(vec![
-                Span::styled(format!("{key:<KEY_WIDTH$}"), theme.emphasis()),
-                Span::styled(*what, theme.body()),
+                Span::styled(format!("{:<KEY_WIDTH$}", key.help_key), theme.emphasis()),
+                Span::styled(key.what, theme.body()),
             ]));
         }
     }
     lines
+}
+
+/// Lines of help text the popup shows at once on a screen `screen_height` rows tall: its own
+/// height less the border and the hint line.
+fn help_visible(screen_height: u16) -> usize {
+    let wanted = keys::help_line_count().saturating_add(3);
+    usize::from(screen_height).min(wanted).saturating_sub(3)
+}
+
+/// The furthest the help can scroll on a screen `screen_height` rows tall: the last full page.
+#[must_use]
+pub fn help_max_scroll(screen_height: u16) -> usize {
+    keys::help_line_count().saturating_sub(help_visible(screen_height))
 }
 
 fn render_help(frame: &mut Frame, area: Rect, app: &App, theme: Theme, scroll: usize) {

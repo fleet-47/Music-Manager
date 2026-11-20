@@ -7,7 +7,7 @@ use std::process::{Output, Stdio};
 use std::time::Duration;
 
 use innertube_rs::{Innertube, MusicSearchFilter};
-use sdl_core::Track;
+use sdl_core::{Format, Track};
 use serde::Deserialize;
 use tokio::process::Command;
 
@@ -24,7 +24,7 @@ const SIMILARITY_MIN: f64 = 0.9;
 const ALBUM_BONUS: f64 = 0.5;
 
 /// How many search results are looked at, best-ranked first.
-pub const RESULTS_CHECKED: usize = 5;
+const RESULTS_CHECKED: usize = 5;
 
 /// Errors from the `YouTube` crate. Messages are plain words fit for the error popup.
 #[derive(Debug, thiserror::Error)]
@@ -48,30 +48,23 @@ pub enum YoutubeError {
 
 /// What Spotify says about a song.
 #[derive(Debug, Clone, Copy)]
-pub struct Wanted<'a> {
-    /// Title.
-    pub title: &'a str,
-    /// Artists.
-    pub artists: &'a [String],
-    /// Album title.
-    pub album: &'a str,
-    /// Duration.
-    pub duration: Duration,
+struct Wanted<'a> {
+    title: &'a str,
+    artists: &'a [String],
+    album: &'a str,
+    duration: Duration,
 }
 
 /// One `YouTube` Music song result (from `MusicTrackItem`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Found {
-    /// Video id.
-    pub video_id: String,
-    /// Title.
-    pub title: String,
-    /// Artist names.
-    pub artists: Vec<String>,
+struct Found {
+    video_id: String,
+    title: String,
+    artists: Vec<String>,
     /// Album title, when the result has one.
-    pub album: Option<String>,
+    album: Option<String>,
     /// Duration, when the result has one.
-    pub duration: Option<Duration>,
+    duration: Option<Duration>,
 }
 
 /// Whether a bracketed part names a feature or a version: it holds one of the words `feat`,
@@ -117,12 +110,39 @@ fn normalise(text: &str) -> String {
     kept.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Whether two normalised texts match: similarity at least [`SIMILARITY_MIN`], or one contains the
-/// other. An empty text matches nothing.
-fn texts_match(a: &str, b: &str) -> bool {
+/// Whether `short` is a whole-word prefix of `long`: every word of `short` equals the word at the
+/// same place in `long`, and `long` has more words.
+fn is_whole_word_prefix(short: &str, long: &str) -> bool {
+    let mut short_words = short.split_whitespace();
+    let mut long_words = long.split_whitespace();
+    loop {
+        match (short_words.next(), long_words.next()) {
+            (Some(a), Some(b)) if a == b => {}
+            (None, Some(_)) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Whether two normalised titles match: similarity at least [`SIMILARITY_MIN`], or the shorter is a
+/// whole-word prefix of the longer. An empty text matches nothing.
+fn titles_match(a: &str, b: &str) -> bool {
     !a.is_empty()
         && !b.is_empty()
-        && (strsim::jaro_winkler(a, b) >= SIMILARITY_MIN || a.contains(b) || b.contains(a))
+        && (strsim::jaro_winkler(a, b) >= SIMILARITY_MIN
+            || is_whole_word_prefix(a, b)
+            || is_whole_word_prefix(b, a))
+}
+
+/// The similarity of two normalised artist or album names when they match (at least
+/// [`SIMILARITY_MIN`], by similarity only: no substring rule), else `None`. An empty text matches
+/// nothing.
+fn close_match(a: &str, b: &str) -> Option<f64> {
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    let similarity = strsim::jaro_winkler(a, b);
+    (similarity >= SIMILARITY_MIN).then_some(similarity)
 }
 
 /// The score of one result, or `None` when it does not pass (F5).
@@ -133,22 +153,21 @@ fn score(wanted: &Wanted<'_>, found: &Found) -> Option<f64> {
     }
     let want_title = normalise(wanted.title);
     let found_title = normalise(&found.title);
-    if !texts_match(&want_title, &found_title) {
+    if !titles_match(&want_title, &found_title) {
         return None;
     }
     let found_artists: Vec<String> = found.artists.iter().map(|a| normalise(a)).collect();
     let mut best_artist: Option<f64> = None;
     for want in wanted.artists.iter().map(|a| normalise(a)) {
         for have in &found_artists {
-            if texts_match(&want, have) {
-                let similarity = strsim::jaro_winkler(&want, have);
+            if let Some(similarity) = close_match(&want, have) {
                 best_artist = Some(best_artist.map_or(similarity, |best| best.max(similarity)));
             }
         }
     }
     let artist = best_artist?;
     let album = found.album.as_deref().map_or(0.0, |album| {
-        if texts_match(&normalise(wanted.album), &normalise(album)) {
+        if close_match(&normalise(wanted.album), &normalise(album)).is_some() {
             ALBUM_BONUS
         } else {
             0.0
@@ -162,11 +181,11 @@ fn score(wanted: &Wanted<'_>, found: &Found) -> Option<f64> {
 /// result.
 ///
 /// A result passes when its duration is within 3 s of Spotify's, its title matches and at least
-/// one artist matches. Text is compared after [`normalise`]; two texts match when
-/// `strsim::jaro_winkler` is at least 0.9 or one contains the other. Score = title similarity +
+/// one artist matches. Text is compared after [`normalise`]; titles match when
+/// `strsim::jaro_winkler` is at least 0.9 or the shorter is a whole-word prefix of the longer;
+/// artists match by similarity alone; empty text matches nothing. Score = title similarity +
 /// best artist similarity + 0.5 when the album titles match.
-#[must_use]
-pub fn best_match(wanted: &Wanted<'_>, found: &[Found]) -> Option<usize> {
+fn best_match(wanted: &Wanted<'_>, found: &[Found]) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (index, candidate) in found.iter().take(RESULTS_CHECKED).enumerate() {
         if let Some(value) = score(wanted, candidate)
@@ -304,46 +323,105 @@ async fn run_yt_dlp(args: &[&OsStr]) -> Result<Output, YoutubeError> {
     }
 }
 
-/// The last line of `stderr` that starts with `ERROR:`, or the exit message when there is none.
+/// The last line of `stderr` that starts with `ERROR:`, without that prefix (the message already
+/// says yt-dlp failed), or the exit message when there is none.
 fn last_error_line(stderr: &[u8]) -> String {
     String::from_utf8_lossy(stderr)
         .lines()
         .rev()
-        .find(|line| line.starts_with("ERROR:"))
+        .find_map(|line| line.strip_prefix("ERROR:"))
         .map_or_else(
-            || "yt-dlp exited with an error and printed no ERROR line".to_owned(),
+            || "it exited with an error and printed no ERROR line".to_owned(),
             |line| line.trim().to_owned(),
         )
 }
 
-/// Download one item's audio as Opus to `temp` (F6): run `yt-dlp` with `tokio::process::Command`,
-/// stdin null, `kill_on_drop(true)`, stdout and stderr piped, flags
-/// `-f bestaudio[acodec=opus]/bestaudio -x --audio-format opus --no-playlist --no-progress -o <temp>
-/// -- <url>`. `url` is [`Candidate::url`] for a match, or an item URL from [`list_link`].
+/// Who writes the tags and cover of a downloaded file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagsFrom {
+    /// The caller does (Sync Spotify tags the temp file with `lofty`).
+    Caller,
+    /// yt-dlp does (Download link): `--embed-metadata --embed-thumbnail`, confirmed for Opus, MP3
+    /// and M4A outputs (see [`download_audio`]).
+    YtDlp,
+}
+
+/// The yt-dlp arguments that pick and convert the audio for `format` (F9). For `Opus` (the
+/// "Original" row) an Opus stream is preferred and copied as served.
+fn format_args(format: Format) -> &'static [&'static str] {
+    match format {
+        Format::Opus => &[
+            "-f",
+            "bestaudio[acodec=opus]/bestaudio",
+            "-x",
+            "--audio-format",
+            "opus",
+        ],
+        Format::Mp3 => &[
+            "-f",
+            "bestaudio",
+            "-x",
+            "--audio-format",
+            "mp3",
+            "--audio-quality",
+            "0",
+        ],
+        Format::M4a => &[
+            "-f",
+            "bestaudio[ext=m4a]/bestaudio",
+            "-x",
+            "--audio-format",
+            "m4a",
+        ],
+    }
+}
+
+/// The whole `yt-dlp` argument list for one download: the format's arguments ([`format_args`]),
+/// then `--embed-metadata --embed-thumbnail` for [`TagsFrom::YtDlp`], then
+/// `--no-playlist --no-progress -o <template> -- <url>`.
+fn download_args(format: Format, tags: TagsFrom, template: &str, url: &str) -> Vec<String> {
+    let mut args: Vec<String> = format_args(format).iter().map(|&a| a.to_owned()).collect();
+    if tags == TagsFrom::YtDlp {
+        args.push("--embed-metadata".to_owned());
+        args.push("--embed-thumbnail".to_owned());
+    }
+    args.extend(
+        ["--no-playlist", "--no-progress", "-o", template, "--", url]
+            .iter()
+            .map(|&a| a.to_owned()),
+    );
+    args
+}
+
+/// Download one item's audio in `format` to `temp` (F6, F9): run `yt-dlp` with
+/// `tokio::process::Command`, stdin null, `kill_on_drop(true)`, stdout and stderr piped, with the
+/// arguments of [`download_args`]. `url` is [`Candidate::url`] for a match, or an item URL from
+/// [`list_link`].
 ///
-/// `temp` must end in `.opus` and must not exist yet: yt-dlp skips a download whose output already
-/// exists. yt-dlp downloads to `temp` with the source's extension, then `-x` copies an Opus stream
-/// into `temp` without re-encoding (`FFmpegExtractAudioPP` uses `-acodec copy` when the file's codec
-/// is the target). `%` in `temp` is written as `%%`, since `-o` is an output template. The caller
-/// owns `temp`'s directory and removes it.
+/// `temp` must end in `format.extension()` and must not exist yet. Checked with yt-dlp 2026.10.26
+/// and ffmpeg 9.0.2 from mise, for every source codec (Opus, M4A, MP3) and target, with and
+/// without the embed flags: the finished file lands at exactly `temp`, in the target codec (read
+/// back with `ffprobe`); a source already in the target codec is copied, not re-encoded
+/// ("`ExtractAudio`: Not converting audio ... already in target format"); any other source is
+/// converted with ffmpeg and the intermediate file is deleted. `%` in `temp` is written as `%%`,
+/// since `-o` is an output template. The caller owns `temp`'s directory and removes it.
+///
+/// What [`TagsFrom::YtDlp`] needs: Opus embeds the cover with `mutagen` and fails the download
+/// with "module mutagen was not found" when it is missing; M4A tries `mutagen`, then
+/// `AtomicParsley`, then ffmpeg; MP3 uses ffmpeg. The yt-dlp that mise installs bundles `mutagen`
+/// (`yt-dlp -v` lists `mutagen-1.48.1`), and ffmpeg is a mise tool too. A source with no thumbnail
+/// only prints a warning.
 ///
 /// # Errors
 /// [`YoutubeError::YtDlpNotFound`], or [`YoutubeError::YtDlp`] with the last `ERROR:` line.
-pub async fn download_audio(url: &str, temp: &Path) -> Result<(), YoutubeError> {
-    let template = output_template(temp);
-    let args: [&OsStr; 11] = [
-        OsStr::new("-f"),
-        OsStr::new("bestaudio[acodec=opus]/bestaudio"),
-        OsStr::new("-x"),
-        OsStr::new("--audio-format"),
-        OsStr::new("opus"),
-        OsStr::new("--no-playlist"),
-        OsStr::new("--no-progress"),
-        OsStr::new("-o"),
-        OsStr::new(&template),
-        OsStr::new("--"),
-        OsStr::new(url),
-    ];
+pub async fn download_audio(
+    url: &str,
+    temp: &Path,
+    format: Format,
+    tags: TagsFrom,
+) -> Result<(), YoutubeError> {
+    let args = download_args(format, tags, &output_template(temp), url);
+    let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
     run_yt_dlp(&args).await.map(drop)
 }
 
@@ -536,6 +614,38 @@ mod tests {
     }
 
     #[test]
+    fn each_format_has_its_documented_arguments() {
+        assert_eq!(
+            format_args(Format::Opus).join(" "),
+            "-f bestaudio[acodec=opus]/bestaudio -x --audio-format opus"
+        );
+        assert_eq!(
+            format_args(Format::Mp3).join(" "),
+            "-f bestaudio -x --audio-format mp3 --audio-quality 0"
+        );
+        assert_eq!(
+            format_args(Format::M4a).join(" "),
+            "-f bestaudio[ext=m4a]/bestaudio -x --audio-format m4a"
+        );
+    }
+
+    #[test]
+    fn download_args_end_with_the_fixed_tail_and_embed_only_when_asked() {
+        let plain = download_args(Format::Mp3, TagsFrom::Caller, "/t/a.mp3", "https://u");
+        assert_eq!(
+            plain.join(" "),
+            "-f bestaudio -x --audio-format mp3 --audio-quality 0 \
+             --no-playlist --no-progress -o /t/a.mp3 -- https://u"
+        );
+        for format in Format::DOWNLOAD {
+            let tagged = download_args(format, TagsFrom::YtDlp, "/t/a", "https://u");
+            let joined = tagged.join(" ");
+            assert!(joined.contains("--embed-metadata --embed-thumbnail --no-playlist"));
+            assert!(joined.ends_with("-o /t/a -- https://u"));
+        }
+    }
+
+    #[test]
     fn output_template_escapes_percent() {
         assert_eq!(
             output_template(Path::new("/m/100% Hits/.sdl-tmp/x/audio.opus")),
@@ -644,13 +754,107 @@ mod tests {
         assert_eq!(best_match(&spotify, &results), None);
     }
 
+    fn matches(title: &str, artist: &str, result: &Found) -> bool {
+        let artists = names(&[artist]);
+        let mut spotify = wanted(&artists);
+        spotify.title = title;
+        best_match(&spotify, std::slice::from_ref(result)).is_some()
+    }
+
+    fn plain_get_lucky() -> Found {
+        found("Get Lucky", &["Daft Punk"], None, 369)
+    }
+
+    #[test]
+    fn tribute_band_is_not_the_artist() {
+        let tribute = found("Get Lucky", &["Daft Punk Tribute Band"], None, 369);
+        assert!(!matches("Get Lucky", "Daft Punk", &tribute));
+        assert!(!matches(
+            "Get Lucky",
+            "Daft Punk Tribute Band",
+            &plain_get_lucky()
+        ));
+    }
+
+    #[test]
+    fn artist_inside_a_longer_name_is_not_a_match() {
+        let result = found("Get Lucky", &["The Daft Punk Experience"], None, 369);
+        assert!(!matches("Get Lucky", "Daft Punk", &result));
+    }
+
+    #[test]
+    fn remaster_suffix_matches_bracketed_or_dashed_on_either_side() {
+        let dashed = found("Get Lucky - 2013 Remaster", &["Daft Punk"], None, 369);
+        assert!(matches("Get Lucky", "Daft Punk", &dashed));
+        let bracketed = found("Get Lucky (2013 Remaster)", &["Daft Punk"], None, 369);
+        assert!(matches("Get Lucky", "Daft Punk", &bracketed));
+        assert!(matches(
+            "Get Lucky [Remastered 2013]",
+            "Daft Punk",
+            &plain_get_lucky()
+        ));
+    }
+
+    #[test]
+    fn featured_artist_suffix_matches_on_either_side() {
+        let result = found(
+            "Get Lucky (feat. Pharrell Williams)",
+            &["Daft Punk"],
+            None,
+            369,
+        );
+        assert!(matches("Get Lucky", "Daft Punk", &result));
+        assert!(matches(
+            "Get Lucky (ft. Pharrell Williams)",
+            "Daft Punk",
+            &plain_get_lucky()
+        ));
+    }
+
+    #[test]
+    fn a_short_title_inside_a_long_one_needs_a_whole_word_prefix() {
+        let mid = found("Crazy in Love", &["Beyonce"], None, 369);
+        assert!(!matches("Love", "Beyonce", &mid));
+        let partial_word = found("Heyday", &["Beyonce"], None, 369);
+        assert!(!matches("Hey", "Beyonce", &partial_word));
+        let prefix = found("Love Me Do", &["Beyonce"], None, 369);
+        assert!(matches("Love", "Beyonce", &prefix));
+        let short = found("Love", &["Beyonce"], None, 369);
+        assert!(matches("Love Me Do", "Beyonce", &short));
+    }
+
+    #[test]
+    fn a_whole_word_prefix_title_with_the_wrong_length_is_rejected() {
+        let artists = names(&["Beyonce"]);
+        let mut spotify = wanted(&artists);
+        spotify.title = "Love";
+        let results = [found("Love Me Do", &["Beyonce"], None, 150)];
+        assert_eq!(best_match(&spotify, &results), None);
+    }
+
+    #[test]
+    fn live_version_is_left_to_the_duration_check() {
+        let live = found("Get Lucky (Live)", &["Daft Punk"], None, 369);
+        assert!(matches("Get Lucky", "Daft Punk", &live));
+        let long_live = found("Get Lucky (Live)", &["Daft Punk"], None, 452);
+        assert!(!matches("Get Lucky", "Daft Punk", &long_live));
+    }
+
+    #[test]
+    fn empty_artist_text_matches_nothing() {
+        let blank = found("Get Lucky", &["", "(feat. X)"], None, 369);
+        assert!(!matches("Get Lucky", "", &blank));
+        assert!(!matches("Get Lucky", "Daft Punk", &blank));
+    }
+
     #[test]
     fn last_error_line_is_the_last_one_starting_with_error() {
         let stderr =
             b"WARNING: x\nERROR: first\nnoise\nERROR: [youtube] abc: Video unavailable\ntrailing\n";
+        assert_eq!(last_error_line(stderr), "[youtube] abc: Video unavailable");
         assert_eq!(
-            last_error_line(stderr),
-            "ERROR: [youtube] abc: Video unavailable"
+            YoutubeError::YtDlp(last_error_line(b"noise\n")).to_string(),
+            "yt-dlp failed: it exited with an error and printed no ERROR line"
         );
     }
 

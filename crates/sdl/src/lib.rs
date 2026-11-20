@@ -3,6 +3,8 @@
 pub mod app;
 pub mod control;
 pub mod fmt;
+pub mod form;
+pub mod forms;
 pub mod keys;
 pub mod popups;
 pub mod run;

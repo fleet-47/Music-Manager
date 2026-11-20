@@ -6,33 +6,35 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Gauge, Paragraph, Wrap};
-use sdl_core::TaskId;
+use sdl_core::{RunOutcome, TaskId};
 use throbber_widgets_tui::{BRAILLE_SIX, Throbber, WhichUse};
 
-use crate::app::{App, FUNCTIONS, Phase, Tone, task_name, tone};
+use crate::app::{App, FUNCTIONS, Phase, Tone, tone};
 use crate::fmt;
 use crate::popups;
 use crate::tasks;
+use crate::tasks::task_name;
 use crate::theme::Theme;
 
 /// Under this many columns the running panel moves below the main panel.
 pub const NARROW_COLUMNS: u16 = 60;
-/// Under this many rows only the function rows and the running counts show.
+/// Under this many rows only the function rows, the running counts and the footer show.
 pub const COMPACT_ROWS: u16 = 12;
 
 /// Draw the whole screen.
 pub fn render(frame: &mut Frame, app: &App, theme: Theme) {
     let area = frame.area();
     frame.render_widget(Block::new().style(theme.background()), area);
+    // The footer is one line at every height, so the keys that work are always on screen.
+    let [body, footer] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
     if area.height < COMPACT_ROWS {
-        render_compact(frame, area, app, theme);
+        render_compact(frame, body, app, theme);
     } else {
-        let [body, footer] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
         render_body(frame, body, app, theme);
-        render_footer(frame, footer, app, theme);
     }
-    popups::render(frame, area, app, theme);
+    render_footer(frame, footer, app, theme);
+    // Popups are centred over the body, so they never cover the footer.
+    popups::render(frame, body, app, theme);
 }
 
 /// `text` as spans, with numbers in the emphasis colour and the rest in `base`.
@@ -43,8 +45,11 @@ pub fn numbered(text: &str, base: Style, theme: Theme) -> Vec<Span<'static>> {
     let mut run_is_number = false;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
+        // A comma or point between digits belongs to the number: `2,117`, `4.2`.
         let is_number = c.is_ascii_digit()
-            || (c == ',' && run_is_number && chars.peek().is_some_and(char::is_ascii_digit));
+            || (matches!(c, ',' | '.')
+                && run_is_number
+                && chars.peek().is_some_and(char::is_ascii_digit));
         if is_number != run_is_number && !run.is_empty() {
             spans.push(run_span(&run, run_is_number, base, theme));
             run.clear();
@@ -127,9 +132,10 @@ fn function_row(app: &App, task: TaskId, theme: Theme, one_line: bool) -> Paragr
     let mut second = vec![Span::styled("Last run  ", theme.secondary())];
     match app.state.last_run.get(&task) {
         Some(run) => {
-            second.extend(numbered(&run.line, tone_style(&run.line, theme), theme));
+            second.extend(numbered(&run.line, tone_style(run.outcome, theme), theme));
+            // Non-breaking spaces keep "3 min ago" on one line when the row wraps.
             second.push(Span::styled(
-                format!("  {}", fmt::ago(app.now, run.at)),
+                format!("  {}", fmt::ago(app.now, run.at).replace(' ', "\u{a0}")),
                 theme.secondary(),
             ));
         }
@@ -139,7 +145,7 @@ fn function_row(app: &App, task: TaskId, theme: Theme, one_line: bool) -> Paragr
 }
 
 /// Rows each function's paragraph takes at `width` columns of panel (borders included).
-fn row_heights(app: &App, width: u16, theme: Theme) -> [u16; 3] {
+fn row_heights(app: &App, width: u16, theme: Theme) -> [u16; 4] {
     let text_width = width.saturating_sub(2).saturating_sub(MARKER);
     FUNCTIONS.map(|task| {
         let lines = function_row(app, task, theme, false).line_count(text_width);
@@ -155,7 +161,7 @@ fn render_main(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     // Short of room, each function keeps one line: its name and selection.
     let one_line = heights.iter().fold(2_u16, |sum, h| sum.saturating_add(*h)) > inner.height;
     if one_line {
-        heights = [1; 3];
+        heights = [1; 4];
     }
     let rows = Layout::vertical(heights.map(Constraint::Length))
         .spacing(1)
@@ -175,8 +181,8 @@ fn render_main(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     }
 }
 
-fn tone_style(line: &str, theme: Theme) -> Style {
-    match tone(line) {
+fn tone_style(outcome: RunOutcome, theme: Theme) -> Style {
+    match tone(outcome) {
         Tone::Done => theme.done(),
         Tone::Attention => theme.attention(),
         Tone::Stopped => theme.skipped(),
@@ -227,19 +233,28 @@ fn render_task_block(frame: &mut Frame, area: Rect, app: &App, theme: Theme, tas
     let step = Span::styled(format!("  {}", view.state.headline), theme.running());
     frame.render_widget(Paragraph::new(step), row(1));
 
-    let count = format!("  {}", fmt::x_of_y(counts.done, counts.total));
-    frame.render_widget(
-        Paragraph::new(Line::from(numbered(&count, theme.body(), theme))),
-        row(2),
-    );
-
-    let [_, bar] = Layout::horizontal([Constraint::Length(2), Constraint::Fill(1)]).areas(row(3));
-    let percent = fmt::percent(counts.done, counts.total);
-    let gauge = Gauge::default()
-        .percent(percent)
-        .gauge_style(theme.bar())
-        .label(Span::styled(format!("{percent}%"), theme.body()));
-    frame.render_widget(gauge, bar);
+    // Until the task knows how many items there are, it says so instead of showing "0 of 0" and
+    // an empty bar.
+    if counts.total == 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled("  counting…", theme.secondary())),
+            row(2),
+        );
+    } else {
+        let count = format!("  {}", fmt::x_of_y(counts.done, counts.total));
+        frame.render_widget(
+            Paragraph::new(Line::from(numbered(&count, theme.body(), theme))),
+            row(2),
+        );
+        let [_, bar] =
+            Layout::horizontal([Constraint::Length(2), Constraint::Fill(1)]).areas(row(3));
+        let percent = fmt::percent(counts.done, counts.total);
+        let gauge = Gauge::default()
+            .percent(percent)
+            .gauge_style(theme.bar())
+            .label(Span::styled(format!("{percent}%"), theme.body()));
+        frame.render_widget(gauge, bar);
+    }
 
     let estimate = fmt::estimate_text(tasks::estimate_remaining(
         view.elapsed,
@@ -251,10 +266,7 @@ fn render_task_block(frame: &mut Frame, area: Rect, app: &App, theme: Theme, tas
         row(4),
     );
     if counts.need_attention() > 0 {
-        let text = format!(
-            "  {} need attention",
-            fmt::thousands(counts.need_attention())
-        );
+        let text = format!("  {}", fmt::need_attention(counts.need_attention()));
         let line = Line::from(numbered(&text, theme.attention(), theme));
         frame.render_widget(Paragraph::new(line), row(5));
     }
@@ -272,12 +284,14 @@ fn render_compact(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             ];
             let view = app.view(task);
             if view.phase == Phase::Running {
+                let counts = view.state.counts;
+                let progress = if counts.total == 0 {
+                    "counting…".to_owned()
+                } else {
+                    fmt::x_of_y(counts.done, counts.total)
+                };
                 spans.push(Span::raw("  "));
-                spans.extend(numbered(
-                    &fmt::x_of_y(view.state.counts.done, view.state.counts.total),
-                    theme.running(),
-                    theme,
-                ));
+                spans.extend(numbered(&progress, theme.running(), theme));
             }
             let line = Line::from(spans);
             if selected {

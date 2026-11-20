@@ -32,7 +32,7 @@ use tokio::task::JoinSet;
 use url::Url;
 
 /// Redirect URI registered on the Spotify app; the local listener binds its port.
-pub const REDIRECT_URI: &str = "http://127.0.0.1:9900/";
+const REDIRECT_URI: &str = "http://127.0.0.1:9900/";
 /// Items per page and per headline update; rspotify's default `pagination_chunks`.
 const PAGE: usize = 50;
 /// HTTP status for rate limiting.

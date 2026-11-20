@@ -22,6 +22,43 @@ pub fn x_of_y(done: usize, total: usize) -> String {
     format!("{} of {}", thousands(done), thousands(total))
 }
 
+/// `1 file`, `2 files`, `2,117 files`.
+#[must_use]
+pub fn files(n: usize) -> String {
+    let noun = if n == 1 { "file" } else { "files" };
+    format!("{} {noun}", thousands(n))
+}
+
+/// `1 needs attention`, `3 need attention`.
+#[must_use]
+pub fn need_attention(n: usize) -> String {
+    let verb = if n == 1 { "needs" } else { "need" };
+    format!("{} {verb} attention", thousands(n))
+}
+
+/// A size in decimal units with one decimal: `0 B`, `950 B`, `4.2 GB`.
+#[must_use]
+pub fn bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut unit = 0;
+    let mut scale = 1_u64;
+    while n >= scale.saturating_mul(1_000) && unit < UNITS.len().saturating_sub(1) {
+        scale = scale.saturating_mul(1_000);
+        unit = unit.saturating_add(1);
+    }
+    let name = UNITS.get(unit).copied().unwrap_or("TB");
+    if unit == 0 {
+        return format!("{n} {name}");
+    }
+    let whole = n.checked_div(scale).unwrap_or(0);
+    let tenth = n
+        .checked_rem(scale)
+        .and_then(|rest| rest.checked_mul(10))
+        .and_then(|rest| rest.checked_div(scale))
+        .unwrap_or(0);
+    format!("{whole}.{tenth} {name}")
+}
+
 /// How long ago `at` was, relative to `now` (both seconds since the Unix epoch).
 #[must_use]
 pub fn ago(now: u64, at: u64) -> String {
@@ -81,6 +118,19 @@ mod tests {
         assert_eq!(thousands(2_117), "2,117");
         assert_eq!(thousands(1_234_567), "1,234,567");
         assert_eq!(x_of_y(412, 2_117), "412 of 2,117");
+    }
+
+    #[test]
+    fn counts_and_sizes_in_words() {
+        assert_eq!(files(1), "1 file");
+        assert_eq!(files(2_117), "2,117 files");
+        assert_eq!(need_attention(1), "1 needs attention");
+        assert_eq!(need_attention(1_200), "1,200 need attention");
+        assert_eq!(bytes(0), "0 B");
+        assert_eq!(bytes(999), "999 B");
+        assert_eq!(bytes(1_000), "1.0 KB");
+        assert_eq!(bytes(4_250_000_000), "4.2 GB");
+        assert_eq!(bytes(u64::MAX), "18446744.0 TB");
     }
 
     #[test]

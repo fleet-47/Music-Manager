@@ -5,6 +5,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use crate::Device;
+
 /// Id of the Liked Songs entry in a list of [`ListChoice`]. It contains a hyphen, which a Spotify
 /// playlist id (base 62) never does, so it cannot collide with one.
 pub const LIKED_SONGS_ID: &str = "liked-songs";
@@ -17,8 +19,21 @@ pub enum TaskId {
     SyncSpotify,
     /// Download link (F3).
     DownloadLink,
-    /// Sync card (F4).
-    SyncCard,
+    /// Convert (F10).
+    Convert,
+    /// Sync device (F4). Old state files call it `sync_card`.
+    #[serde(alias = "sync_card")]
+    SyncDevice,
+}
+
+impl TaskId {
+    /// The four functions, in the order of the main panel.
+    pub const ALL: [Self; 4] = [
+        Self::SyncSpotify,
+        Self::DownloadLink,
+        Self::Convert,
+        Self::SyncDevice,
+    ];
 }
 
 /// Per-task counts.
@@ -28,7 +43,7 @@ pub struct Counts {
     pub total: usize,
     /// Items finished, whatever the outcome.
     pub done: usize,
-    /// Items added (downloaded, or copied to the card).
+    /// Items added (downloaded, converted, or copied).
     pub added: usize,
     /// Items skipped because they already exist.
     pub skipped: usize,
@@ -46,15 +61,50 @@ impl Counts {
     }
 }
 
+/// Why an item is in the attention list; the UI colours it (unmatched yellow, failed red).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttentionKind {
+    /// No accepted match.
+    Unmatched,
+    /// The item failed.
+    Failed,
+}
+
 /// An unmatched or failed item, as listed in the attention list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attention {
+    /// Unmatched or failed.
+    pub kind: AttentionKind,
     /// Song or item title.
     pub title: String,
     /// Artist (empty for a link item that has none).
     pub artist: String,
     /// One-line plain reason.
     pub reason: String,
+}
+
+impl Attention {
+    /// An item with no accepted match.
+    #[must_use]
+    pub fn unmatched(title: String, artist: String, reason: String) -> Self {
+        Self {
+            kind: AttentionKind::Unmatched,
+            title,
+            artist,
+            reason,
+        }
+    }
+
+    /// An item that failed.
+    #[must_use]
+    pub fn failed(title: String, artist: String, reason: String) -> Self {
+        Self {
+            kind: AttentionKind::Failed,
+            title,
+            artist,
+            reason,
+        }
+    }
 }
 
 /// A Spotify list offered for ticking.
@@ -90,13 +140,39 @@ pub struct ErrorInfo {
     pub advice: String,
 }
 
-/// The card plan: `N files to copy, M already on the card`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CardSummary {
-    /// Files that will be copied.
-    pub to_copy: usize,
-    /// Files already on the card.
+/// The plan of a device sync or a Convert, shown in the step form's summary line before the owner
+/// starts it: `N files, X GB to copy · M already there · Y GB free on <device>`. When
+/// [`PlanSummary::can_start`] is false the summary says why in plain words and Enter is unavailable;
+/// the form stays open so the owner can change a row and see a new plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanSummary {
+    /// Files that will be written.
+    pub files: usize,
+    /// Bytes that will be written. A file that is converted counts its source size, so this is an
+    /// estimate when the plan converts.
+    pub bytes: u64,
+    /// Files left out because a song with that stem is already there in some format.
     pub already: usize,
+    /// Free space where the files go; `None` when it is not known (Convert, From device).
+    pub free_bytes: Option<u64>,
+    /// Why this plan cannot start, in plain words (Convert: "the destination is inside a folder
+    /// being converted"); `None` when nothing stands in the way. Not enough room is
+    /// [`PlanSummary::fits`], not a refusal.
+    pub refusal: Option<String>,
+}
+
+impl PlanSummary {
+    /// Whether the files fit. Unknown free space counts as fitting.
+    #[must_use]
+    pub fn fits(&self) -> bool {
+        self.free_bytes.is_none_or(|free| self.bytes <= free)
+    }
+
+    /// Whether Enter may start this plan: nothing refuses it and the files fit.
+    #[must_use]
+    pub fn can_start(&self) -> bool {
+        self.refusal.is_none() && self.fits()
+    }
 }
 
 /// What happened.
@@ -124,8 +200,14 @@ pub enum EventKind {
         /// How long Spotify asks the client to wait.
         wait: Option<Duration>,
     },
-    /// The card plan is ready.
-    CardSummary(CardSummary),
+    /// Sync device: the mounted external or removable volumes found (sent on start, and again after
+    /// a rescan). Empty means none.
+    Devices(Vec<Device>),
+    /// The top-level folders on the source side, for the Folders tick-list: Convert (the library's,
+    /// sent on start) or Sync device (answering a folders request).
+    Folders(Vec<String>),
+    /// The plan of a device sync or a Convert is ready.
+    Plan(PlanSummary),
     /// The task failed.
     Error(ErrorInfo),
     /// The task finished.
@@ -224,11 +306,11 @@ mod tests {
         };
         state.apply(&EventKind::Counts(counts));
         state.apply(&EventKind::Headline("Downloading".into()));
-        state.apply(&EventKind::Attention(Attention {
-            title: "T".into(),
-            artist: "A".into(),
-            reason: "no match".into(),
-        }));
+        state.apply(&EventKind::Attention(Attention::unmatched(
+            "T".into(),
+            "A".into(),
+            "no match".into(),
+        )));
         state.apply(&EventKind::Finished);
         assert_eq!(state.counts, counts);
         assert_eq!(state.counts.need_attention(), 2);
@@ -237,12 +319,50 @@ mod tests {
     }
 
     #[test]
+    fn attention_constructors_set_the_kind() {
+        let item = Attention::failed("T".into(), String::new(), "why".into());
+        assert_eq!(item.kind, AttentionKind::Failed);
+        assert_eq!(
+            Attention::unmatched(String::new(), String::new(), String::new()).kind,
+            AttentionKind::Unmatched
+        );
+    }
+
+    #[test]
+    fn a_plan_starts_when_it_fits_and_nothing_refuses_it() {
+        let plan = |bytes, free_bytes| PlanSummary {
+            files: 1,
+            bytes,
+            already: 0,
+            free_bytes,
+            refusal: None,
+        };
+        assert!(plan(10, Some(10)).can_start());
+        assert!(!plan(11, Some(10)).fits());
+        assert!(!plan(11, Some(10)).can_start());
+        assert!(plan(u64::MAX, None).fits());
+        let refused = PlanSummary {
+            refusal: Some("no".into()),
+            ..plan(0, None)
+        };
+        assert!(refused.fits());
+        assert!(!refused.can_start());
+    }
+
+    #[test]
+    fn the_four_functions_in_panel_order() {
+        assert_eq!(TaskId::ALL.len(), 4);
+        assert_eq!(TaskId::ALL.first(), Some(&TaskId::SyncSpotify));
+        assert_eq!(TaskId::ALL.last(), Some(&TaskId::SyncDevice));
+    }
+
+    #[test]
     fn events_carry_their_task() -> TestResult {
         let (tx, mut rx) = channel();
-        let sender = EventSender::new(TaskId::SyncCard, tx);
+        let sender = EventSender::new(TaskId::SyncDevice, tx);
         sender.send(EventKind::Finished);
         let event = rx.try_recv()?;
-        assert_eq!(event.task, TaskId::SyncCard);
+        assert_eq!(event.task, TaskId::SyncDevice);
         assert_eq!(event.kind, EventKind::Finished);
         Ok(())
     }

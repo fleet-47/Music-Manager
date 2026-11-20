@@ -21,7 +21,8 @@ pub(super) fn error_info(error: &TaskError) -> ErrorInfo {
     const DISK: &str =
         "Check that the folder named above exists and has free space, then try again.";
     let advice = match error {
-        TaskError::Youtube(YoutubeError::YtDlpNotFound) => {
+        TaskError::Youtube(YoutubeError::YtDlpNotFound)
+        | TaskError::Library(LibraryError::FfmpegNotFound) => {
             "Start sdl with `mise run tui` so it is on PATH."
         }
         TaskError::Youtube(YoutubeError::YtDlp(_) | YoutubeError::Listing(_)) => {
@@ -47,7 +48,10 @@ pub(super) fn error_info(error: &TaskError) -> ErrorInfo {
         }
         TaskError::Spotify(SpotifyError::BadListId(_)) => "Untick that list and try again.",
         TaskError::Library(LibraryError::Diskutil { .. }) => {
-            "Check that the card is in and that card_uuid in ~/.config/sdl/config.toml is right."
+            "Check that the device is still plugged in, press r to look again, then try again."
+        }
+        TaskError::Library(LibraryError::Ffmpeg { .. }) => {
+            "Check that the file plays, then try again."
         }
         TaskError::State(_) => super::runner::STATE_ADVICE,
         TaskError::Youtube(YoutubeError::Io(_))

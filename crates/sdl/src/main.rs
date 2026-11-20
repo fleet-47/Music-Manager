@@ -22,7 +22,7 @@ fn config_advice(error: &ConfigError) -> &'static str {
     match error {
         ConfigError::NoHome => "Set HOME, then start sdl again.",
         ConfigError::Read { .. } => {
-            "Copy config.example.toml from the sdl folder to that path and fill in client_id and card_uuid."
+            "Copy config.example.toml from the sdl folder to that path and fill in client_id."
         }
         ConfigError::Parse { .. } => {
             "Fix the line shown above; config.example.toml lists every setting."

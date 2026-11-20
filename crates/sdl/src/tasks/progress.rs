@@ -5,59 +5,12 @@ use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::time::Duration;
 
+use super::TaskError;
 use futures::{Stream, StreamExt};
+use sdl_core::paths::temp_file;
 use sdl_core::paths::tmp_dir;
-use sdl_core::{Attention, Counts, EventKind, EventSender, ListChoice};
+use sdl_core::{Attention, Counts, EventKind, EventSender, Format};
 use tempfile::{TempDir, TempPath};
-use tokio::sync::mpsc::UnboundedReceiver;
-
-use super::{Command, TaskError};
-
-/// Wait for the owner's list choice. `None` when the owner cancelled or the UI is gone. Commands
-/// that do not answer this step are ignored.
-pub(super) async fn wait_for_choices(
-    commands: &mut UnboundedReceiver<Command>,
-) -> Option<Vec<ListChoice>> {
-    loop {
-        match commands.recv().await? {
-            Command::Choices(chosen) => return Some(chosen),
-            Command::Cancel => return None,
-            Command::Go => {}
-        }
-    }
-}
-
-/// Wait for `Go`. `false` when the owner cancelled or the UI is gone. Commands that do not answer
-/// this step are ignored.
-pub(super) async fn wait_for_go(commands: &mut UnboundedReceiver<Command>) -> bool {
-    loop {
-        match commands.recv().await {
-            Some(Command::Go) => return true,
-            Some(Command::Cancel) | None => return false,
-            Some(Command::Choices(_)) => {}
-        }
-    }
-}
-
-/// Run `work` unless the owner cancels (or the UI goes) first: then `None`, and `work` is dropped,
-/// which frees what it holds (the sign-in listener's port, for one). Other commands cannot arrive
-/// while a step works, because the UI sends them only after the step's event.
-pub(super) async fn unless_cancelled<T>(
-    commands: &mut UnboundedReceiver<Command>,
-    work: impl Future<Output = T>,
-) -> Option<T> {
-    let cancelled = async {
-        while let Some(command) = commands.recv().await {
-            if command == Command::Cancel {
-                break;
-            }
-        }
-    };
-    tokio::select! {
-        out = work => Some(out),
-        () = cancelled => None,
-    }
-}
 
 /// How one item ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,13 +95,13 @@ where
 }
 
 /// A new temp directory for one download, inside `<music_root>/.sdl-tmp` (same volume as the
-/// library, so the final rename is atomic), and the path in it that yt-dlp writes to, which does
-/// not exist yet. The directory and anything in it go when the [`TempDir`] is dropped.
-pub(super) fn download_dir(root: &Path) -> std::io::Result<(TempDir, PathBuf)> {
+/// library, so the final rename is atomic), and the path in it that yt-dlp writes to for `format`,
+/// which does not exist yet. The directory and anything in it go when the [`TempDir`] is dropped.
+pub(super) fn download_dir(root: &Path, format: Format) -> std::io::Result<(TempDir, PathBuf)> {
     let parent = tmp_dir(root);
     std::fs::create_dir_all(&parent)?;
     let dir = tempfile::Builder::new().prefix("sdl-").tempdir_in(parent)?;
-    let file = dir.path().join("audio.opus");
+    let file = temp_file(dir.path(), format);
     Ok((dir, file))
 }
 
@@ -175,15 +128,54 @@ pub fn estimate_remaining(elapsed: Duration, done: usize, total: usize) -> Optio
     elapsed.checked_mul(remaining)?.checked_div(done)
 }
 
-/// The last-run line of a download run: `412 added, 12 skipped, 3 need attention`.
+/// The top-level folders of `dir`, read off the async threads.
+pub(super) async fn folders_in(dir: PathBuf) -> Result<Vec<String>, TaskError> {
+    let found = tokio::task::spawn_blocking(move || sdl_library::files::top_level_folders(&dir))
+        .await
+        .map_err(|error| sdl_library::LibraryError::Task(error.to_string()))??;
+    Ok(found)
+}
+
+/// `counts` with the `already` items that were left out of the run before it started counted as
+/// skipped, for the last-run line. The run itself counts only the work it does, so its bar and its
+/// time estimate are not thrown off by songs that were never going to be touched.
+#[must_use]
+pub(super) fn with_already(counts: Counts, already: usize) -> Counts {
+    Counts {
+        skipped: counts.skipped.saturating_add(already),
+        ..counts
+    }
+}
+
+/// The last-run line of a run that writes files: `12 copied`, `3 converted, 1 needs attention`.
+#[must_use]
+pub(super) fn written_line(counts: &Counts, verb: &str) -> String {
+    let mut line = format!("{} {verb}", crate::fmt::thousands(counts.added));
+    push_attention(&mut line, counts);
+    line
+}
+
+/// The last-run line of a download run: `412 added, 12 already there, 3 need attention`. A part
+/// that is zero is left out, except the number added.
 #[must_use]
 pub(super) fn summary_line(counts: &Counts) -> String {
-    let mut line = format!("{} added, {} skipped", counts.added, counts.skipped);
+    let mut line = format!("{} added", crate::fmt::thousands(counts.added));
+    if counts.skipped > 0 {
+        let _ = write!(
+            line,
+            ", {} already there",
+            crate::fmt::thousands(counts.skipped)
+        );
+    }
+    push_attention(&mut line, counts);
+    line
+}
+
+fn push_attention(line: &mut String, counts: &Counts) {
     let attention = counts.need_attention();
     if attention > 0 {
-        let _ = write!(line, ", {attention} need attention");
+        let _ = write!(line, ", {}", crate::fmt::need_attention(attention));
     }
-    line
 }
 
 #[cfg(test)]
@@ -194,11 +186,7 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn item(title: &str) -> Attention {
-        Attention {
-            title: title.into(),
-            artist: "A".into(),
-            reason: "why".into(),
-        }
+        Attention::failed(title.into(), "A".into(), "why".into())
     }
 
     #[test]
@@ -238,6 +226,32 @@ mod tests {
     }
 
     #[test]
+    fn written_line_names_the_verb() {
+        let counts = Counts {
+            added: 3,
+            failed: 1,
+            ..Counts::default()
+        };
+        assert_eq!(
+            written_line(&counts, "converted"),
+            "3 converted, 1 needs attention"
+        );
+        assert_eq!(written_line(&Counts::default(), "copied"), "0 copied");
+    }
+
+    #[test]
+    fn songs_left_out_before_the_run_count_as_skipped_in_its_line() {
+        let counts = Counts {
+            total: 2,
+            done: 2,
+            added: 2,
+            ..Counts::default()
+        };
+        let line = summary_line(&with_already(counts, 10));
+        assert_eq!(line, "2 added, 10 already there");
+    }
+
+    #[test]
     fn summary_line_mentions_attention_only_when_present() {
         let counts = Counts {
             total: 9,
@@ -249,14 +263,19 @@ mod tests {
         };
         assert_eq!(
             summary_line(&counts),
-            "5 added, 2 skipped, 2 need attention"
+            "5 added, 2 already there, 2 need attention"
         );
         let clean = Counts {
             unmatched: 0,
             failed: 0,
             ..counts
         };
-        assert_eq!(summary_line(&clean), "5 added, 2 skipped");
+        assert_eq!(summary_line(&clean), "5 added, 2 already there");
+        let none_there = Counts {
+            skipped: 0,
+            ..clean
+        };
+        assert_eq!(summary_line(&none_there), "5 added");
     }
 
     #[tokio::test]
@@ -294,8 +313,8 @@ mod tests {
     async fn downloads_get_their_own_dir_and_never_replace_a_file() -> TestResult {
         let root = tempfile::tempdir()?;
         let dest = root.path().join("a/b.opus");
-        let (first_dir, first) = download_dir(root.path())?;
-        let (second_dir, second) = download_dir(root.path())?;
+        let (first_dir, first) = download_dir(root.path(), Format::Opus)?;
+        let (second_dir, second) = download_dir(root.path(), Format::Opus)?;
         assert_ne!(first_dir.path(), second_dir.path());
         assert!(!first.exists());
         std::fs::write(&first, b"new")?;
@@ -307,34 +326,5 @@ mod tests {
         sdl_core::paths::remove_tmp_dir_if_empty(root.path())?;
         assert!(!tmp_dir(root.path()).exists());
         Ok(())
-    }
-
-    #[tokio::test]
-    async fn cancel_drops_the_work_in_progress() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        assert!(tx.send(Command::Cancel).is_ok());
-        let out = unless_cancelled(&mut rx, std::future::pending::<()>()).await;
-        assert_eq!(out, None);
-        assert_eq!(unless_cancelled(&mut rx, async { 7 }).await, Some(7));
-    }
-
-    #[tokio::test]
-    async fn waits_ignore_commands_for_other_steps() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let list = ListChoice {
-            name: "Liked Songs".into(),
-            id: "liked-songs".into(),
-            count: 3,
-        };
-        assert!(tx.send(Command::Go).is_ok());
-        assert!(tx.send(Command::Choices(vec![list.clone()])).is_ok());
-        assert_eq!(wait_for_choices(&mut rx).await, Some(vec![list.clone()]));
-        assert!(tx.send(Command::Choices(vec![list])).is_ok());
-        assert!(tx.send(Command::Go).is_ok());
-        assert!(wait_for_go(&mut rx).await);
-        assert!(tx.send(Command::Cancel).is_ok());
-        assert!(!wait_for_go(&mut rx).await);
-        drop(tx);
-        assert_eq!(wait_for_choices(&mut rx).await, None);
     }
 }

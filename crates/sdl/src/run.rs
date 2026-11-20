@@ -13,7 +13,7 @@ use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use sdl_core::{Config, EventReceiver, channel};
 
-use crate::app::{App, ends_run};
+use crate::app::App;
 use crate::control::{Command, Control};
 use crate::tasks::now_secs;
 use crate::theme::Theme;
@@ -27,10 +27,9 @@ const TICK: Duration = Duration::from_millis(100);
 /// The terminal could not be set up or drawn to.
 pub async fn run(config: Config) -> Result<()> {
     // The state file is read here, so a malformed one is reported before the screen starts.
-    let card_label = format!("card {}", config.card_uuid);
     let (tx, events) = channel();
     let mut control = Control::new(config, tx)?;
-    let app = App::new(control.state(), card_label, now_secs());
+    let app = App::new(control.state(), now_secs());
     // `try_init` can fail after raw mode is on, so the terminal is restored on every path.
     let result = match ratatui::try_init() {
         Ok(mut terminal) => match execute!(stdout(), EnableBracketedPaste) {
@@ -57,16 +56,17 @@ async fn event_loop(
     let mut last_tick = Instant::now();
 
     while !app.should_quit() {
+        let size = terminal.size()?;
+        app.set_viewport(size.width, size.height);
         terminal.draw(|frame| ui::render(frame, &app, theme))?;
         let commands = tokio::select! {
             Some(Ok(event)) = keys.next() => on_terminal_event(&mut app, event),
             Some(event) = events.recv() => {
-                let run_ended = ends_run(&event.kind);
-                app.apply_event(event);
-                if run_ended {
-                    app.set_state(control.state());
-                }
-                Vec::new()
+                let commands = app.apply_event(event);
+                // A task saves the owner's answers and its last-run line before it reports, so
+                // the main panel shows the choices a run uses from its first event on.
+                app.set_state(control.state());
+                commands
             }
             _ = ticks.tick() => {
                 let now = Instant::now();
@@ -85,10 +85,7 @@ async fn event_loop(
 fn on_terminal_event(app: &mut App, event: TermEvent) -> Vec<Command> {
     match event {
         TermEvent::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
-        TermEvent::Paste(text) => {
-            app.handle_paste(&text);
-            Vec::new()
-        }
+        TermEvent::Paste(text) => app.handle_paste(&text),
         _ => Vec::new(),
     }
 }

@@ -42,17 +42,15 @@ pub struct Config {
     pub client_id: String,
     /// Music library root (default `~/Music`); a leading `~` is expanded.
     pub music_root: PathBuf,
-    /// Volume UUID of the Snowsky SD card.
-    pub card_uuid: String,
     /// Parallel song downloads (default 4). Zero is a parse error.
     pub download_jobs: NonZeroUsize,
 }
 
+/// Unknown keys (such as an old `card_uuid`) are ignored: serde does so unless told not to.
 #[derive(Deserialize)]
 struct RawConfig {
     client_id: String,
     music_root: Option<PathBuf>,
-    card_uuid: String,
     download_jobs: Option<NonZeroUsize>,
 }
 
@@ -109,7 +107,7 @@ impl Config {
     ///
     /// # Errors
     /// Invalid TOML or a missing required key.
-    pub fn parse_with_home(text: &str, path: &Path, home: &Path) -> Result<Self, ConfigError> {
+    fn parse_with_home(text: &str, path: &Path, home: &Path) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(text).map_err(|source| ConfigError::Parse {
             path: path.to_path_buf(),
             source,
@@ -121,7 +119,6 @@ impl Config {
         Ok(Self {
             client_id: raw.client_id,
             music_root,
-            card_uuid: raw.card_uuid,
             download_jobs: raw.download_jobs.unwrap_or(DEFAULT_DOWNLOAD_JOBS),
         })
     }
@@ -135,11 +132,9 @@ mod tests {
 
     #[test]
     fn full_file_parses() -> TestResult {
-        let text =
-            "client_id = \"abc\"\ncard_uuid = \"U-1\"\nmusic_root = \"/m\"\ndownload_jobs = 2\n";
+        let text = "client_id = \"abc\"\nmusic_root = \"/m\"\ndownload_jobs = 2\n";
         let cfg = Config::parse(text, Path::new("/c.toml"))?;
         assert_eq!(cfg.client_id, "abc");
-        assert_eq!(cfg.card_uuid, "U-1");
         assert_eq!(cfg.music_root, PathBuf::from("/m"));
         assert_eq!(cfg.download_jobs.get(), 2);
         Ok(())
@@ -147,10 +142,7 @@ mod tests {
 
     #[test]
     fn defaults_apply() -> TestResult {
-        let cfg = Config::parse(
-            "client_id = \"a\"\ncard_uuid = \"u\"\n",
-            Path::new("/c.toml"),
-        )?;
+        let cfg = Config::parse("client_id = \"a\"\n", Path::new("/c.toml"))?;
         assert_eq!(cfg.download_jobs.get(), 4);
         assert!(cfg.music_root.ends_with("Music"));
         Ok(())
@@ -159,7 +151,7 @@ mod tests {
     #[test]
     fn default_music_root_is_home_music() -> TestResult {
         let cfg = Config::parse_with_home(
-            "client_id = \"a\"\ncard_uuid = \"u\"\n",
+            "client_id = \"a\"\n",
             Path::new("/c.toml"),
             Path::new("/home/me"),
         )?;
@@ -170,7 +162,7 @@ mod tests {
     #[test]
     fn leading_tilde_is_expanded() -> TestResult {
         let cfg = Config::parse_with_home(
-            "client_id = \"a\"\ncard_uuid = \"u\"\nmusic_root = \"~/Tunes\"\n",
+            "client_id = \"a\"\nmusic_root = \"~/Tunes\"\n",
             Path::new("/c.toml"),
             Path::new("/home/me"),
         )?;
@@ -193,8 +185,18 @@ mod tests {
     }
 
     #[test]
+    fn unknown_keys_are_ignored() -> TestResult {
+        let cfg = Config::parse(
+            "client_id = \"a\"\ncard_uuid = \"old\"\nsomething_new = 3\n",
+            Path::new("/c.toml"),
+        )?;
+        assert_eq!(cfg.client_id, "a");
+        Ok(())
+    }
+
+    #[test]
     fn missing_key_names_path() {
-        let err = Config::parse("client_id = \"a\"\n", Path::new("/x/config.toml"));
+        let err = Config::parse("download_jobs = 2\n", Path::new("/x/config.toml"));
         let msg = err.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(msg.contains("/x/config.toml"), "{msg}");
     }
@@ -202,7 +204,7 @@ mod tests {
     #[test]
     fn zero_jobs_is_malformed() {
         let err = Config::parse(
-            "client_id = \"a\"\ncard_uuid = \"u\"\ndownload_jobs = 0\n",
+            "client_id = \"a\"\ndownload_jobs = 0\n",
             Path::new("/c.toml"),
         );
         assert!(matches!(err, Err(ConfigError::Parse { .. })));

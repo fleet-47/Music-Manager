@@ -6,15 +6,17 @@ use std::path::{Path, PathBuf};
 
 use sanitize_filename::{Options, sanitize_with_options};
 
-use crate::Track;
+use crate::format::AUDIO_EXTENSIONS;
+use crate::{Format, Track};
 
 /// List name used for Liked Songs.
 pub const SAVED_TRACKS: &str = "Saved tracks";
 
-/// Name of the temp directory under the music root. A dot name, so card sync never copies it.
-pub const TMP_DIR: &str = ".sdl-tmp";
+/// Name of the temp directory under the music root. A dot name, so device sync never copies it.
+const TMP_DIR: &str = ".sdl-tmp";
 
-/// Longest stem that still fits the 255-byte name limit once `.opus` is appended.
+/// Longest stem that still fits the 255-byte name limit once an extension (`.opus`, at most five
+/// bytes) is appended.
 const STEM_MAX: usize = 250;
 
 /// A name and its ID, for a playlist whose ID is the fallback when the name is unusable.
@@ -43,7 +45,7 @@ pub fn component(name: &str) -> String {
 
 /// [`component`] of `name`, or of `fallback_id` when that is empty.
 #[must_use]
-pub fn component_or(name: &str, fallback_id: &str) -> String {
+fn component_or(name: &str, fallback_id: &str) -> String {
     let safe = component(name);
     if safe.is_empty() {
         component(fallback_id)
@@ -55,7 +57,7 @@ pub fn component_or(name: &str, fallback_id: &str) -> String {
 /// A FAT-safe file stem ([`component`]) cut to fit the 255-byte name limit once `.opus` is
 /// appended. May be empty; see [`file_stem_or`].
 #[must_use]
-pub fn file_stem(name: &str) -> String {
+fn file_stem(name: &str) -> String {
     let mut stem = component(name);
     if let Some(end) = (0..=STEM_MAX).rev().find(|&i| stem.is_char_boundary(i)) {
         stem.truncate(end);
@@ -65,7 +67,7 @@ pub fn file_stem(name: &str) -> String {
 
 /// [`file_stem`] of `name`, or of `fallback_id` when that is empty.
 #[must_use]
-pub fn file_stem_or(name: &str, fallback_id: &str) -> String {
+fn file_stem_or(name: &str, fallback_id: &str) -> String {
     let stem = file_stem(name);
     if stem.is_empty() {
         file_stem(fallback_id)
@@ -74,42 +76,95 @@ pub fn file_stem_or(name: &str, fallback_id: &str) -> String {
     }
 }
 
-/// `<music_root>/Spotify/<list name>/<artists> - <title>.opus`. The list component falls back to
-/// the list ID, the file stem to the Spotify track ID.
+/// Where a song lives, apart from its format: a folder and a file stem. The one place that knows a
+/// song is "present" when a file with its stem exists in the folder in any of the three formats.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Target {
+    /// The folder.
+    pub dir: PathBuf,
+    /// The file name without extension.
+    pub stem: String,
+}
+
+impl Target {
+    /// The target of an existing or planned file: its folder and stem. `None` for a path with no
+    /// folder or no stem.
+    #[must_use]
+    pub fn of_file(path: &Path) -> Option<Self> {
+        Some(Self {
+            dir: path.parent()?.to_path_buf(),
+            stem: path.file_stem()?.to_str()?.to_owned(),
+        })
+    }
+
+    /// `<dir>/<stem>.<extension of format>`.
+    #[must_use]
+    pub fn path(&self, format: Format) -> PathBuf {
+        self.dir
+            .join(format!("{}.{}", self.stem, format.extension()))
+    }
+
+    /// Whether a song with this stem exists in the folder in any format ([`AUDIO_EXTENSIONS`]).
+    ///
+    /// # Errors
+    /// A folder that exists but cannot be read. A missing folder or file is `Ok(false)`.
+    pub fn is_present(&self) -> std::io::Result<bool> {
+        for ext in AUDIO_EXTENSIONS {
+            if self.dir.join(format!("{}.{ext}", self.stem)).try_exists()? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// `<music_root>/Spotify/<list name>/<artists> - <title>`. The list component falls back to the
+/// list ID, the file stem to the Spotify track ID.
 #[must_use]
-pub fn spotify_track_path(music_root: &Path, track: &Track) -> PathBuf {
+pub fn spotify_target(music_root: &Path, track: &Track) -> Target {
     let stem = file_stem_or(
         &format!("{} - {}", track.artists_joined(), track.title),
         &track.spotify_id,
     );
-    music_root
-        .join("Spotify")
-        .join(component_or(&track.list_name, &track.list_id))
-        .join(format!("{stem}.opus"))
+    Target {
+        dir: music_root
+            .join("Spotify")
+            .join(component_or(&track.list_name, &track.list_id)),
+        stem,
+    }
 }
 
-/// `<music_root>/<Site>/<item>.opus`, with a subfolder named after the playlist for a playlist link.
+/// `<music_root>/<Site>/<item>`, with a subfolder named after the playlist for a playlist link.
 /// `site` is yt-dlp's extractor key. An empty name falls back to its ID; the video ID is the
 /// fallback for an empty item stem and for an empty site.
 #[must_use]
-pub fn link_item_path(
+pub fn link_item_target(
     music_root: &Path,
     site: &str,
     playlist: Option<NameId<'_>>,
     title: &str,
     video_id: &str,
-) -> PathBuf {
+) -> Target {
     let mut dir = music_root.join(component_or(site, video_id));
     if let Some(list) = playlist {
         dir = dir.join(component_or(list.name, list.id));
     }
-    dir.join(format!("{}.opus", file_stem_or(title, video_id)))
+    Target {
+        dir,
+        stem: file_stem_or(title, video_id),
+    }
 }
 
-/// `<card>/Music/`, the mirror of the music root on the card.
+/// The path of the temp file a download or conversion writes in `dir`: `audio.<extension>`.
 #[must_use]
-pub fn card_music_dir(card_mount: &Path) -> PathBuf {
-    card_mount.join("Music")
+pub fn temp_file(dir: &Path, format: Format) -> PathBuf {
+    dir.join(format!("audio.{}", format.extension()))
+}
+
+/// `<device>/Music/`, the mirror of the music root on a device.
+#[must_use]
+pub fn device_music_dir(device_mount: &Path) -> PathBuf {
+    device_mount.join("Music")
 }
 
 /// `<music_root>/.sdl-tmp`, on the same volume as the library so the final rename is atomic.
@@ -188,54 +243,73 @@ mod tests {
     }
 
     #[test]
-    fn spotify_path_layout() {
-        let p = spotify_track_path(Path::new("/m"), &track(SAVED_TRACKS));
+    fn spotify_target_layout() {
+        let t = spotify_target(Path::new("/m"), &track(SAVED_TRACKS));
+        assert_eq!(t.dir, PathBuf::from("/m/Spotify/Saved tracks"));
+        assert_eq!(t.stem, "A, B - WhyNot");
         assert_eq!(
-            p,
+            t.path(Format::Opus),
             PathBuf::from("/m/Spotify/Saved tracks/A, B - WhyNot.opus")
+        );
+        assert_eq!(
+            t.path(Format::Mp3),
+            PathBuf::from("/m/Spotify/Saved tracks/A, B - WhyNot.mp3")
+        );
+        assert_eq!(
+            t.path(Format::M4a),
+            PathBuf::from("/m/Spotify/Saved tracks/A, B - WhyNot.m4a")
         );
     }
 
     #[test]
-    fn spotify_path_list_name_is_safe() {
-        let p = spotify_track_path(Path::new("/m"), &track(".mix/1"));
-        assert_eq!(p, PathBuf::from("/m/Spotify/mix1/A, B - WhyNot.opus"));
+    fn spotify_list_name_is_safe() {
+        let t = spotify_target(Path::new("/m"), &track(".mix/1"));
+        assert_eq!(t.dir, PathBuf::from("/m/Spotify/mix1"));
     }
 
     #[test]
-    fn spotify_path_falls_back_to_ids() {
+    fn spotify_target_falls_back_to_ids() {
         let mut t = track("...");
         t.title = "...".into();
         t.artists = Vec::new();
         // The stem is " - ..." before sanitising: not empty, so only the list falls back.
-        let p = spotify_track_path(Path::new("/m"), &t);
-        assert_eq!(p.parent(), Some(Path::new("/m/Spotify/lid")));
+        let target = spotify_target(Path::new("/m"), &t);
+        assert_eq!(target.dir, PathBuf::from("/m/Spotify/lid"));
         assert_eq!(file_stem_or("..", &t.spotify_id), "sid");
     }
 
     #[test]
-    fn spotify_file_name_fits_255_bytes() {
+    fn spotify_file_name_fits_255_bytes_in_every_format() {
         let mut t = track(SAVED_TRACKS);
         t.title = "é".repeat(200);
-        let p = spotify_track_path(Path::new("/m"), &t);
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        assert!(name.len() <= 255, "{}", name.len());
-        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("opus"));
+        let target = spotify_target(Path::new("/m"), &t);
+        for format in [Format::Opus, Format::Mp3, Format::M4a] {
+            let path = target.path(format);
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            assert!(name.len() <= 255, "{}", name.len());
+            assert_eq!(
+                path.extension().and_then(|e| e.to_str()),
+                Some(format.extension())
+            );
+        }
     }
 
     #[test]
     fn link_item_layout() {
         let root = Path::new("/m");
         assert_eq!(
-            link_item_path(root, "Youtube", None, "Song: 1", "v1"),
-            PathBuf::from("/m/Youtube/Song 1.opus")
+            link_item_target(root, "Youtube", None, "Song: 1", "v1").path(Format::Mp3),
+            PathBuf::from("/m/Youtube/Song 1.mp3")
         );
         let list = NameId {
             name: "My: List",
             id: "PL1",
         };
         assert_eq!(
-            link_item_path(root, "Soundcloud", Some(list), "S", "v1"),
+            link_item_target(root, "Soundcloud", Some(list), "S", "v1").path(Format::Opus),
             PathBuf::from("/m/Soundcloud/My List/S.opus")
         );
     }
@@ -247,15 +321,67 @@ mod tests {
             id: "PL1",
         };
         assert_eq!(
-            link_item_path(Path::new("/m"), "Youtube", Some(list), "?", "v1"),
+            link_item_target(Path::new("/m"), "Youtube", Some(list), "?", "v1").path(Format::Opus),
             PathBuf::from("/m/Youtube/PL1/v1.opus")
         );
     }
 
     #[test]
-    fn card_dir() {
+    fn a_song_is_present_in_any_format() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let target = Target {
+            dir: dir.path().to_path_buf(),
+            stem: "Song".into(),
+        };
+        assert!(!target.is_present()?);
+        for format in [Format::Mp3, Format::M4a, Format::Opus] {
+            let file = target.path(format);
+            std::fs::write(&file, b"x")?;
+            assert!(target.is_present()?, "{format:?}");
+            std::fs::remove_file(&file)?;
+        }
+        std::fs::write(dir.path().join("Song.flac"), b"x")?;
+        std::fs::write(dir.path().join("Song 2.mp3"), b"x")?;
+        assert!(!target.is_present()?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_folder_is_not_present() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let target = Target {
+            dir: dir.path().join("nope"),
+            stem: "Song".into(),
+        };
+        assert!(!target.is_present()?);
+        Ok(())
+    }
+
+    #[test]
+    fn target_of_a_file_and_back() {
+        let target = Target::of_file(Path::new("/d/Music/A/b c.mp3"));
         assert_eq!(
-            card_music_dir(Path::new("/Volumes/X")),
+            target,
+            Some(Target {
+                dir: PathBuf::from("/d/Music/A"),
+                stem: "b c".into()
+            })
+        );
+        assert_eq!(Target::of_file(Path::new("/")), None);
+    }
+
+    #[test]
+    fn temp_file_carries_the_extension() {
+        assert_eq!(
+            temp_file(Path::new("/t"), Format::M4a),
+            PathBuf::from("/t/audio.m4a")
+        );
+    }
+
+    #[test]
+    fn device_dir() {
+        assert_eq!(
+            device_music_dir(Path::new("/Volumes/X")),
             PathBuf::from("/Volumes/X/Music")
         );
     }

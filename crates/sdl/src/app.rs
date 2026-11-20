@@ -3,24 +3,20 @@
 
 use std::time::Duration;
 
-use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use sdl_core::{
-    CardSummary, ErrorInfo, Event, EventKind, ListChoice, SignInState, State, TaskId, TaskState,
-};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use sdl_core::{ErrorInfo, Event, EventKind, RunOutcome, SignInState, State, TaskId, TaskState};
 use throbber_widgets_tui::ThrobberState;
-use tui_input::Input;
-use tui_input::backend::crossterm::EventHandler as _;
 
 use crate::control::Command;
 use crate::fmt;
-use crate::keys;
+use crate::forms::{Dialog, Reply};
+use crate::keys::{self, Hint};
+use crate::popups;
 
 /// The functions, in the order of the main panel.
-pub const FUNCTIONS: [TaskId; 3] = [TaskId::SyncSpotify, TaskId::DownloadLink, TaskId::SyncCard];
+pub const FUNCTIONS: [TaskId; 4] = TaskId::ALL;
 
 const PAGE: usize = 10;
-
-pub use crate::tasks::task_name;
 
 /// Where a function is in its life.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -47,72 +43,20 @@ pub struct TaskView {
     pub elapsed: Duration,
 }
 
-/// Progress of the Spotify list popup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ListStage {
-    /// Ticking lists.
-    Choosing,
-    /// The ticked lists' songs are being listed.
-    Listing,
-    /// `N new of M`, waiting for Enter.
-    Ready {
-        /// Songs not yet in the library.
-        new: usize,
-        /// Songs in the ticked lists.
-        total: usize,
-    },
-}
-
-/// The Spotify list-selection popup.
-#[derive(Debug, Clone)]
-pub struct ListPopup {
-    /// Lists on offer.
-    pub choices: Vec<ListChoice>,
-    /// Tick per list.
-    pub ticked: Vec<bool>,
-    /// Row under the cursor.
-    pub cursor: usize,
-    /// Progress.
-    pub stage: ListStage,
-}
-
-impl ListPopup {
-    /// The ticked lists.
-    #[must_use]
-    pub fn chosen(&self) -> Vec<ListChoice> {
-        self.choices
-            .iter()
-            .zip(&self.ticked)
-            .filter(|(_, on)| **on)
-            .map(|(choice, _)| choice.clone())
-            .collect()
-    }
-
-    /// Songs in the ticked lists, as counted by Spotify.
-    #[must_use]
-    pub fn ticked_songs(&self) -> usize {
-        self.chosen()
-            .iter()
-            .map(|c| c.count)
-            .fold(0, usize::saturating_add)
-    }
-}
-
 /// A centred popup.
 #[derive(Debug, Clone)]
 pub enum Popup {
     /// Spotify sign-in state.
     SignIn(SignInState),
-    /// Spotify list selection and the `N new of M` confirmation.
-    Lists(ListPopup),
-    /// The link text field.
-    Link(Input),
-    /// Card plan; `None` while the card is being mounted.
-    CardPlan(Option<CardSummary>),
-    /// "Clean up and unmount?"
-    UnmountConfirm,
-    /// The card is being cleaned and unmounted.
-    Unmounting,
+    /// Convert or Sync device, waiting for what their step form offers (the library's folders, the
+    /// devices found).
+    Looking(TaskId),
+    /// A function's step form (F1).
+    Form(Dialog),
+    /// "Clean up and eject <device>?"
+    EjectConfirm(String),
+    /// The device is being cleaned and unmounted.
+    Ejecting,
     /// The attention list of a function, with the row under the cursor.
     Attention {
         /// Whose list.
@@ -137,14 +81,13 @@ impl Popup {
     /// The function whose steps this popup belongs to; it closes when that function's run ends.
     fn owner(&self) -> Option<TaskId> {
         match self {
-            Self::SignIn(_) | Self::Lists(_) => Some(TaskId::SyncSpotify),
-            Self::CardPlan(_) | Self::UnmountConfirm | Self::Unmounting => Some(TaskId::SyncCard),
-            Self::ConfirmStop(task) => Some(*task),
-            Self::Link(_)
-            | Self::Attention { .. }
-            | Self::ConfirmQuit
-            | Self::Error(..)
-            | Self::Help { .. } => None,
+            Self::SignIn(_) => Some(TaskId::SyncSpotify),
+            Self::EjectConfirm(_) | Self::Ejecting => Some(TaskId::SyncDevice),
+            Self::Looking(task) | Self::ConfirmStop(task) => Some(*task),
+            Self::Form(dialog) => Some(dialog.task()),
+            Self::Attention { .. } | Self::ConfirmQuit | Self::Error(..) | Self::Help { .. } => {
+                None
+            }
         }
     }
 }
@@ -159,17 +102,21 @@ pub struct App {
     pub popups: Vec<Popup>,
     /// Remembered ticks and last-run lines, as the task runner keeps them.
     pub state: State,
-    /// The card, as shown in its row.
-    pub card_label: String,
     /// The last link given this session.
     pub link: Option<String>,
+    /// The device chosen in the last Sync device run.
+    pub device_name: Option<String>,
+    /// That device was cleaned up and unmounted, so it is safe to unplug.
+    pub device_ejected: bool,
     /// Spinner position.
     pub throbber: ThrobberState,
     /// Seconds since the Unix epoch, as of the last tick.
     pub now: u64,
+    viewport: (u16, u16),
     spotify: TaskView,
     download: TaskView,
-    card: TaskView,
+    convert: TaskView,
+    device: TaskView,
     quit: bool,
 }
 
@@ -185,18 +132,21 @@ fn answer(event: KeyEvent) -> Option<bool> {
 impl App {
     /// A new screen over the remembered `state`.
     #[must_use]
-    pub fn new(state: State, card_label: String, now: u64) -> Self {
+    pub fn new(state: State, now: u64) -> Self {
         Self {
             selected: TaskId::SyncSpotify,
             popups: Vec::new(),
             state,
-            card_label,
             link: None,
+            device_name: None,
+            device_ejected: false,
+            viewport: (80, 24),
             throbber: ThrobberState::default(),
             now,
             spotify: TaskView::default(),
             download: TaskView::default(),
-            card: TaskView::default(),
+            convert: TaskView::default(),
+            device: TaskView::default(),
             quit: false,
         }
     }
@@ -207,7 +157,8 @@ impl App {
         match task {
             TaskId::SyncSpotify => &self.spotify,
             TaskId::DownloadLink => &self.download,
-            TaskId::SyncCard => &self.card,
+            TaskId::Convert => &self.convert,
+            TaskId::SyncDevice => &self.device,
         }
     }
 
@@ -215,7 +166,8 @@ impl App {
         match task {
             TaskId::SyncSpotify => &mut self.spotify,
             TaskId::DownloadLink => &mut self.download,
-            TaskId::SyncCard => &mut self.card,
+            TaskId::Convert => &mut self.convert,
+            TaskId::SyncDevice => &mut self.device,
         }
     }
 
@@ -234,8 +186,8 @@ impl App {
         self.quit
     }
 
-    /// Take the state the task runner keeps (it writes each run's last-run line before the run's
-    /// terminal event).
+    /// Take the state the task runner keeps (it saves the owner's answers before replying to them,
+    /// and each run's last-run line before the run's terminal event).
     pub fn set_state(&mut self, state: State) {
         self.state = state;
     }
@@ -283,13 +235,19 @@ impl App {
         }
     }
 
-    /// Text was pasted. Only the link field takes it, and pasted control characters, newlines
-    /// included, are dropped.
-    pub fn handle_paste(&mut self, text: &str) {
-        if let Some(Popup::Link(input)) = self.popups.last_mut() {
-            for c in text.chars().filter(|c| !c.is_control()) {
-                input.handle(tui_input::InputRequest::InsertChar(c));
+    /// Text was pasted. Only a step form takes it (its focused text row); pasted control
+    /// characters, newlines included, are dropped, so a paste never submits.
+    pub fn handle_paste(&mut self, text: &str) -> Vec<Command> {
+        match self.popups.pop() {
+            Some(Popup::Form(mut dialog)) => {
+                let reply = dialog.paste(text);
+                self.form_reply(dialog, reply)
             }
+            Some(other) => {
+                self.popups.push(other);
+                Vec::new()
+            }
+            None => Vec::new(),
         }
     }
 
@@ -338,31 +296,35 @@ impl App {
 
     fn request_quit(&mut self) -> Vec<Command> {
         if self.running().is_empty() {
-            self.quit = true;
-            vec![Command::Quit]
+            self.quit()
         } else {
             self.keep(Popup::ConfirmQuit)
         }
     }
 
-    /// Enter on a function: open its first step.
+    /// Close the app: running tasks are stopped (their last-run line says so), then the rest, which
+    /// only wait at their form, end without touching their last-run line.
+    fn quit(&mut self) -> Vec<Command> {
+        self.quit = true;
+        let mut commands: Vec<Command> = self.running().into_iter().map(Command::Stop).collect();
+        commands.push(Command::Quit);
+        commands
+    }
+
+    /// Enter on a function: open its first step. The last run's counts and attention list stay
+    /// until the new run starts, so cancelling the form loses nothing.
     fn begin(&mut self, task: TaskId) -> Vec<Command> {
         if self.view(task).phase != Phase::Idle {
             return Vec::new();
         }
-        match task {
-            TaskId::SyncSpotify => {
-                self.reset(task, Phase::Preparing);
-                self.popups.push(Popup::SignIn(SignInState::OpeningBrowser));
-                vec![Command::StartSpotify]
-            }
-            TaskId::DownloadLink => self.keep(Popup::Link(Input::default())),
-            TaskId::SyncCard => {
-                self.reset(task, Phase::Preparing);
-                self.popups.push(Popup::CardPlan(None));
-                vec![Command::StartCard]
-            }
-        }
+        self.view_mut(task).phase = Phase::Preparing;
+        let first = match task {
+            TaskId::SyncSpotify => Popup::SignIn(SignInState::OpeningBrowser),
+            TaskId::DownloadLink => Popup::Form(Dialog::link(&self.state)),
+            TaskId::Convert | TaskId::SyncDevice => Popup::Looking(task),
+        };
+        self.popups.push(first);
+        vec![Command::Start(task)]
     }
 
     fn reset(&mut self, task: TaskId, phase: Phase) {
@@ -387,19 +349,27 @@ impl App {
                     self.keep(Popup::SignIn(shown))
                 }
             }
-            Popup::Lists(list) => self.key_lists(list, event),
-            Popup::Link(input) => self.key_link(input, event),
-            Popup::CardPlan(plan) => self.key_card_plan(plan, event),
-            Popup::UnmountConfirm => match answer(event) {
+            Popup::Looking(task) => {
+                if event.code == KeyCode::Esc {
+                    self.cancel(task)
+                } else {
+                    self.keep(Popup::Looking(task))
+                }
+            }
+            Popup::Form(mut dialog) => {
+                let reply = dialog.key(event);
+                self.form_reply(dialog, reply)
+            }
+            Popup::EjectConfirm(name) => match answer(event) {
                 Some(true) => {
-                    self.view_mut(TaskId::SyncCard).phase = Phase::Preparing;
-                    self.keep(Popup::Unmounting);
-                    vec![Command::FinishCard]
+                    self.view_mut(TaskId::SyncDevice).phase = Phase::Preparing;
+                    self.keep(Popup::Ejecting);
+                    vec![Command::Eject]
                 }
                 Some(false) => Vec::new(),
-                None => self.keep(Popup::UnmountConfirm),
+                None => self.keep(Popup::EjectConfirm(name)),
             },
-            Popup::Unmounting => self.keep(Popup::Unmounting),
+            Popup::Ejecting => self.keep(Popup::Ejecting),
             Popup::Attention { task, cursor } => {
                 let len = self.view(task).state.attention.len();
                 self.popups
@@ -417,23 +387,26 @@ impl App {
                 None => self.keep(Popup::ConfirmStop(task)),
             },
             Popup::ConfirmQuit => match answer(event) {
-                Some(true) => {
-                    self.quit = true;
-                    vec![Command::Quit]
-                }
+                Some(true) => self.quit(),
                 Some(false) => Vec::new(),
                 None => self.keep(Popup::ConfirmQuit),
             },
             Popup::Error(task, info) => {
-                if matches!(event.code, KeyCode::Enter | KeyCode::Esc) {
+                // Every key the help names for closing a popup closes it.
+                if matches!(
+                    event.code,
+                    KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')
+                ) {
                     Vec::new()
                 } else {
                     self.keep(Popup::Error(task, info))
                 }
             }
             Popup::Help { scroll } => {
+                // Scrolling stops at the last full page, so Up always moves at once.
+                let last = popups::help_max_scroll(self.viewport.1);
                 self.popups
-                    .extend(scrolled(event, scroll, keys::help_line_count(), |scroll| {
+                    .extend(scrolled(event, scroll, last.saturating_add(1), |scroll| {
                         Popup::Help { scroll }
                     }));
                 Vec::new()
@@ -441,82 +414,47 @@ impl App {
         }
     }
 
-    fn key_card_plan(&mut self, plan: Option<CardSummary>, event: KeyEvent) -> Vec<Command> {
-        match (event.code, plan) {
-            (KeyCode::Esc, _) => self.cancel(TaskId::SyncCard),
-            (KeyCode::Enter, Some(_)) => {
-                self.reset(TaskId::SyncCard, Phase::Running);
-                vec![Command::Go(TaskId::SyncCard)]
+    /// What a step form's reply means for the screen.
+    fn form_reply(&mut self, dialog: Dialog, reply: Reply) -> Vec<Command> {
+        match reply {
+            Reply::Stay(commands) => {
+                self.popups.push(Popup::Form(dialog));
+                commands
             }
-            (_, plan) => self.keep(Popup::CardPlan(plan)),
+            Reply::Start(commands) => {
+                let task = dialog.task();
+                match (task, dialog.chosen_label()) {
+                    (TaskId::DownloadLink, Some(link)) => self.link = Some(link),
+                    (TaskId::SyncDevice, Some(name)) => {
+                        self.device_name = Some(name);
+                        self.device_ejected = false;
+                    }
+                    _ => {}
+                }
+                self.reset(task, Phase::Running);
+                commands
+            }
+            Reply::Cancel => self.cancel(dialog.task()),
         }
     }
 
-    fn key_lists(&mut self, mut list: ListPopup, event: KeyEvent) -> Vec<Command> {
-        if event.code == KeyCode::Esc {
-            return self.cancel(TaskId::SyncSpotify);
-        }
-        let mut commands = Vec::new();
-        match (list.stage, event.code) {
-            (ListStage::Choosing, KeyCode::Up | KeyCode::Char('k')) => {
-                list.cursor = list.cursor.saturating_sub(1);
-            }
-            (ListStage::Choosing, KeyCode::Down | KeyCode::Char('j')) => {
-                list.cursor = list
-                    .cursor
-                    .saturating_add(1)
-                    .min(list.choices.len().saturating_sub(1));
-            }
-            (ListStage::Choosing, KeyCode::Char(' ')) => {
-                if let Some(on) = list.ticked.get_mut(list.cursor) {
-                    *on = !*on;
-                }
-            }
-            (ListStage::Choosing, KeyCode::Enter) => {
-                let chosen = list.chosen();
-                if !chosen.is_empty() {
-                    list.stage = ListStage::Listing;
-                    commands.push(Command::Choose(chosen));
-                }
-            }
-            (ListStage::Ready { .. }, KeyCode::Enter) => {
-                self.reset(TaskId::SyncSpotify, Phase::Running);
-                return vec![Command::Go(TaskId::SyncSpotify)];
-            }
-            _ => {}
-        }
-        self.popups.push(Popup::Lists(list));
-        commands
-    }
-
-    fn key_link(&mut self, mut input: Input, event: KeyEvent) -> Vec<Command> {
-        match event.code {
-            KeyCode::Esc => Vec::new(),
-            KeyCode::Enter => {
-                let url = input.value().trim().to_owned();
-                if url.is_empty() {
-                    return self.keep(Popup::Link(input));
-                }
-                self.link = Some(url.clone());
-                self.reset(TaskId::DownloadLink, Phase::Running);
-                vec![Command::StartLink(url)]
-            }
-            _ => {
-                input.handle_event(&TermEvent::Key(event));
-                self.keep(Popup::Link(input))
-            }
-        }
+    /// The step form of `task`, wherever it is in the stack.
+    fn dialog_of(&mut self, task: TaskId) -> Option<&mut Dialog> {
+        self.popups.iter_mut().rev().find_map(|popup| match popup {
+            Popup::Form(dialog) if dialog.task() == task => Some(dialog),
+            _ => None,
+        })
     }
 
     // ---- task events ----
 
-    /// A task reported.
-    pub fn apply_event(&mut self, event: Event) {
+    /// A task reported. Some reports ask for a command in return (the folders of a device).
+    pub fn apply_event(&mut self, event: Event) -> Vec<Command> {
         let Event { task, kind } = event;
         let phase = self.view(task).phase;
         // After the owner left a waiting step, only the run's end still matters.
         if phase == Phase::Cancelling && !ends_run(&kind) {
-            return;
+            return Vec::new();
         }
         match kind {
             EventKind::SignIn(sign_in) => {
@@ -527,31 +465,46 @@ impl App {
                 }
             }
             EventKind::Lists(choices) => {
-                let list = Popup::Lists(self.list_popup(choices));
+                let form = Popup::Form(Dialog::spotify(choices, &self.state));
                 match self.find_popup(|p| matches!(p, Popup::SignIn(_))) {
-                    Some(shown) => *shown = list,
-                    None if phase == Phase::Preparing => self.popups.push(list),
+                    Some(shown) => *shown = form,
+                    None if phase == Phase::Preparing => self.popups.push(form),
                     None => {}
                 }
             }
-            EventKind::NewOfTotal { new, total } => {
-                if let Some(Popup::Lists(list)) = self.find_popup(|p| matches!(p, Popup::Lists(_)))
-                {
-                    list.stage = ListStage::Ready { new, total };
+            EventKind::Devices(found) => return self.devices_found(found, phase),
+            EventKind::Folders(folders) if task == TaskId::Convert => {
+                let form = Popup::Form(Dialog::convert(&folders, &self.state));
+                match self.find_popup(|p| matches!(p, Popup::Looking(TaskId::Convert))) {
+                    Some(shown) => *shown = form,
+                    None if phase == Phase::Preparing => self.popups.push(form),
+                    None => {}
                 }
             }
-            EventKind::CardSummary(summary) => {
-                if let Some(plan) = self.find_popup(|p| matches!(p, Popup::CardPlan(None))) {
-                    *plan = Popup::CardPlan(Some(summary));
+            EventKind::Folders(_) | EventKind::NewOfTotal { .. } | EventKind::Plan(_) => {
+                if let Some(dialog) = self.dialog_of(task) {
+                    return dialog.apply(&kind);
                 }
             }
             EventKind::Headline(_) | EventKind::Counts(_) | EventKind::Attention(_) => {
+                // A form waiting on its task shows what the task is doing (listing pages, say).
+                if let Some(dialog) = self.dialog_of(task) {
+                    dialog.apply(&kind);
+                }
                 self.view_mut(task).state.apply(&kind);
             }
             EventKind::Finished => {
+                let ejected = task == TaskId::SyncDevice
+                    && self.popups.iter().any(|p| matches!(p, Popup::Ejecting));
                 self.ended(task);
-                if task == TaskId::SyncCard && phase == Phase::Running {
-                    self.popups.push(Popup::UnmountConfirm);
+                if ejected {
+                    self.device_ejected = true;
+                } else if task == TaskId::SyncDevice && phase == Phase::Running {
+                    let name = self
+                        .device_name
+                        .clone()
+                        .unwrap_or_else(|| "the device".to_owned());
+                    self.popups.push(Popup::EjectConfirm(name));
                 }
             }
             EventKind::Stopped => self.ended(task),
@@ -565,19 +518,22 @@ impl App {
                 self.popups.push(Popup::Error(task, rate_limit_info(wait)));
             }
         }
+        Vec::new()
     }
 
-    fn list_popup(&self, choices: Vec<ListChoice>) -> ListPopup {
-        let ticked = choices
-            .iter()
-            .map(|c| self.state.ticked_lists.contains(&c.id))
-            .collect();
-        ListPopup {
-            choices,
-            ticked,
-            cursor: 0,
-            stage: ListStage::Choosing,
+    /// Devices were listed: the first time they open the form, later they refresh it.
+    fn devices_found(&mut self, found: Vec<sdl_core::Device>, phase: Phase) -> Vec<Command> {
+        if let Some(dialog) = self.dialog_of(TaskId::SyncDevice) {
+            return dialog.apply(&EventKind::Devices(found));
         }
+        let (dialog, commands) = Dialog::device(found, &self.state);
+        let form = Popup::Form(dialog);
+        match self.find_popup(|p| matches!(p, Popup::Looking(TaskId::SyncDevice))) {
+            Some(shown) => *shown = form,
+            None if phase == Phase::Preparing => self.popups.push(form),
+            None => return Vec::new(),
+        }
+        commands
     }
 
     /// A run ended: its popups close. Its last-run line is already in the runner's state.
@@ -597,59 +553,60 @@ impl App {
                 .link
                 .clone()
                 .unwrap_or_else(|| "no link yet".to_owned()),
-            TaskId::SyncCard => self.card_label.clone(),
+            TaskId::Convert => format!(
+                "{} to {}",
+                self.state.convert.format.label(),
+                self.state.convert.destination.display()
+            ),
+            TaskId::SyncDevice => match &self.device_name {
+                Some(name) if self.device_ejected => format!("{name} · ejected, safe to unplug"),
+                Some(name) => name.clone(),
+                None => "no device chosen yet".to_owned(),
+            },
         }
     }
 
     /// Keys valid right now, for the footer and the popup hint line.
     #[must_use]
-    pub fn hints(&self) -> Vec<(&'static str, &'static str)> {
+    pub fn hints(&self) -> Vec<Hint> {
         match self.popup() {
             None => {
-                let mut hints = vec![("↑↓", "choose")];
+                let mut hints = vec![keys::CHOOSE.hint()];
                 let view = self.view(self.selected);
                 if view.phase == Phase::Idle {
-                    hints.push(("Enter", "run"));
+                    hints.push(keys::RUN.hint());
                 }
                 if view.phase == Phase::Running {
-                    hints.push(("s", "stop"));
+                    hints.push(keys::STOP.hint());
                 }
                 if !view.state.attention.is_empty() {
-                    hints.push(("a", "attention"));
+                    hints.push(keys::ATTENTION.hint());
                 }
-                hints.extend([("?", "help"), ("q", "quit")]);
+                hints.extend([keys::HELP_KEY.hint(), keys::QUIT.hint()]);
                 hints
             }
             Some(Popup::SignIn(SignInState::Failed(_)) | Popup::Error(..)) => {
-                vec![("Esc", "close")]
+                vec![keys::CLOSE.hint()]
             }
-            Some(Popup::SignIn(_)) => vec![("Esc", "cancel")],
-            Some(Popup::CardPlan(None)) => vec![("Esc", "unmount and cancel")],
-            Some(Popup::Lists(list)) => match list.stage {
-                ListStage::Choosing => {
-                    let mut hints = vec![("↑↓", "move"), ("Space", "tick")];
-                    if list.ticked.contains(&true) {
-                        hints.push(("Enter", "next"));
-                    }
-                    hints.push(("Esc", "cancel"));
-                    hints
-                }
-                ListStage::Listing => vec![("Esc", "cancel")],
-                ListStage::Ready { .. } => vec![("Enter", "start"), ("Esc", "cancel")],
-            },
-            Some(Popup::Link(input)) if input.value().trim().is_empty() => {
-                vec![("Esc", "cancel")]
+            Some(Popup::SignIn(_) | Popup::Looking(_)) => vec![keys::CANCEL.hint()],
+            Some(Popup::Form(dialog)) => dialog.hints(),
+            Some(Popup::EjectConfirm(_) | Popup::ConfirmStop(_) | Popup::ConfirmQuit) => {
+                vec![keys::YES.hint(), keys::NO.hint()]
             }
-            Some(Popup::Link(_)) => vec![("Enter", "start"), ("Esc", "cancel")],
-            Some(Popup::CardPlan(Some(_))) => {
-                vec![("Enter", "start"), ("Esc", "unmount and cancel")]
-            }
-            Some(Popup::UnmountConfirm | Popup::ConfirmStop(_) | Popup::ConfirmQuit) => {
-                vec![("y", "yes"), ("n", "no")]
-            }
-            Some(Popup::Unmounting) => Vec::new(),
+            Some(Popup::Ejecting) => Vec::new(),
             Some(Popup::Attention { .. } | Popup::Help { .. }) => {
-                vec![("↑↓", "scroll"), ("Esc", "close")]
+                vec![keys::SCROLL.hint(), keys::CLOSE.hint()]
+            }
+        }
+    }
+
+    /// The terminal's size, so scrolling can stop where the screen shows the end.
+    pub fn set_viewport(&mut self, width: u16, height: u16) {
+        self.viewport = (width, height);
+        let last = popups::help_max_scroll(height);
+        for popup in &mut self.popups {
+            if let Popup::Help { scroll } = popup {
+                *scroll = (*scroll).min(last);
             }
         }
     }
@@ -694,9 +651,8 @@ fn spotify_selection(ticked: &[String]) -> String {
     }
 }
 
-/// Whether an event ends a run: its last-run line is then in the runner's state.
-#[must_use]
-pub fn ends_run(kind: &EventKind) -> bool {
+/// Whether an event ends a run.
+fn ends_run(kind: &EventKind) -> bool {
     matches!(
         kind,
         EventKind::Finished
@@ -730,17 +686,14 @@ pub enum Tone {
     Failed,
 }
 
-/// The tone of a last-run line written by this module (or loaded from the state file).
+/// The tone of a last-run line, from the outcome saved with it.
 #[must_use]
-pub fn tone(line: &str) -> Tone {
-    if line.starts_with("failed") {
-        Tone::Failed
-    } else if line.starts_with("stopped: Spotify") || line.contains("need attention") {
-        Tone::Attention
-    } else if line.starts_with("stopped") {
-        Tone::Stopped
-    } else {
-        Tone::Done
+pub fn tone(outcome: RunOutcome) -> Tone {
+    match outcome {
+        RunOutcome::Done => Tone::Done,
+        RunOutcome::NeedsAttention => Tone::Attention,
+        RunOutcome::Stopped => Tone::Stopped,
+        RunOutcome::Failed => Tone::Failed,
     }
 }
 

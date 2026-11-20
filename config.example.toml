@@ -1,8 +1,6 @@
 # Copy to ~/.config/sdl/config.toml
 # Spotify developer app client ID (not a secret). Redirect URI in the app: http://127.0.0.1:9900/
 client_id = "your-spotify-client-id"
-# Volume UUID of the Snowsky SD card (diskutil info "/Volumes/NO NAME")
-card_uuid = "00000000-0000-0000-0000-000000000000"
 # Music library root (default: ~/Music)
 # music_root = "/Users/you/Music"
 # Parallel song downloads (default: 4)
