@@ -10,23 +10,22 @@
 //! in the [`Runner`] documentation. The UI folds every event into an [`sdl_core::TaskState`] per
 //! task, the same fold the runner keeps.
 //!
-//! The task bodies are stubs: each opens with a headline and then fails with
-//! [`TaskError::NotBuilt`], which reaches the UI as a plain error. Everything around them (the
-//! one-task-per-function rule, the conversation, the state and review writers, stop, the tmp
-//! folder, the last-run lines) is built and tested.
+//! Songs enter the library through one module, `tasks::intake` (F3); Sync Spotify, Download link
+//! and Review differ only in which songs they take and by which route.
 
 mod conversation;
 mod failure;
 mod fmt;
-pub mod progress;
+mod progress;
 mod runner;
 mod tasks;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub use conversation::{Answered, Answers, Offer, Opened, Resolution, ReviewChoice};
+pub use conversation::{Answers, Offer, Resolution, ReviewChoice};
 pub use progress::estimate_remaining;
-pub use runner::{Flow, Runner, StartError, TaskContext};
+pub(crate) use runner::{Flow, TaskContext};
+pub use runner::{Runner, StartError};
 
 /// Seconds since the Unix epoch; 0 if the clock is before it.
 #[must_use]
@@ -54,9 +53,6 @@ pub enum Command {
 /// Errors that end a task. Turned into an [`sdl_core::ErrorInfo`] (or `RateLimited`) for the popup.
 #[derive(Debug, thiserror::Error)]
 pub enum TaskError {
-    /// This function's task body has a signature but no body yet.
-    #[error("{0} is not built yet")]
-    NotBuilt(&'static str),
     /// A Spotify failure.
     #[error(transparent)]
     Spotify(#[from] sdl_spotify::SpotifyError),

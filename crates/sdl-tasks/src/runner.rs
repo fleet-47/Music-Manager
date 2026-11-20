@@ -33,7 +33,7 @@ pub enum StartError {
 
 /// How a task body ended without failing.
 #[derive(Debug)]
-pub enum Flow {
+pub(crate) enum Flow {
     /// It ran to the end; `line` is the last-run line and `outcome` picks its colour.
     Done {
         /// The last-run line.
@@ -97,7 +97,7 @@ impl Active {
 /// change `state.toml` and `review.toml`. Task bodies are written against this; the UI never sees
 /// it.
 #[derive(Debug, Clone)]
-pub struct TaskContext {
+pub(crate) struct TaskContext {
     /// Sends events tagged with this task; also remembers counts, headline and attention items.
     pub events: EventSender,
     /// The config.
@@ -531,15 +531,9 @@ impl Runner {
         }
     }
 
-    fn spawn<F, Fut>(&mut self, task: TaskId, body: F) -> Result<(), StartError>
-    where
-        F: FnOnce(TaskContext, UnboundedReceiver<Command>) -> Fut,
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        if self.is_running(task) {
-            return Err(StartError::AlreadyRunning(task));
-        }
-        let context = TaskContext {
+    /// A context for `task`: its own event sender, everything else shared.
+    pub(crate) fn context(&self, task: TaskId) -> TaskContext {
+        TaskContext {
             events: EventSender::new(task, self.events.clone()),
             config: Arc::clone(&self.config),
             stop: StopFlag::new(),
@@ -549,7 +543,18 @@ impl Runner {
             review_path: Arc::clone(&self.review_path),
             device: Arc::clone(&self.device),
             active: Arc::clone(&self.active),
-        };
+        }
+    }
+
+    fn spawn<F, Fut>(&mut self, task: TaskId, body: F) -> Result<(), StartError>
+    where
+        F: FnOnce(TaskContext, UnboundedReceiver<Command>) -> Fut,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        if self.is_running(task) {
+            return Err(StartError::AlreadyRunning(task));
+        }
+        let context = self.context(task);
         context.active.enter(task);
         let (commands, receiver) = unbounded_channel();
         let handle = tokio::spawn(body(context.clone(), receiver));
@@ -811,6 +816,123 @@ mod tests {
             assert_eq!((event.task, event.kind), (task, EventKind::Stopped));
         }
         assert_eq!(runner.state().last_run, std::collections::BTreeMap::new());
+        Ok(())
+    }
+
+    fn held(key: &str) -> HeldSong {
+        HeldSong {
+            song: sdl_core::WantedSong {
+                source: sdl_core::SongSource::Spotify {
+                    track_id: key.into(),
+                },
+                title: key.into(),
+                artists: vec!["A".into()],
+                album: None,
+                album_artist: None,
+                track_number: None,
+                disc_number: None,
+                date: None,
+                isrc: None,
+                duration: None,
+                cover_url: None,
+            },
+            from: Vec::new(),
+            candidates: Vec::new(),
+            reason: "no result".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sync_holding_songs_and_a_review_removing_landed_ones_lose_neither() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (runner, _rx) = runner(dir.path());
+        let sync = runner.context(TaskId::SyncSpotify);
+        let review = runner.context(TaskId::Review);
+        for n in 0..200 {
+            sync.hold(held(&format!("old{n}")))?;
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let adding = {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || -> Result<(), StoreError> {
+                barrier.wait();
+                for n in 0..200 {
+                    sync.hold(held(&format!("new{n}")))?;
+                }
+                Ok(())
+            })
+        };
+        let removing = std::thread::spawn(move || -> Result<(), StoreError> {
+            barrier.wait();
+            for n in 0..200 {
+                review.update_review(|list| {
+                    list.resolve(&format!("old{n}"));
+                })?;
+            }
+            Ok(())
+        });
+        adding.join().map_err(|_| "the adding thread panicked")??;
+        removing
+            .join()
+            .map_err(|_| "the removing thread panicked")??;
+        let list = runner.review();
+        assert_eq!(
+            list.len(),
+            200,
+            "every new song kept, every landed one gone"
+        );
+        assert!((0..200).all(|n| list.contains(&format!("new{n}"))));
+        assert!((0..200).all(|n| !list.contains(&format!("old{n}"))));
+        assert_eq!(
+            ReviewList::load_from(&dir.path().join("review.toml"))?,
+            list
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_last_runs_attention_items_come_back_after_a_restart() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (mut runner, mut rx) = runner(dir.path());
+        runner.spawn(TaskId::DownloadLink, |context, _commands| async move {
+            let item = Attention::failed("T".into(), "A".into(), "gone".into());
+            context.events.send(EventKind::Attention(item));
+            let counts = Counts {
+                failed: 1,
+                ..Counts::default()
+            };
+            context.conclude(Ok(Flow::done("0 added, 1 needs attention".into(), &counts)));
+        })?;
+        while rx.recv().await.ok_or("no end")?.kind != EventKind::Finished {}
+        let (restarted, _rx) = {
+            let (tx, rx) = channel();
+            let config = runner.config.as_ref().clone();
+            let runner = Runner::with_files(
+                config,
+                (
+                    State::load_from(&dir.path().join("state.toml"))?,
+                    dir.path().join("state.toml"),
+                ),
+                (
+                    ReviewList::load_from(&dir.path().join("review.toml"))?,
+                    dir.path().join("review.toml"),
+                ),
+                tx,
+            );
+            (runner, rx)
+        };
+        let run = restarted
+            .state()
+            .last_run
+            .get(&TaskId::DownloadLink)
+            .cloned();
+        let run = run.ok_or("no last run after the restart")?;
+        assert_eq!(run.outcome, RunOutcome::NeedsAttention);
+        assert_eq!(run.attention.len(), 1);
+        assert_eq!(
+            run.attention.first().map(|a| a.reason.as_str()),
+            Some("gone")
+        );
         Ok(())
     }
 

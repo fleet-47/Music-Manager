@@ -78,7 +78,7 @@ pub enum Offer {
 
 /// How a function's first step ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Opened {
+pub(crate) enum Opened {
     /// The first events are sent; the form can be answered.
     Ready,
     /// The function needs the owner's consent before it goes on (Sync Spotify: the browser sign-in,
@@ -89,7 +89,7 @@ pub enum Opened {
 
 /// What a function did with an answer.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Answered {
+pub(crate) enum Answered {
     /// The answer is not this function's; nothing changed.
     Ignored,
     /// The plan is shown. `Go` starts the run when `can_start`.
@@ -101,26 +101,37 @@ pub enum Answered {
     Run,
 }
 
-/// One function's side of the step form.
-pub(crate) trait Step {
+/// One function's side of the step form. The futures are `Send` by contract, so each function's
+/// body is checked for it where it is written and the runner can spawn any of them.
+pub(crate) trait Step: Send {
     /// Send the first events (a headline at once, then what the form first shows).
-    async fn open(&mut self) -> Result<Opened, TaskError>;
+    fn open(&mut self) -> impl Future<Output = Result<Opened, TaskError>> + Send;
 
     /// After the owner's consent ([`Opened::WaitsForConsent`]): carry on opening.
-    async fn after_consent(&mut self) -> Result<(), TaskError> {
-        Ok(())
+    fn after_consent(&mut self) -> impl Future<Output = Result<(), TaskError>> + Send {
+        std::future::ready(Ok(()))
     }
 
-    /// Answer an [`Offer`]. `true` when it applied; any plan made before is then out of date.
-    async fn offer(&mut self, _offer: Offer) -> Result<bool, TaskError> {
-        Ok(false)
+    /// Answer an [`Offer`]. `true` when the plan made before is now out of date.
+    fn offer(&mut self, _offer: Offer) -> impl Future<Output = Result<bool, TaskError>> + Send {
+        std::future::ready(Ok(false))
+    }
+
+    /// Something that happens by itself while the form is open (a volume appears or goes). `true`
+    /// when the plan made before is now out of date. Waits for ever unless a function has such a
+    /// thing; it is dropped whenever a command arrives, so it must be safe to start again.
+    fn background(&mut self) -> impl Future<Output = Result<bool, TaskError>> + Send {
+        std::future::pending()
     }
 
     /// Take the form's answers and send the plan.
-    async fn answer(&mut self, answers: Answers) -> Result<Answered, TaskError>;
+    fn answer(
+        &mut self,
+        answers: Answers,
+    ) -> impl Future<Output = Result<Answered, TaskError>> + Send;
 
     /// Carry out the plan.
-    async fn go(&mut self) -> Result<Flow, TaskError>;
+    fn go(&mut self) -> impl Future<Output = Result<Flow, TaskError>> + Send;
 }
 
 /// The UI's commands, read one at a time. A command that arrives while a step is working is kept
@@ -193,7 +204,16 @@ pub(crate) async fn drive(
     }
     let mut ready = false;
     loop {
-        match inbox.next().await {
+        let command = tokio::select! {
+            command = inbox.next() => command,
+            stale = step.background() => {
+                if stale? {
+                    ready = false;
+                }
+                continue;
+            }
+        };
+        match command {
             None | Some(Command::Cancel) => return Ok(Flow::Cancelled),
             Some(Command::Offer(offer)) => {
                 let Some(applied) = inbox.unless_cancelled(step.offer(offer)).await else {

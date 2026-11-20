@@ -22,9 +22,7 @@ pub(crate) fn error_info(error: &TaskError) -> ErrorInfo {
     const NETWORK: &str = "Check the internet connection, then try again.";
     const DISK: &str =
         "Check that the folder named above exists and has free space, then try again.";
-    const NOT_BUILT: &str = "This part of sdl is still being built.";
     let advice = match error {
-        TaskError::NotBuilt(_) => NOT_BUILT,
         TaskError::Youtube(YoutubeError::YtDlpNotFound)
         | TaskError::Library(LibraryError::FfmpegNotFound)
         | TaskError::Devices(DevicesError::Library(LibraryError::FfmpegNotFound)) => {
@@ -116,12 +114,6 @@ mod tests {
         assert!(info.message.contains("user not registered"));
         assert_ne!(info.advice, "");
         Ok(())
-    }
-
-    #[test]
-    fn an_unbuilt_part_says_so_plainly() {
-        let event = failure_event(&TaskError::NotBuilt("Convert"));
-        assert_eq!(failure_line(&event), "failed: Convert is not built yet");
     }
 
     #[test]
