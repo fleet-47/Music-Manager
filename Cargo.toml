@@ -12,6 +12,9 @@ sdl-core = { path = "crates/sdl-core" }
 sdl-spotify = { path = "crates/sdl-spotify" }
 sdl-youtube = { path = "crates/sdl-youtube" }
 sdl-library = { path = "crates/sdl-library" }
+sdl-devices = { path = "crates/sdl-devices" }
+sdl-tasks = { path = "crates/sdl-tasks" }
+sdl-form = { path = "crates/sdl-form" }
 
 rspotify = "0.16.1"
 innertube-rs = "0.12.0"
@@ -39,3 +42,11 @@ futures = "0.3.34"
 url = "2.5.8"
 tempfile = "3.27.0"
 serde_json = "1.0.154"
+keyring = "4.2.0"
+notify = "8.2.2"
+tui-popup = "0.7.7"
+tui-scrollview = "0.6.8"
+tui-scrollbar = { version = "0.2.8", features = ["crossterm"] }
+nucleo-matcher = "0.3.1"
+ratatui-explorer = "0.3.0"
+tachyonfx = { version = "0.25.2", default-features = false, features = ["std"] }

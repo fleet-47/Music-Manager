@@ -44,6 +44,8 @@ pub struct Config {
     pub music_root: PathBuf,
     /// Parallel song downloads (default 4). Zero is a parse error.
     pub download_jobs: NonZeroUsize,
+    /// Motion on (default true). `false` turns effects off.
+    pub animations: bool,
 }
 
 /// Unknown keys (such as an old `card_uuid`) are ignored: serde does so unless told not to.
@@ -52,6 +54,7 @@ struct RawConfig {
     client_id: String,
     music_root: Option<PathBuf>,
     download_jobs: Option<NonZeroUsize>,
+    animations: Option<bool>,
 }
 
 /// Expand a leading `~` component of `path` to `home`. `~user` and a `~` elsewhere are left alone.
@@ -120,6 +123,7 @@ impl Config {
             client_id: raw.client_id,
             music_root,
             download_jobs: raw.download_jobs.unwrap_or(DEFAULT_DOWNLOAD_JOBS),
+            animations: raw.animations.unwrap_or(true),
         })
     }
 }
@@ -132,11 +136,13 @@ mod tests {
 
     #[test]
     fn full_file_parses() -> TestResult {
-        let text = "client_id = \"abc\"\nmusic_root = \"/m\"\ndownload_jobs = 2\n";
+        let text =
+            "client_id = \"abc\"\nmusic_root = \"/m\"\ndownload_jobs = 2\nanimations = false\n";
         let cfg = Config::parse(text, Path::new("/c.toml"))?;
         assert_eq!(cfg.client_id, "abc");
         assert_eq!(cfg.music_root, PathBuf::from("/m"));
         assert_eq!(cfg.download_jobs.get(), 2);
+        assert!(!cfg.animations);
         Ok(())
     }
 
@@ -144,6 +150,7 @@ mod tests {
     fn defaults_apply() -> TestResult {
         let cfg = Config::parse("client_id = \"a\"\n", Path::new("/c.toml"))?;
         assert_eq!(cfg.download_jobs.get(), 4);
+        assert!(cfg.animations);
         assert!(cfg.music_root.ends_with("Music"));
         Ok(())
     }

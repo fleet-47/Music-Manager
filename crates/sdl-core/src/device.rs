@@ -1,10 +1,10 @@
-//! Devices (F4) and the choices remembered for them, and the choices Convert (F10) remembers.
+//! Devices (F10) and the choices remembered for them, and the choices Convert (F9) remembers.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Format;
+use crate::{Format, Preset, Quality};
 
 /// A mounted external or removable volume, as `diskutil info -plist` describes it when it is
 /// listed.
@@ -35,7 +35,7 @@ pub enum Direction {
     /// Library to device.
     #[default]
     ToDevice,
-    /// Device `Music` folder into the library.
+    /// The device's ticked top-level folders into the library.
     FromDevice,
 }
 
@@ -53,37 +53,113 @@ impl Direction {
     }
 }
 
-/// What the owner chose for a device sync, remembered per device ([`Device::id`]).
+/// What to take from the library: the whole library and/or some playlists (a tick list in the
+/// Convert and To-device forms). Playlists are named by their file stem, as listed by
+/// `sdl_library::playlists::list`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceChoice {
-    /// Ticked top-level folders on the source side.
+pub struct Selection {
+    /// Every file of the library ([`crate::library_files`]).
     #[serde(default)]
-    pub folders: Vec<String>,
+    pub whole_library: bool,
+    /// The ticked playlists' file stems. Their songs are included, and each playlist file is
+    /// written beside the converted or copied files.
+    #[serde(default)]
+    pub playlists: Vec<String>,
+}
+
+impl Selection {
+    /// Whether nothing is ticked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        !self.whole_library && self.playlists.is_empty()
+    }
+}
+
+/// What the owner chose for a device sync, remembered per device ([`Device::id`]).
+///
+/// Every field has a default, so a file written by an older version loads. Keys this version does
+/// not know are ignored, among them the old `folders` key: it named library folders to copy to the
+/// device, a meaning that no longer exists, so it is not read as the From device folders.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceChoice {
     /// Copy direction.
     #[serde(default)]
     pub direction: Direction,
-    /// Format on the device ([`Format::DEVICE`]): `None` copies as is. Used for
-    /// [`Direction::ToDevice`] only; From device always copies as is.
+    /// To device: what to copy from the library.
+    #[serde(default)]
+    pub what: Selection,
+    /// From device: the ticked top-level folders of the device (folders directly in its root).
+    #[serde(default)]
+    pub from_folders: Vec<String>,
+    /// Format on the device ([`Format::DEVICE`]): `None` copies as is. To device only.
     #[serde(default)]
     pub format: Option<Format>,
+    /// Quality, when `format` is set.
+    #[serde(default)]
+    pub quality: Quality,
+    /// Keep cover art, when `format` is set. Default on.
+    #[serde(default = "yes")]
+    pub keep_cover: bool,
+}
+
+impl DeviceChoice {
+    /// The preset to convert with, or `None` when files are copied as they are.
+    #[must_use]
+    pub fn preset(&self) -> Option<Preset> {
+        self.format.map(|format| Preset {
+            format,
+            quality: self.quality,
+            keep_cover: self.keep_cover,
+        })
+    }
+}
+
+impl Default for DeviceChoice {
+    fn default() -> Self {
+        Self {
+            direction: Direction::default(),
+            what: Selection::default(),
+            from_folders: Vec::new(),
+            format: None,
+            quality: Quality::default(),
+            keep_cover: true,
+        }
+    }
 }
 
 /// What the owner chose for Convert, remembered from run to run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConvertChoice {
-    /// Ticked top-level library folders.
+    /// What to convert.
     #[serde(default)]
-    pub folders: Vec<String>,
-    /// Target format: MP3, M4A or Opus ([`Format::CONVERT`]).
+    pub what: Selection,
+    /// Target format: MP3 or M4A ([`Format::CONVERT`]).
     #[serde(default = "ConvertChoice::default_format")]
     pub format: Format,
+    /// Quality.
+    #[serde(default)]
+    pub quality: Quality,
+    /// Keep cover art. Default on.
+    #[serde(default = "yes")]
+    pub keep_cover: bool,
     /// Destination folder as typed; a leading `~` is expanded with
-    /// [`crate::config::expand_home`] when it is used.
+    /// [`crate::config::expand_home`] when it is used. A destination inside `music_root` is
+    /// refused in the plan (F9).
     #[serde(default = "ConvertChoice::default_destination")]
     pub destination: PathBuf,
 }
 
 impl ConvertChoice {
+    /// The preset this choice converts with.
+    #[must_use]
+    pub const fn preset(&self) -> Preset {
+        Preset {
+            format: self.format,
+            quality: self.quality,
+            keep_cover: self.keep_cover,
+        }
+    }
+
     /// The destination with a leading `~` expanded to the home directory. `None` when the home
     /// directory cannot be determined and the destination starts with `~`.
     #[must_use]
@@ -110,11 +186,17 @@ impl ConvertChoice {
 impl Default for ConvertChoice {
     fn default() -> Self {
         Self {
-            folders: Vec::new(),
+            what: Selection::default(),
             format: Self::default_format(),
+            quality: Quality::default(),
+            keep_cover: true,
             destination: Self::default_destination(),
         }
     }
+}
+
+const fn yes() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -141,7 +223,17 @@ mod tests {
         let choice = ConvertChoice::default();
         assert_eq!(choice.format, Format::Mp3);
         assert_eq!(choice.destination, PathBuf::from("~/Music-converted"));
-        assert_eq!(choice.folders, Vec::<String>::new());
+        assert!(choice.what.is_empty());
+        assert!(choice.keep_cover);
+        assert_eq!(choice.preset().quality, Quality::High);
+    }
+
+    #[test]
+    fn a_device_copies_as_is_unless_a_format_is_chosen() {
+        let mut choice = DeviceChoice::default();
+        assert_eq!(choice.preset(), None);
+        choice.format = Some(Format::M4a);
+        assert_eq!(choice.preset().map(|p| p.format), Some(Format::M4a));
     }
 
     #[test]

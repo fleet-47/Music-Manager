@@ -1,0 +1,16 @@
+[package]
+name = "sdl-form"
+description = "Form module: fields, focus, keys, mouse and drawing, free of any knowledge of the app"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
+crossterm.workspace = true
+tui-input.workspace = true
+nucleo-matcher.workspace = true
+tui-scrollbar.workspace = true
+tui-scrollview.workspace = true
+ratatui-explorer.workspace = true
+throbber-widgets-tui.workspace = true

@@ -5,54 +5,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ConfigError, config_dir};
-use crate::{ConvertChoice, Counts, DeviceChoice, Format, TaskId};
+use std::collections::BTreeSet;
 
-/// Errors loading or saving the state file. Every variant names the path.
-#[derive(Debug, thiserror::Error)]
-pub enum StateError {
-    /// No home directory could be determined.
-    #[error("cannot determine the home directory to locate the state file")]
-    NoHome,
-    /// The file exists but cannot be read.
-    #[error("cannot read state file {}", path.display())]
-    Read {
-        /// The state path.
-        path: PathBuf,
-        /// Underlying error.
-        source: std::io::Error,
-    },
-    /// The file is not valid state TOML.
-    #[error("malformed state file {}", path.display())]
-    Parse {
-        /// The state path.
-        path: PathBuf,
-        /// Underlying error.
-        source: toml::de::Error,
-    },
-    /// The state could not be written.
-    #[error("cannot write state file {}", path.display())]
-    Write {
-        /// The state path.
-        path: PathBuf,
-        /// Underlying error.
-        source: std::io::Error,
-    },
-    /// The state could not be turned into TOML.
-    #[error("cannot encode state for {}", path.display())]
-    Encode {
-        /// The state path.
-        path: PathBuf,
-        /// Underlying error.
-        source: toml::ser::Error,
-    },
-}
-
-impl From<ConfigError> for StateError {
-    fn from(_: ConfigError) -> Self {
-        Self::NoHome
-    }
-}
+use crate::config::config_dir;
+use crate::storage::{self, StoreError};
+use crate::{Attention, ConvertChoice, Counts, DeviceChoice, Format, TaskId};
 
 /// How a run ended; it picks the colour of the last-run line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,7 +17,7 @@ impl From<ConfigError> for StateError {
 pub enum RunOutcome {
     /// Finished with nothing to look at.
     Done,
-    /// Finished, with unmatched or failed items.
+    /// Finished, with held or failed items.
     NeedsAttention,
     /// The task failed.
     Failed,
@@ -104,14 +61,20 @@ pub struct LastRun {
     pub at: u64,
     /// How it ended.
     pub outcome: RunOutcome,
+    /// The held and failed items of that run, for the attention list; still there after a
+    /// restart.
+    pub attention: Vec<Attention>,
 }
 
-/// A last-run entry as stored; `outcome` is absent in files written before it existed.
+/// A last-run entry as stored; `outcome` and `attention` are absent in files written before they
+/// existed.
 #[derive(Deserialize)]
 struct RawLastRun {
     line: String,
     at: u64,
     outcome: Option<RunOutcome>,
+    #[serde(default)]
+    attention: Vec<Attention>,
 }
 
 impl From<RawLastRun> for LastRun {
@@ -123,28 +86,33 @@ impl From<RawLastRun> for LastRun {
             line: raw.line,
             at: raw.at,
             outcome,
+            attention: raw.attention,
         }
     }
 }
 
-/// Everything remembered between runs. Every field has a default, so a file written by an older
+/// Everything remembered between runs. Every field has a default, and keys this version does not
+/// know (the old `formats` table, a device's old keys) are ignored, so a file written by an older
 /// version loads.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
     /// Ids of the Spotify lists that were ticked ([`crate::event::LIKED_SONGS_ID`] or playlist ids).
     #[serde(default)]
     pub ticked_lists: Vec<String>,
-    /// The format the owner asked to remember, per function (Sync Spotify, Download link). A
-    /// function with no entry starts on [`Format::Opus`] ("Original").
-    #[serde(default)]
-    pub formats: BTreeMap<TaskId, Format>,
-    /// Folders, direction and format per device, keyed by [`crate::Device::id`].
-    #[serde(default)]
-    pub devices: BTreeMap<String, DeviceChoice>,
     /// The Convert choices.
     #[serde(default)]
     pub convert: ConvertChoice,
-    /// Last-run line, time and outcome per function.
+    /// What was chosen per device, keyed by [`crate::Device::id`].
+    #[serde(default)]
+    pub devices: BTreeMap<String, DeviceChoice>,
+    /// The [`crate::Device::id`] of the device last synced; preselected next time.
+    #[serde(default)]
+    pub last_device: Option<String>,
+    /// Songs marked "Never download", by [`crate::WantedSong::key`]. A sync never searches for
+    /// them again.
+    #[serde(default)]
+    pub never: BTreeSet<String>,
+    /// Last-run line, time, outcome and attention items per function.
     #[serde(default)]
     pub last_run: BTreeMap<TaskId, LastRun>,
 }
@@ -153,8 +121,8 @@ impl State {
     /// Path of the state file, `~/.config/sdl/state.toml`.
     ///
     /// # Errors
-    /// [`StateError::NoHome`] when the home directory is unknown.
-    pub fn path() -> Result<PathBuf, StateError> {
+    /// [`StoreError::NoHome`] when the home directory is unknown.
+    pub fn path() -> Result<PathBuf, StoreError> {
         Ok(config_dir()?.join("state.toml"))
     }
 
@@ -162,49 +130,51 @@ impl State {
     ///
     /// # Errors
     /// An unreadable or malformed file, naming the path.
-    pub fn load() -> Result<Self, StateError> {
-        let path = Self::path()?;
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Self::parse(&text, &path),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(source) => Err(StateError::Read { path, source }),
-        }
+    pub fn load() -> Result<Self, StoreError> {
+        Self::load_from(&Self::path()?)
+    }
+
+    /// Load the state from `path`. A missing file is the empty state.
+    ///
+    /// # Errors
+    /// An unreadable or malformed file, naming the path.
+    pub fn load_from(path: &Path) -> Result<Self, StoreError> {
+        let mut state: Self = storage::load_or_default(path)?;
+        state.normalise();
+        Ok(state)
     }
 
     /// Parse state text; `path` only names the file in errors.
     ///
     /// # Errors
     /// Invalid TOML or wrong value types.
-    pub fn parse(text: &str, path: &Path) -> Result<Self, StateError> {
-        toml::from_str(text).map_err(|source| StateError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })
+    pub fn parse(text: &str, path: &Path) -> Result<Self, StoreError> {
+        let mut state: Self = storage::parse(text, path)?;
+        state.normalise();
+        Ok(state)
     }
 
     /// Save to `path`, creating its directory if needed.
     ///
     /// # Errors
     /// The file could not be encoded or written.
-    pub fn save_to(&self, path: &Path) -> Result<(), StateError> {
-        let text = toml::to_string_pretty(self).map_err(|source| StateError::Encode {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let write = |source| StateError::Write {
-            path: path.to_path_buf(),
-            source,
-        };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(write)?;
+    pub fn save_to(&self, path: &Path) -> Result<(), StoreError> {
+        storage::save(self, path)
+    }
+
+    /// Old files may remember Opus as the Convert format; the Format row now offers MP3 and M4A
+    /// only, so Opus reads as the default MP3.
+    fn normalise(&mut self) {
+        if !Format::CONVERT.contains(&self.convert.format) {
+            self.convert.format = ConvertChoice::default().format;
         }
-        std::fs::write(path, text).map_err(write)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Quality, Selection};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -215,7 +185,11 @@ mod tests {
             LastRun {
                 line: "12 added, 3 skipped".into(),
                 at: 1_700_000_000,
-                outcome: RunOutcome::Done,
+                outcome: RunOutcome::NeedsAttention,
+                attention: vec![
+                    Attention::held("T".into(), "A".into(), "no result matched".into()),
+                    Attention::failed("U".into(), String::new(), "network".into()),
+                ],
             },
         );
         last_run.insert(
@@ -224,26 +198,34 @@ mod tests {
                 line: "stopped".into(),
                 at: 1_700_000_100,
                 outcome: RunOutcome::Stopped,
+                attention: Vec::new(),
             },
         );
-        let mut formats = BTreeMap::new();
-        formats.insert(TaskId::DownloadLink, Format::M4a);
         let mut devices = BTreeMap::new();
         devices.insert(
             "AAAA-BBBB".to_owned(),
             DeviceChoice {
-                folders: vec!["Spotify".into()],
                 direction: crate::Direction::FromDevice,
+                what: Selection {
+                    whole_library: true,
+                    playlists: vec!["Road trip".into()],
+                },
+                from_folders: vec!["Music".into()],
                 format: Some(Format::Mp3),
+                quality: Quality::Small,
+                keep_cover: false,
             },
         );
         State {
             ticked_lists: vec!["liked-songs".into(), "37i9dQZF1DX".into()],
-            formats,
             devices,
+            last_device: Some("AAAA-BBBB".into()),
+            never: BTreeSet::from(["track1".to_owned()]),
             convert: ConvertChoice {
-                folders: vec!["Youtube".into()],
-                format: Format::Opus,
+                what: Selection::default(),
+                format: Format::M4a,
+                quality: Quality::Medium,
+                keep_cover: true,
                 destination: "~/Out".into(),
             },
             last_run,
@@ -266,6 +248,7 @@ mod tests {
         let state = State::parse("", Path::new("/s.toml"))?;
         assert_eq!(state, State::default());
         assert_eq!(state.convert.format, Format::Mp3);
+        assert!(state.convert.keep_cover);
         Ok(())
     }
 
@@ -299,9 +282,9 @@ at = 7
     }
 
     #[test]
-    fn finished_runs_need_attention_only_with_unmatched_or_failed() {
+    fn finished_runs_need_attention_only_with_held_or_failed() {
         let counts = Counts {
-            unmatched: 1,
+            held: 1,
             ..Counts::default()
         };
         assert_eq!(RunOutcome::of_finished(&counts), RunOutcome::NeedsAttention);
@@ -309,6 +292,42 @@ at = 7
             RunOutcome::of_finished(&Counts::default()),
             RunOutcome::Done
         );
+    }
+
+    #[test]
+    fn the_owners_real_old_shape_state_file_still_loads() -> TestResult {
+        // A byte copy of ~/.config/sdl/state.toml as it was before this redesign.
+        let text = include_str!("../tests/fixtures/state-old-shape.toml");
+        let state = State::parse(text, Path::new("/s.toml"))?;
+        assert_eq!(state.ticked_lists, Vec::<String>::new());
+        assert_eq!(state.convert.format, Format::Mp3);
+        assert_eq!(
+            state.convert.destination,
+            PathBuf::from("~/Music-converted")
+        );
+        let device = state
+            .devices
+            .get("0481966B-99D3-369A-B6B0-EE83F5D07E45")
+            .ok_or("device choice lost")?;
+        assert_eq!(device.direction, crate::Direction::ToDevice);
+        assert!(
+            device.from_folders.is_empty(),
+            "the old library folders are not read as device folders"
+        );
+        assert_eq!(device.format, None);
+        assert!(device.keep_cover);
+        let outcome = |task| state.last_run.get(&task).map(|run| run.outcome);
+        assert_eq!(outcome(TaskId::DownloadLink), Some(RunOutcome::Done));
+        assert_eq!(outcome(TaskId::SyncDevice), Some(RunOutcome::Done));
+        assert!(state.never.is_empty() && state.last_device.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn an_old_opus_convert_format_reads_as_mp3() -> TestResult {
+        let state = State::parse("[convert]\nformat = \"opus\"\n", Path::new("/s.toml"))?;
+        assert_eq!(state.convert.format, Format::Mp3);
+        Ok(())
     }
 
     #[test]

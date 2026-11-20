@@ -1,0 +1,78 @@
+//! The runner and the five functions' tasks (F11): Sync Spotify (F4), Download link (F5), Review
+//! (F8), Sync device (F10) and Convert (F9). The only writer of `state.toml` and `review.toml`.
+//!
+//! The interface layer drives tasks only through [`Runner`]: it starts a function with
+//! [`Runner::start`], answers what the function asks with [`Runner::send`] and a [`Command`]
+//! carrying [`Answers`] (or an [`Offer`]), and reads what comes back as [`sdl_core::Event`]s on the
+//! channel it gave the runner (offers: `Lists`, `Devices`, `Playlists`, `Folders`; the plan:
+//! `NewOfTotal`, `Plan`; the run: `Started`, then `Headline`, `Counts`, `Attention`, `HeldCount`;
+//! the end: `Finished`, `Stopped`, `Error`, `RateLimited`). The full conversation per function is
+//! in the [`Runner`] documentation. The UI folds every event into an [`sdl_core::TaskState`] per
+//! task, the same fold the runner keeps.
+//!
+//! The task bodies are stubs: each opens with a headline and then fails with
+//! [`TaskError::NotBuilt`], which reaches the UI as a plain error. Everything around them (the
+//! one-task-per-function rule, the conversation, the state and review writers, stop, the tmp
+//! folder, the last-run lines) is built and tested.
+
+mod conversation;
+mod failure;
+mod fmt;
+pub mod progress;
+mod runner;
+mod tasks;
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub use conversation::{Answered, Answers, Offer, Opened, Resolution, ReviewChoice};
+pub use progress::estimate_remaining;
+pub use runner::{Flow, Runner, StartError, TaskContext};
+
+/// Seconds since the Unix epoch; 0 if the clock is before it.
+#[must_use]
+pub(crate) fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// A message from the UI to a running task; the same four kinds drive every function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// The form's answers; the task replies with its plan (or, for Download link and Review,
+    /// starts at once).
+    Answer(Answers),
+    /// Sync device: something the form needs before it can be answered.
+    Offer(Offer),
+    /// Start, after an answer whose plan can start; or, for Sync Spotify at
+    /// `SignIn(NeedsBrowser)`, "Continue" to the browser sign-in.
+    Go,
+    /// The owner left the form before starting: the task ends with `Stopped`.
+    Cancel,
+}
+
+/// Errors that end a task. Turned into an [`sdl_core::ErrorInfo`] (or `RateLimited`) for the popup.
+#[derive(Debug, thiserror::Error)]
+pub enum TaskError {
+    /// This function's task body has a signature but no body yet.
+    #[error("{0} is not built yet")]
+    NotBuilt(&'static str),
+    /// A Spotify failure.
+    #[error(transparent)]
+    Spotify(#[from] sdl_spotify::SpotifyError),
+    /// A `YouTube` failure.
+    #[error(transparent)]
+    Youtube(#[from] sdl_youtube::YoutubeError),
+    /// A library (lookup, tag, playlist, converter) failure.
+    #[error(transparent)]
+    Library(#[from] sdl_library::LibraryError),
+    /// A device failure.
+    #[error(transparent)]
+    Devices(#[from] sdl_devices::DevicesError),
+    /// A file system failure.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// A settings file could not be written.
+    #[error(transparent)]
+    State(#[from] sdl_core::StoreError),
+}

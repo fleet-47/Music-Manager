@@ -1,0 +1,26 @@
+ticked_lists = []
+
+[formats]
+
+[devices.0481966B-99D3-369A-B6B0-EE83F5D07E45]
+folders = [
+    "Soundcloud",
+    "Spotify",
+    "Youtube",
+]
+direction = "to_device"
+
+[convert]
+folders = []
+format = "mp3"
+destination = "~/Music-converted"
+
+[last_run.download_link]
+line = "1 added, 0 skipped"
+at = 1795087755
+outcome = "done"
+
+[last_run.sync_device]
+line = "190 copied"
+at = 1795172183
+outcome = "done"

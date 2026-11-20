@@ -32,13 +32,15 @@ SD card. Build spec: `.fleet/docs/SPEC-tui.md`.
 - Disc playlist copies are accepted (ruled 2026-11-20): Disco imports a changed playlist file as "<name> (2)" and keeps the old one (`import_m3u_file` in `ui/musicdb.c`). `sdl` cannot prevent it; the device form says so (`.fleet/docs/BACKLOG.md`).
 - Eject clean-up list (confirmed 2026-11-20): `.Spotlight-V100`, `.Trashes` (this empties the device's Trash; the eject question says so), `.fseventsd` and `.TemporaryItems` at the device root, every `.DS_Store`, and the narrow `._` rule.
 - The old-flow folders were moved out of the library to `~/Music-old` (2026-11-20), so the library starts clean.
+- yt-dlp's JavaScript engine stays `deno` (ruled 2026-11-20). Reason: yt-dlp runs YouTube's script in it with no file system or network access; QuickJS is 1.4 MB against 82 MB but has no such restriction, and Bun is larger and deprecated by yt-dlp (yt-dlp wiki, EJS page).
 - Build standard is `fleet-47/Gen.v2`: fenix stable, the global `~/.cargo/config.toml`, and the lint flags in the spec. The repo carries no `.cargo/`, `clippy.toml`, `[lints]` table, rustflags or profile overrides.
 - mise config lives in `.mise/config.toml` and is committed. mise supplies yt-dlp, ffmpeg and deno and starts the TUI.
 
 ## Layout
-- `Cargo.toml`, `crates/`: the workspace. `sdl-core` (shared types, config, path rules), `sdl-spotify`, `sdl-youtube`, `sdl-library` (genre, tags, card), `sdl` (binary: TUI and pipeline).
+- `Cargo.toml`, `crates/`: the workspace. `sdl-core` (shared types, config, state and review files, path rules), `sdl-spotify`, `sdl-youtube`, `sdl-library` (genre, tags, playlists, converter), `sdl-devices`, `sdl-tasks` (the runner and the five functions), `sdl-form` (the form module), `sdl` (binary: screen and dialogs).
 - `config.example.toml`: copy to `~/.config/sdl/config.toml`.
 - `.mise/config.toml`: tools and the `tui` task.
+- `.fleet/docs/`: `SPEC-tui.md` (the build contract), `BACKLOG.md` (tasks waiting on a condition), `HANDOFF.md`.
 
 ## Run
 - Build: `cargo build --release --locked` with the fenix stable toolchain.

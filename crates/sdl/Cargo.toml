@@ -7,16 +7,16 @@ publish.workspace = true
 
 [dependencies]
 sdl-core.workspace = true
-sdl-spotify.workspace = true
-sdl-youtube.workspace = true
-sdl-library.workspace = true
+sdl-tasks.workspace = true
+sdl-form.workspace = true
 ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 crossterm = { workspace = true, features = ["event-stream", "bracketed-paste"] }
-tui-input.workspace = true
 catppuccin.workspace = true
-throbber-widgets-tui.workspace = true
+tui-popup.workspace = true
+tui-scrollview.workspace = true
+tui-scrollbar.workspace = true
+tachyonfx.workspace = true
+open.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "sync", "time"] }
 color-eyre.workspace = true
 futures.workspace = true
-thiserror.workspace = true
-tempfile.workspace = true

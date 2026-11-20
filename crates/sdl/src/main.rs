@@ -10,12 +10,12 @@ async fn main() -> Result<()> {
         .display_location_section(false)
         .display_env_section(false)
         .install()?;
-    // A missing or malformed config file is reported before the screen starts, with what to do.
+    // A missing or malformed config file is reported before anything else, with what to do.
     let config = Config::load().map_err(|error| {
         let advice = config_advice(&error);
         color_eyre::Report::from(error).suggestion(advice)
     })?;
-    sdl::run::run(config).await
+    sdl::screen::run(config).await
 }
 
 fn config_advice(error: &ConfigError) -> &'static str {

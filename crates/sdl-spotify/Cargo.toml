@@ -15,3 +15,4 @@ open.workspace = true
 futures.workspace = true
 httpdate.workspace = true
 url.workspace = true
+keyring.workspace = true

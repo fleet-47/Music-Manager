@@ -1,21 +1,36 @@
-//! Shared types for `sdl`: the Spotify song, task events, config, state file and path rules.
-//! Library crates depend on this crate only, never on each other.
+//! Shared types for `sdl`: the wanted song, match outcome, library layout and playlist model,
+//! review list, presets, task events, config and state files.
+//! Library crates depend on this crate only, never on each other (`sdl-devices` also on
+//! `sdl-library`).
 
 pub mod config;
 pub mod device;
 pub mod event;
 pub mod format;
-pub mod paths;
+pub mod matching;
+pub mod place;
+pub mod playlist;
+pub mod preset;
+pub mod review;
+pub mod song;
 pub mod state;
-pub mod track;
+pub mod stop;
+mod storage;
 
 pub use config::{Config, ConfigError};
-pub use device::{ConvertChoice, Device, DeviceChoice, Direction};
+pub use device::{ConvertChoice, Device, DeviceChoice, Direction, Selection};
 pub use event::{
     Attention, AttentionKind, Counts, ErrorInfo, Event, EventKind, EventReceiver, EventSender,
-    ListChoice, PlanSummary, SignInState, TaskId, TaskState, channel,
+    LIKED_SONGS_ID, LIKED_SONGS_NAME, ListChoice, PlanSummary, SignInState, TaskId, TaskState,
+    channel,
 };
-pub use format::{Format, FormatChoice};
-pub use paths::Target;
-pub use state::{LastRun, RunOutcome, State, StateError};
-pub use track::Track;
+pub use format::Format;
+pub use matching::{Candidate, MatchOutcome};
+pub use place::{Place, library_files};
+pub use playlist::Playlist;
+pub use preset::{Preset, Quality};
+pub use review::{HeldSong, ReviewList};
+pub use song::{SongSource, WantedSong};
+pub use state::{LastRun, RunOutcome, State};
+pub use stop::StopFlag;
+pub use storage::StoreError;

@@ -1,0 +1,20 @@
+[package]
+name = "sdl-tasks"
+description = "The runner and the five functions' tasks for sdl; the only writer of the settings files"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sdl-core.workspace = true
+sdl-spotify.workspace = true
+sdl-youtube.workspace = true
+sdl-library.workspace = true
+sdl-devices.workspace = true
+futures.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "fs", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

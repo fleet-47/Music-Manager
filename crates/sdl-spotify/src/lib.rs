@@ -1,4 +1,4 @@
-//! Spotify sign-in (PKCE) and list/song listing, via `rspotify`.
+//! Spotify sign-in (PKCE, remembered) and list/song listing, via `rspotify` (F4).
 //!
 //! # Web API calls
 //!
@@ -15,6 +15,7 @@
 use std::time::{Duration, SystemTime};
 
 use futures::TryStreamExt;
+use rspotify::Token;
 use rspotify::clients::pagination::Paginator;
 use rspotify::clients::{BaseClient, OAuthClient};
 use rspotify::http::HttpError;
@@ -23,9 +24,10 @@ use rspotify::prelude::Id;
 use rspotify::scopes;
 use rspotify::{AuthCodePkceSpotify, ClientError, ClientResult};
 use rspotify::{Config, Credentials, OAuth};
-use sdl_core::event::LIKED_SONGS_ID;
-use sdl_core::paths::SAVED_TRACKS;
-use sdl_core::{EventKind, EventSender, ListChoice, SignInState, Track};
+use sdl_core::event::{LIKED_SONGS_ID, LIKED_SONGS_NAME};
+
+mod keychain;
+use sdl_core::{EventKind, EventSender, ListChoice, SignInState, SongSource, WantedSong};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
@@ -140,39 +142,115 @@ fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
     Some(at.duration_since(now).unwrap_or_default())
 }
 
-/// A signed-in Spotify session (`rspotify::AuthCodePkceSpotify`, `token_cached = false`). The token
-/// lives in memory only.
+/// A signed-in Spotify session (`rspotify::AuthCodePkceSpotify`, `token_cached = false`). The
+/// access token lives in memory; only the refresh token is kept, in the macOS Keychain.
 #[derive(Debug)]
 pub struct Session {
     client: AuthCodePkceSpotify,
 }
 
-/// Sign in with PKCE using the config's client ID (F2): authorize URL opened with `open`, code
-/// received on our own `tokio::net::TcpListener` at `127.0.0.1:9900`, then `request_token`.
-/// Reports [`SignInState`] changes as [`EventKind::SignIn`] on `events`. The listener is dropped
-/// on every way out (success, failure, and the task being aborted), so the port is always freed.
-///
-/// # Errors
-/// Sign-in failed; the cause is also sent as [`SignInState::Failed`].
-pub async fn sign_in(client_id: &str, events: &EventSender) -> Result<Session, SpotifyError> {
-    events.send(EventKind::SignIn(SignInState::OpeningBrowser));
-    match authorize(client_id, events).await {
-        Ok(client) => {
-            events.send(EventKind::SignIn(SignInState::SignedIn));
-            Ok(Session { client })
-        }
-        Err(error) => {
-            events.send(EventKind::SignIn(SignInState::Failed(error.to_string())));
-            Err(error)
-        }
-    }
+/// What [`resume`] found.
+#[derive(Debug)]
+pub struct Resumed {
+    /// A signed-in session, or `None` when the browser sign-in is needed (no stored token, the
+    /// Keychain could not be read, or Spotify refused the stored token).
+    pub session: Option<Session>,
+    /// Why the Keychain could not be read or written, in plain words. A Keychain failure never
+    /// blocks a sync; the caller shows this once.
+    pub keychain_problem: Option<String>,
 }
 
-/// The PKCE flow: authorize URL, browser, code on the listener, token.
-async fn authorize(
+/// A session made by the browser sign-in.
+#[derive(Debug)]
+pub struct SignedIn {
+    /// The session.
+    pub session: Session,
+    /// Why the new refresh token could not be remembered, in plain words; the caller shows it
+    /// once.
+    pub keychain_problem: Option<String>,
+}
+
+/// Sign in without the browser (F4): read the refresh token from the macOS Keychain (service
+/// `sdl`, account `spotify`), exchange it with rspotify's refresh call, and keep the new refresh
+/// token Spotify returns in its place (when the response carries none, the stored one is kept,
+/// both in the Keychain and in the in-memory token so later automatic refreshes still work).
+///
+/// Never starts the browser and never opens the sign-in listener. Not tested against the real
+/// Keychain or Spotify by the contract engineer (hard limit); only compiled.
+///
+/// # Errors
+/// An API or network failure that is not a refusal ([`SpotifyError::Api`]). A refusal (HTTP 400 or
+/// 401 from the token call) is `Ok` with no session.
+pub async fn resume(client_id: &str) -> Result<Resumed, SpotifyError> {
+    let stored = match blocking_keychain(keychain::read).await {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            return Ok(Resumed {
+                session: None,
+                keychain_problem: None,
+            });
+        }
+        Err(problem) => {
+            return Ok(Resumed {
+                session: None,
+                keychain_problem: Some(problem),
+            });
+        }
+    };
+    let client = new_client(client_id);
+    set_token(
+        &client,
+        Token {
+            refresh_token: Some(stored.clone()),
+            ..Token::default()
+        },
+    )
+    .await?;
+    match client.refresh_token().await {
+        Ok(()) => {}
+        Err(error) if is_refusal(&error) => {
+            return Ok(Resumed {
+                session: None,
+                keychain_problem: None,
+            });
+        }
+        Err(error) => return Err(classify(error).await),
+    }
+    let kept = keep_refresh_token(&client, &stored).await?;
+    let keychain_problem = remember(kept).await;
+    Ok(Resumed {
+        session: Some(Session { client }),
+        keychain_problem,
+    })
+}
+
+/// Sign in with the browser (F4): authorize URL opened with `open`, code received on our own
+/// `tokio::net::TcpListener` at `127.0.0.1:9900`, then `request_token`, then the refresh token is
+/// stored in the Keychain. Sends `SignIn(WaitingForBrowser)` on `events` once the browser is
+/// open. The listener is dropped on every way out (success, failure, and the task being aborted),
+/// so the port is always freed. The caller asks "Sync Spotify opens your browser" first (it sends
+/// `SignIn(NeedsBrowser)` and waits for `Go`), and sends `SignIn(SignedIn)` after either way of
+/// signing in.
+///
+/// # Errors
+/// Sign-in failed. The caller ends the task with it, which is the one message the owner sees.
+pub async fn sign_in_browser(
     client_id: &str,
     events: &EventSender,
-) -> Result<AuthCodePkceSpotify, SpotifyError> {
+) -> Result<SignedIn, SpotifyError> {
+    let client = authorize(client_id, events).await?;
+    let keychain_problem = match client_refresh_token(&client).await {
+        Some(token) => remember(token).await,
+        None => None,
+    };
+    Ok(SignedIn {
+        session: Session { client },
+        keychain_problem,
+    })
+}
+
+/// A PKCE client with the scopes and redirect, holding no token yet.
+fn new_client(client_id: &str) -> AuthCodePkceSpotify {
     let oauth = OAuth {
         redirect_uri: REDIRECT_URI.to_owned(),
         scopes: scopes!(SCOPES),
@@ -182,8 +260,79 @@ async fn authorize(
         token_cached: false,
         ..Config::default()
     };
-    let mut client =
-        AuthCodePkceSpotify::with_config(Credentials::new_pkce(client_id), oauth, config);
+    AuthCodePkceSpotify::with_config(Credentials::new_pkce(client_id), oauth, config)
+}
+
+/// Replace the client's in-memory token.
+async fn set_token(client: &AuthCodePkceSpotify, token: Token) -> Result<(), SpotifyError> {
+    let token_slot = client.get_token();
+    let Ok(mut guard) = token_slot.lock().await else {
+        return Err(SpotifyError::Api(ClientError::InvalidToken));
+    };
+    *guard = Some(token);
+    Ok(())
+}
+
+/// The client's current refresh token, if it has one.
+async fn client_refresh_token(client: &AuthCodePkceSpotify) -> Option<String> {
+    let token_slot = client.get_token();
+    let guard = token_slot.lock().await.ok()?;
+    guard.as_ref()?.refresh_token.clone()
+}
+
+/// After a refresh: make sure the in-memory token still carries a refresh token (Spotify may omit
+/// it, and rspotify would then fail its next refresh) and return the one to remember.
+async fn keep_refresh_token(
+    client: &AuthCodePkceSpotify,
+    stored: &str,
+) -> Result<String, SpotifyError> {
+    let token_slot = client.get_token();
+    let Ok(mut guard) = token_slot.lock().await else {
+        return Err(SpotifyError::Api(ClientError::InvalidToken));
+    };
+    let token = guard
+        .as_mut()
+        .ok_or(SpotifyError::Api(ClientError::InvalidToken))?;
+    let kept = token
+        .refresh_token
+        .get_or_insert_with(|| stored.to_owned())
+        .clone();
+    Ok(kept)
+}
+
+/// Whether a failed token call means Spotify refused the stored refresh token (HTTP 400 or 401).
+fn is_refusal(error: &ClientError) -> bool {
+    let ClientError::Http(http) = error else {
+        return false;
+    };
+    matches!(
+        http.as_ref(),
+        HttpError::StatusCode(response) if matches!(response.status().as_u16(), 400 | 401)
+    )
+}
+
+/// Write the refresh token to the Keychain; the plain reason when that fails.
+async fn remember(token: String) -> Option<String> {
+    blocking_keychain(move || keychain::write(&token))
+        .await
+        .err()
+}
+
+/// Run a Keychain call off the async threads; a task that failed to run is a plain reason.
+async fn blocking_keychain<T: Send + 'static>(
+    call: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(call)
+        .await
+        .map_err(|error| format!("the Keychain call did not finish: {error}"))?
+}
+
+/// The PKCE flow: authorize URL, browser, code on the listener, token.
+async fn authorize(
+    client_id: &str,
+    events: &EventSender,
+) -> Result<AuthCodePkceSpotify, SpotifyError> {
+    let mut client = new_client(client_id);
     let url = client.get_authorize_url(None).map_err(SpotifyError::Api)?;
     let listener = TcpListener::bind(LISTEN_ADDR)
         .await
@@ -280,7 +429,7 @@ pub async fn list_choices(session: &Session) -> Result<Vec<ListChoice>, SpotifyE
     let me = api(client.current_user()).await?;
     let first = api(client.current_user_saved_tracks_manual(None, Some(1), Some(0))).await?;
     let mut choices = vec![ListChoice {
-        name: "Liked Songs".to_owned(),
+        name: LIKED_SONGS_NAME.to_owned(),
         id: LIKED_SONGS_ID.to_owned(),
         count: usize::try_from(first.total).unwrap_or(usize::MAX),
     }];
@@ -301,38 +450,43 @@ pub async fn list_choices(session: &Session) -> Result<Vec<ListChoice>, SpotifyE
     Ok(choices)
 }
 
-/// Map a full track to [`Track`]; local files (no Spotify id) are skipped.
-fn to_track(track: &FullTrack, list: &ListChoice) -> Option<Track> {
+/// Map a full track to a wanted song; local files (no Spotify id) are skipped.
+fn to_song(track: &FullTrack) -> Option<WantedSong> {
     if track.is_local {
         return None;
     }
     let id = track.id.as_ref()?;
-    let list_name = if list.id == LIKED_SONGS_ID {
-        SAVED_TRACKS
-    } else {
-        &list.name
-    };
-    Some(Track {
+    let album_artist = track
+        .album
+        .artists
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(WantedSong {
+        source: SongSource::Spotify {
+            track_id: id.id().to_owned(),
+        },
         title: track.name.clone(),
         artists: track.artists.iter().map(|a| a.name.clone()).collect(),
-        album: track.album.name.clone(),
-        album_artist: track
-            .album
-            .artists
-            .iter()
-            .map(|a| a.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-        track_number: track.track_number,
-        disc_number: u32::try_from(track.disc_number).unwrap_or(1),
-        release_date: track.album.release_date.clone(),
+        album: Some(track.album.name.clone()).filter(|name| !name.is_empty()),
+        album_artist: Some(album_artist).filter(|name| !name.is_empty()),
+        track_number: Some(track.track_number),
+        disc_number: u32::try_from(track.disc_number).ok(),
+        date: track.album.release_date.clone(),
         isrc: track.external_ids.get("isrc").cloned(),
-        duration: track.duration.to_std().unwrap_or_default(),
+        duration: track.duration.to_std().ok(),
         cover_url: track.album.images.first().map(|image| image.url.clone()),
-        spotify_id: id.id().to_owned(),
-        list_name: list_name.to_owned(),
-        list_id: list.id.clone(),
     })
+}
+
+/// The songs of one ticked list, in list order (a song named twice appears twice).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedSongs {
+    /// The list.
+    pub list: ListChoice,
+    /// Its songs. Local files and episodes are left out.
+    pub songs: Vec<WantedSong>,
 }
 
 /// Drain one paginated listing into `tracks`, sending a headline per page received.
@@ -340,8 +494,8 @@ async fn drain<T>(
     items: Paginator<'_, ClientResult<T>>,
     list: &ListChoice,
     events: &EventSender,
-    tracks: &mut Vec<Track>,
-    to_row: impl Fn(T) -> Option<Track>,
+    tracks: &mut Vec<WantedSong>,
+    to_row: impl Fn(T) -> Option<WantedSong>,
 ) -> Result<(), SpotifyError> {
     let mut pages = items.try_chunks(PAGE);
     events.send(EventKind::Headline(format!(
@@ -365,8 +519,9 @@ async fn drain<T>(
     Ok(())
 }
 
-/// The songs of the `chosen` lists, one [`Track`] per list entry, through rspotify's paginators
-/// (50 per page). Local files and episodes are skipped. Sends [`EventKind::Headline`] while listing.
+/// The songs of the `chosen` lists, one [`ListedSongs`] per list in the given order, through
+/// rspotify's paginators (50 per page). Local files and episodes are skipped. Sends
+/// [`EventKind::Headline`] while listing.
 ///
 /// # Errors
 /// An API or network failure, [`SpotifyError::RateLimited`], or [`SpotifyError::BadListId`].
@@ -374,17 +529,18 @@ pub async fn list_songs(
     session: &Session,
     chosen: &[ListChoice],
     events: &EventSender,
-) -> Result<Vec<Track>, SpotifyError> {
+) -> Result<Vec<ListedSongs>, SpotifyError> {
     let client = &session.client;
-    let mut tracks = Vec::new();
+    let mut listed = Vec::with_capacity(chosen.len());
     for list in chosen {
+        let mut songs = Vec::new();
         if list.id == LIKED_SONGS_ID {
             drain(
                 client.current_user_saved_tracks(None),
                 list,
                 events,
-                &mut tracks,
-                |saved| to_track(&saved.track, list),
+                &mut songs,
+                |saved| to_song(&saved.track),
             )
             .await?;
         } else {
@@ -394,16 +550,20 @@ pub async fn list_songs(
                 client.playlist_items(id, None, None),
                 list,
                 events,
-                &mut tracks,
+                &mut songs,
                 |entry| match entry.item {
-                    Some(PlayableItem::Track(track)) => to_track(&track, list),
+                    Some(PlayableItem::Track(track)) => to_song(&track),
                     _ => None,
                 },
             )
             .await?;
         }
+        listed.push(ListedSongs {
+            list: list.clone(),
+            songs,
+        });
     }
-    Ok(tracks)
+    Ok(listed)
 }
 
 #[cfg(test)]
@@ -451,6 +611,11 @@ mod tests {
             "Check settings on developer.spotify.com"
         );
         assert_eq!(reason_from_body(" plain text \n"), "plain text");
+    }
+
+    #[test]
+    fn a_refusal_is_a_400_or_401_from_the_token_call_only() {
+        assert!(!is_refusal(&ClientError::InvalidToken));
     }
 
     #[test]

@@ -1,13 +1,8 @@
-//! The `sdl` terminal app: task entries (F8) and the screen (F1).
+//! The `sdl` terminal app: the screen ([`screen`]), the app state it draws ([`app`]), the five
+//! functions' dialogs ([`dialogs`]) and plain-text helpers ([`fmt`]). Forms are `sdl_form`; the
+//! task layer is `sdl_tasks`.
 
 pub mod app;
-pub mod control;
+pub mod dialogs;
 pub mod fmt;
-pub mod form;
-pub mod forms;
-pub mod keys;
-pub mod popups;
-pub mod run;
-pub mod tasks;
-pub mod theme;
-pub mod ui;
+pub mod screen;

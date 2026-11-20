@@ -86,7 +86,10 @@ report it; do not substitute another crate or hand-write the capability.
 - **One file per place, never replaced.** Within a run, wanted songs with the same place (F7) are
   handled once. Landing uses `tempfile`'s `persist_noclobber`, which fails instead of replacing an
   existing file; when the place was taken meanwhile (another task landed it), the song counts as
-  skipped and the temp file is removed.
+  skipped and the temp file is removed. This holds in the library. On a device or a Convert
+  destination the drive may be FAT32, where macOS refuses that call (measured: os error 45); there
+  a file is renamed into place only after checking the place is free, and only one task writes to
+  a given device or destination at a time.
 - **Match** (`sdl-youtube`): `innertube-rs` 0.12 `Innertube::search_music(query,
   Some(MusicSearchFilter::Songs))`, one client per run. Query the ISRC first when there is one; if
   nothing passes, query `<first artist> <title>`. Among the first 5 songs a candidate *passes* when
@@ -129,9 +132,8 @@ report it; do not substitute another crate or hand-write the capability.
 - **Sign-in is remembered.** `rspotify` 0.16 `AuthCodePkceSpotify`, scopes `user-library-read` and
   `playlist-read-private`, redirect `http://127.0.0.1:9900/`. The refresh token is kept in the
   macOS Keychain with the `keyring` crate (service `sdl`, account `spotify`) and nowhere else. The
-  crate is built with its real macOS Keychain store (in keyring 3.x the `apple-native` feature;
-  without it the crate keeps secrets in a mock store that is lost on quit: confirm for the version
-  added). On
+  crate is keyring 4.2 with its default `v1` feature, which selects the real macOS Keychain store
+  (`apple-native-keyring-store`); there is no mock store in this build. On
   start of a sync: a stored refresh token is exchanged for an access token with rspotify's refresh
   call, and the new refresh token Spotify returns replaces the stored one (when the response
   carries none, the stored one is kept). With no stored token, or
@@ -281,7 +283,8 @@ report it; do not substitute another crate or hand-write the capability.
   count finished before the stop.
 - `state.toml` and `review.toml` each have one writer: the task layer's runner. Tasks send it
   changes; no task writes either file itself, so two tasks can never overwrite each other's
-  changes.
+  changes. Each write is atomic (a temp file in the same folder, then a rename), so a crash never
+  leaves a half-written file.
 - `~/.config/sdl/state.toml`: the ticked Spotify lists, the Convert choices, per device its
   choices, the last device, the "never download" songs, and each function's last-run line with its
   time, its outcome (done / needs attention / failed / stopped) and its attention items.
@@ -296,12 +299,19 @@ plain error naming the path, printed before the screen starts. `config.example.t
 root.
 
 ## Workspace
-Cargo workspace at the repo root, edition 2024, `resolver = "3"`. Crates: `sdl-core` (shared
-types, config, state and review files, path rules), `sdl-spotify`, `sdl-youtube`, `sdl-library`
-(MusicBrainz, tags, playlists, converter, devices), `sdl` (binary: tasks and TUI).
-Library crates depend only on `sdl-core`. In `sdl`, app state and its update logic are free of
-drawing code; the form module is one module with a small interface. Errors: `thiserror` in
-libraries, `color-eyre` in the binary.
+Cargo workspace at the repo root, edition 2024, `resolver = "3"`. Crates, each one deep module with
+a small interface, split so that each can be built and tested by itself:
+- `sdl-core`: shared types, config, state and review files, path rules.
+- `sdl-spotify`: sign-in and listing. `sdl-youtube`: matching, link listing, downloads.
+- `sdl-library`: MusicBrainz, tags, playlist files, the converter and Convert.
+- `sdl-devices`: device list, plans, copy runs, clean-up and eject (uses `sdl-library`).
+- `sdl-tasks`: the runner and the five functions' tasks; the only writer of the settings files.
+- `sdl-form`: the form module (F1), free of any knowledge of this app.
+- `sdl`: the binary: screen, dialogs, event loop.
+Library crates depend only on `sdl-core` (and `sdl-devices` on `sdl-library`); `sdl-tasks` depends
+on the library crates; `sdl` depends on `sdl-tasks`, `sdl-form` and `sdl-core`. In `sdl`, app state
+and its update logic are free of drawing code. Errors: `thiserror` in libraries, `color-eyre` in the
+binary.
 
 ## Build standard (`fleet-47/Gen.v2`)
 - Toolchain: fenix stable. The global `~/.cargo/config.toml` supplies profiles, rustflags and the

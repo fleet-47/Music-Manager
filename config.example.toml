@@ -5,3 +5,5 @@ client_id = "your-spotify-client-id"
 # music_root = "/Users/you/Music"
 # Parallel song downloads (default: 4)
 # download_jobs = 4
+# Motion: fades and slides (default: true)
+# animations = true
