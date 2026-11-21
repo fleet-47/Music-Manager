@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use sanitize_filename::{Options, sanitize_with_options};
 
 use crate::format::{existing_format, is_audio_file};
-use crate::{Format, WantedSong};
+use crate::{Format, Library, WantedSong};
 
 /// Folder of songs that have no album.
 pub const SINGLES: &str = "Singles";
@@ -64,7 +64,7 @@ fn component_or(name: &str, fallback_id: &str) -> String {
     }
 }
 
-/// Where a song lives, apart from its extension: a root, an artist folder, an album folder and a
+/// Where a song lives, apart from its extension: a library's root, an artist folder, an album folder and a
 /// file stem. Two wanted songs with equal places are the same song for the library.
 ///
 /// Invariant: the three components are single path components, never empty unless the song's
@@ -78,10 +78,10 @@ pub struct Place {
 }
 
 impl Place {
-    /// The place of `song` under `music_root`: album artist (else the first artist), album (else
+    /// The place of `song` in `library`: album artist (else the first artist), album (else
     /// [`SINGLES`]), title; fields as the source gave them.
     #[must_use]
-    pub fn of(music_root: &Path, song: &WantedSong) -> Self {
+    pub fn of(library: &Library, song: &WantedSong) -> Self {
         let artist = song
             .album_artist
             .as_deref()
@@ -89,7 +89,7 @@ impl Place {
             .or_else(|| song.artists.first().map(String::as_str))
             .unwrap_or_default();
         Self::new(
-            music_root,
+            library,
             artist,
             song.album.as_deref(),
             &song.title,
@@ -101,7 +101,7 @@ impl Place {
     /// after making it safe becomes `fallback_id` made safe.
     #[must_use]
     pub fn new(
-        music_root: &Path,
+        library: &Library,
         artist: &str,
         album: Option<&str>,
         title: &str,
@@ -112,14 +112,15 @@ impl Place {
             _ => SINGLES.to_owned(),
         };
         Self {
-            root: music_root.to_path_buf(),
+            root: library.root().to_path_buf(),
             artist: component_or(artist, fallback_id),
             album,
             stem: component_or(title, fallback_id),
         }
     }
 
-    /// The same place under another root (a device's `Music` folder, a Convert destination).
+    /// The same place under another root: a device's `Music` folder, a Convert destination, or
+    /// another library's folder ([`Place::held_elsewhere`]).
     #[must_use]
     pub fn under(&self, root: &Path) -> Self {
         Self {
@@ -157,6 +158,25 @@ impl Place {
         self.root.join(self.relative(format))
     }
 
+    /// The file that another of `libraries` already has at this place, in whatever format (the
+    /// copy shortcut of F12): the first library, in the order given, whose folder is not this
+    /// place's own and that holds a file here. `None` when no other library has it.
+    ///
+    /// # Errors
+    /// A folder that exists but cannot be read.
+    pub fn held_elsewhere(&self, libraries: &[Library]) -> std::io::Result<Option<PathBuf>> {
+        for library in libraries
+            .iter()
+            .filter(|library| library.root() != self.root)
+        {
+            let there = self.under(library.root());
+            if let Some(format) = there.present()? {
+                return Ok(Some(there.path(format)));
+            }
+        }
+        Ok(None)
+    }
+
     /// The format of the file that exists at this place, trying `.opus`, `.mp3`, `.m4a` in that
     /// order; `None` when there is none. A song is present when this is `Some`.
     ///
@@ -167,16 +187,16 @@ impl Place {
     }
 }
 
-/// The library: every `.opus`, `.mp3` and `.m4a` file exactly at
-/// `<music_root>/<folder>/<folder>/<file>`, skipping any folder whose name starts with a dot,
-/// sorted by path. Files elsewhere under `music_root` are not the app's. A missing `music_root` is
-/// an empty library.
+/// The files of `library`: every `.opus`, `.mp3` and `.m4a` file exactly at
+/// `<library folder>/<folder>/<folder>/<file>`, skipping any folder whose name starts with a dot,
+/// sorted by path. Files elsewhere are not the app's. A missing library folder is an empty
+/// library.
 ///
 /// # Errors
 /// A folder that exists but cannot be read.
-pub fn library_files(music_root: &Path) -> std::io::Result<Vec<PathBuf>> {
+pub fn library_files(library: &Library) -> std::io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    for artist in subfolders(music_root)? {
+    for artist in subfolders(library.root())? {
         for album in subfolders(&artist)? {
             for entry in read_dir_or_empty(&album)? {
                 let path = entry?.path();
@@ -248,6 +268,10 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+    fn lib(root: &Path) -> Library {
+        Library::at("Me", root, true)
+    }
+
     fn song(
         title: &str,
         artists: &[&str],
@@ -274,7 +298,7 @@ mod tests {
     #[test]
     fn layout_is_artist_album_title() {
         let place = Place::of(
-            Path::new("/m"),
+            &lib(Path::new("/m")),
             &song("Why?/Not", &["A", "B"], Some("Al"), Some("AA")),
         );
         assert_eq!(
@@ -291,16 +315,22 @@ mod tests {
 
     #[test]
     fn album_artist_falls_back_to_the_first_artist() {
-        let place = Place::of(Path::new("/m"), &song("T", &["A", "B"], Some("Al"), None));
+        let place = Place::of(
+            &lib(Path::new("/m")),
+            &song("T", &["A", "B"], Some("Al"), None),
+        );
         assert_eq!(place.path(Format::Opus), PathBuf::from("/m/A/Al/T.opus"));
-        let blank = Place::of(Path::new("/m"), &song("T", &["A"], Some("Al"), Some("  ")));
+        let blank = Place::of(
+            &lib(Path::new("/m")),
+            &song("T", &["A"], Some("Al"), Some("  ")),
+        );
         assert_eq!(blank.path(Format::Opus), PathBuf::from("/m/A/Al/T.opus"));
     }
 
     #[test]
     fn a_song_with_no_album_goes_in_singles() {
         for album in [None, Some(""), Some("   ")] {
-            let place = Place::of(Path::new("/m"), &song("T", &["A"], album, None));
+            let place = Place::of(&lib(Path::new("/m")), &song("T", &["A"], album, None));
             assert_eq!(place.path(Format::Mp3), PathBuf::from("/m/A/Singles/T.mp3"));
         }
     }
@@ -341,7 +371,7 @@ mod tests {
             video_id: "vid".into(),
             direct: false,
         };
-        let place = Place::of(Path::new("/m"), &wanted);
+        let place = Place::of(&lib(Path::new("/m")), &wanted);
         assert_eq!(
             place.path(Format::Opus),
             PathBuf::from("/m/vid/vid/vid.opus")
@@ -350,7 +380,7 @@ mod tests {
 
     #[test]
     fn a_song_with_no_artist_at_all_uses_the_id_too() {
-        let place = Place::of(Path::new("/m"), &song("T", &[], None, None));
+        let place = Place::of(&lib(Path::new("/m")), &song("T", &[], None, None));
         assert_eq!(
             place.path(Format::Opus),
             PathBuf::from("/m/sid/Singles/T.opus")
@@ -360,7 +390,7 @@ mod tests {
     #[test]
     fn a_playlist_line_stays_well_under_the_disco_buffer() {
         let place = Place::of(
-            Path::new("/m"),
+            &lib(Path::new("/m")),
             &song(
                 &"t".repeat(400),
                 &["a"],
@@ -374,7 +404,7 @@ mod tests {
     #[test]
     fn present_in_any_format() -> TestResult {
         let root = tempfile::tempdir()?;
-        let place = Place::of(root.path(), &song("Song", &["A"], Some("Al"), None));
+        let place = Place::of(&lib(root.path()), &song("Song", &["A"], Some("Al"), None));
         assert_eq!(place.present()?, None, "missing folder");
         std::fs::create_dir_all(place.dir())?;
         for format in [Format::Mp3, Format::M4a, Format::Opus] {
@@ -391,7 +421,7 @@ mod tests {
 
     #[test]
     fn a_place_can_move_under_another_root() {
-        let place = Place::of(Path::new("/m"), &song("T", &["A"], Some("Al"), None));
+        let place = Place::of(&lib(Path::new("/m")), &song("T", &["A"], Some("Al"), None));
         assert_eq!(
             place.under(Path::new("/d/Music")).path(Format::Mp3),
             PathBuf::from("/d/Music/A/Al/T.mp3")
@@ -420,7 +450,7 @@ mod tests {
         write("A/.hidden/five.opus")?;
         write("Old/Spotify/Liked/six.mp3")?;
         write("Liked Songs.m3u8")?;
-        let found: Vec<PathBuf> = library_files(root.path())?
+        let found: Vec<PathBuf> = library_files(&lib(root.path()))?
             .into_iter()
             .filter_map(|path| path.strip_prefix(root.path()).ok().map(Path::to_path_buf))
             .collect();
@@ -429,9 +459,32 @@ mod tests {
             ["A/Al/one.opus", "A/Al/two.MP3", "B/Singles/three.m4a"].map(PathBuf::from)
         );
         assert_eq!(
-            library_files(&root.path().join("missing"))?,
+            library_files(&lib(&root.path().join("missing")))?,
             Vec::<PathBuf>::new()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn another_library_holding_the_place_is_found_in_any_format() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let mine = Library::at("Me", &root.path().join("Me"), true);
+        let sam = Library::at("Sam", &root.path().join("Sam"), false);
+        let alex = Library::at("Alex", &root.path().join("Alex"), false);
+        let all = [mine.clone(), alex.clone(), sam.clone()];
+        let wanted = song("Song", &["A"], Some("Al"), None);
+        let place = Place::of(&mine, &wanted);
+        assert_eq!(place.held_elsewhere(&all)?, None);
+        // A file in the place's own library does not count.
+        std::fs::create_dir_all(place.dir())?;
+        std::fs::write(place.path(Format::Opus), b"x")?;
+        assert_eq!(place.held_elsewhere(&all)?, None);
+        let theirs = Place::of(&sam, &wanted);
+        std::fs::create_dir_all(theirs.dir())?;
+        std::fs::write(theirs.path(Format::M4a), b"x")?;
+        assert_eq!(place.held_elsewhere(&all)?, Some(theirs.path(Format::M4a)));
+        // And the other way round: Sam's place finds mine.
+        assert_eq!(theirs.held_elsewhere(&all)?, Some(place.path(Format::Opus)));
         Ok(())
     }
 

@@ -1,0 +1,51 @@
+ticked_lists = []
+never = []
+
+[convert]
+format = "mp3"
+quality = "high"
+keep_cover = true
+destination = "~/Music-converted"
+
+[convert.what]
+whole_library = true
+playlists = []
+
+[devices.0481966B-99D3-369A-B6B0-EE83F5D07E45]
+direction = "to_device"
+from_folders = []
+quality = "high"
+keep_cover = true
+
+[devices.0481966B-99D3-369A-B6B0-EE83F5D07E45.what]
+whole_library = false
+playlists = []
+
+[last_run.download_link]
+line = "0 added, 1 needs attention"
+at = 1795233564
+outcome = "needs_attention"
+
+[[last_run.download_link.attention]]
+kind = "held"
+title = "Mikazuki"
+artist = "SAYURI"
+reason = "No result matched the title, the artist and the length closely enough. Choose what to do with it in Review."
+
+[last_run.review]
+line = "1 added, 1 without a genre"
+at = 1795233619
+outcome = "done"
+attention = []
+
+[last_run.sync_device]
+line = "190 copied"
+at = 1795172183
+outcome = "done"
+attention = []
+
+[last_run.convert]
+line = "1 converted"
+at = 1795233865
+outcome = "done"
+attention = []

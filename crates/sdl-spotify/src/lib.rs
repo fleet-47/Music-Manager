@@ -149,6 +149,18 @@ fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
 #[derive(Debug)]
 pub struct Session {
     client: AuthCodePkceSpotify,
+    problem: Problem,
+}
+
+impl Session {
+    /// The first Keychain write that failed since the session was made (or since this was last
+    /// called), in plain words, or `None`. rspotify refreshes the access token by itself during a
+    /// run and the client's token callback then rotates the stored refresh token; a failure there
+    /// cannot stop the run, so it is kept here for the task to report once.
+    #[must_use]
+    pub fn keychain_problem(&self) -> Option<String> {
+        take_problem(&self.problem)
+    }
 }
 
 /// What [`resume`] found.
@@ -230,8 +242,8 @@ async fn resume_with(store: Arc<dyn TokenStore>, client_id: &str) -> Result<Resu
     }
     keep_refresh_token(&client, &stored).await?;
     Ok(Resumed {
-        session: Some(Session { client }),
         keychain_problem: take_problem(&problem),
+        session: Some(Session { client, problem }),
     })
 }
 
@@ -259,8 +271,8 @@ async fn sign_in_with(
 ) -> Result<SignedIn, SpotifyError> {
     let (client, problem) = authorize(store, client_id, events).await?;
     Ok(SignedIn {
-        session: Session { client },
         keychain_problem: take_problem(&problem),
+        session: Session { client, problem },
     })
 }
 
@@ -689,6 +701,30 @@ mod tests {
         rotate(&store, &problem, &token(Some("b")));
         assert_eq!(take_problem(&problem).as_deref(), Some("cannot save"));
         assert_eq!(take_problem(&problem), None);
+    }
+
+    #[test]
+    fn a_keychain_write_that_fails_during_a_run_reaches_the_session_once() -> TestResult {
+        let store = Arc::new(Memory {
+            write_fails: true,
+            ..Memory::default()
+        });
+        let (client, problem) = new_client("client", store);
+        let session = Session { client, problem };
+        assert_eq!(session.keychain_problem(), None);
+        // A later automatic refresh: rspotify calls the token callback, which must not fail.
+        let callback = session
+            .client
+            .get_config()
+            .token_callback_fn
+            .as_ref()
+            .as_ref()
+            .ok_or("no token callback")?;
+        (callback.0)(token(Some("rotated")))?;
+        (callback.0)(token(Some("again")))?;
+        assert_eq!(session.keychain_problem().as_deref(), Some("cannot save"));
+        assert_eq!(session.keychain_problem(), None);
+        Ok(())
     }
 
     #[test]

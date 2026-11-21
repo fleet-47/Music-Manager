@@ -221,7 +221,7 @@ mod tests {
             duration: None,
             cover_url: None,
         };
-        let place = sdl_core::Place::of(root.path(), &song);
+        let place = sdl_core::Place::of(&sdl_core::Library::at("Me", root.path(), true), &song);
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join("audio.m4a"), b"x")?;
         let format = finish(dir)?.format().ok_or("m4a is held as it is")?;

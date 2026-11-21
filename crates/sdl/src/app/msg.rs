@@ -37,8 +37,8 @@ pub enum Msg {
 pub enum Cmd {
     /// `Runner::start` for the function.
     Start(TaskId),
-    /// `Runner::send`.
-    Send(TaskId, Command),
+    /// `Runner::send`. Made with [`Cmd::send`]: a command carries a whole form's answers.
+    Send(TaskId, Box<Command>),
     /// `Runner::stop` (after the owner confirmed).
     Stop(TaskId),
     /// `Runner::discard`: end a function that never started its run, as the app closes.
@@ -49,4 +49,12 @@ pub enum Cmd {
     Open(String),
     /// Leave the loop. Always the last command.
     Quit,
+}
+
+impl Cmd {
+    /// `Runner::send` of `command` to the function.
+    #[must_use]
+    pub fn send(task: TaskId, command: Command) -> Self {
+        Self::Send(task, Box::new(command))
+    }
 }

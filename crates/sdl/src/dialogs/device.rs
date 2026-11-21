@@ -14,6 +14,7 @@ use super::choices::{
     what_value,
 };
 use super::conversation::Conversation;
+use super::libraries::{self, Follow, Known};
 use sdl_core::TaskId;
 use sdl_tasks::Command;
 
@@ -53,14 +54,17 @@ pub(super) struct State {
     device: Option<String>,
     /// The device whose folders were asked for (or arrived) since the devices last changed.
     folders_for: Option<String>,
-    /// Whether the devices and the playlists have arrived once; the form waits for both.
+    /// Whether the devices have arrived once; the form waits for them, the libraries and the
+    /// playlists of the chosen library.
     devices_in: bool,
-    playlists_in: bool,
+    known: Known,
+    follow: Follow,
 }
 
 /// The form: the last device's choices filled in, waiting for the devices.
 pub(super) fn open(settings: &Settings) -> (Form, State, Conversation) {
     let mut form = Form::new("Sync device")
+        .field(libraries::picker())
         .field(
             Field::radio(DEVICE, "Device")
                 .needs("Choose a device")
@@ -104,7 +108,7 @@ pub(super) fn open(settings: &Settings) -> (Form, State, Conversation) {
         .cloned()
         .unwrap_or_default();
     form.set(DEVICE, Value::Choice(last.clone()));
-    fill(&mut form, &choice);
+    fill(&mut form, &choice, &Known::default());
     let state = State {
         device: last,
         ..State::default()
@@ -113,8 +117,11 @@ pub(super) fn open(settings: &Settings) -> (Form, State, Conversation) {
     (form, state, conv)
 }
 
-/// Put a device's remembered choices in the form and show what they need.
-fn fill(form: &mut Form, choice: &DeviceChoice) {
+/// Put a device's remembered choices in the form and show what they need. A remembered library
+/// that is gone from the disk gives way to the owner's own.
+fn fill(form: &mut Form, choice: &DeviceChoice, known: &Known) {
+    libraries::pick(form, &choice.library);
+    known.settle(form);
     let to = choice.direction == Direction::ToDevice;
     form.set(
         DIRECTION,
@@ -213,24 +220,22 @@ pub(super) fn on_event(
             if chosen != state.device {
                 if let Some(id) = &chosen {
                     let choice = settings.state.devices.get(id).cloned().unwrap_or_default();
-                    fill(form, &choice);
+                    fill(form, &choice, &state.known);
                 }
                 state.device = chosen;
             }
             state.folders_for = None;
             state.devices_in = true;
-            if state.playlists_in {
-                conv.wait_for(None);
-            }
             conv.changed();
             form.set_blocked(None);
         }
+        EventKind::Libraries(found) => {
+            libraries::offer_all(form, &mut state.known, found);
+            conv.changed();
+        }
         EventKind::Playlists(names) => {
             form.set_options(WHAT, what_options(names));
-            state.playlists_in = true;
-            if state.devices_in {
-                conv.wait_for(None);
-            }
+            state.follow.arrived();
             conv.changed();
         }
         EventKind::Folders(names) => {
@@ -273,7 +278,17 @@ pub(super) fn on_event(
         EventKind::Headline(text) => conv.headline(text),
         _ => {}
     }
-    settle(form, state, conv)
+    let commands = settle(form, state, conv, settings);
+    if matches!(
+        kind,
+        EventKind::Devices(_) | EventKind::Libraries(_) | EventKind::Playlists(_)
+    ) && state.devices_in
+        && state.known.is_in()
+        && state.follow.is_settled()
+    {
+        conv.wait_for(None);
+    }
+    commands
 }
 
 /// A field changed: the choices for another device, the visible fields and the quality labels
@@ -291,7 +306,7 @@ pub(super) fn changed(
             if chosen != state.device {
                 if let Some(id) = &chosen {
                     let choice = settings.state.devices.get(id).cloned().unwrap_or_default();
-                    fill(form, &choice);
+                    fill(form, &choice, &state.known);
                 }
                 state.device = chosen;
             }
@@ -302,28 +317,65 @@ pub(super) fn changed(
         }
         _ => {}
     }
-    settle(form, state, conv)
+    settle(form, state, conv, settings)
 }
 
-/// Show what the choices need, and ask the device for its folders when From device needs them.
-fn settle(form: &mut Form, state: &mut State, conv: &mut Conversation) -> Vec<Cmd> {
+/// Show what the choices need, say when the library merges with another on the device, ask for
+/// the playlists of a newly chosen library, and ask the device for its folders when From device
+/// needs them.
+fn settle(
+    form: &mut Form,
+    state: &mut State,
+    conv: &mut Conversation,
+    settings: &Settings,
+) -> Vec<Cmd> {
     show_what_is_needed(form);
+    form.set_notes(notes(form, state, settings));
+    let mut commands = Vec::new();
+    if let Some(offer) = state.follow.offer(form, &state.known) {
+        conv.wait_for(Some("Reading the playlists"));
+        conv.changed();
+        commands.push(Cmd::send(TaskId::SyncDevice, Command::Offer(offer)));
+    }
     if !from_device(form) {
-        return Vec::new();
+        return commands;
     }
     let Some(device) = chosen_device(form, state).cloned() else {
-        return Vec::new();
+        return commands;
     };
     if state.folders_for.as_deref() == Some(device.id()) {
-        return Vec::new();
+        return commands;
     }
     state.folders_for = Some(device.id().to_owned());
     conv.wait_for(Some("Reading the device's folders"));
     conv.changed();
-    vec![Cmd::Send(
+    commands.push(Cmd::send(
         TaskId::SyncDevice,
         Command::Offer(Offer::Folders(device)),
-    )]
+    ));
+    commands
+}
+
+/// The playlist note, and when To device would put another library's music beside the one chosen
+/// (the device was last synced from a different library), that the two libraries merge there.
+fn notes(form: &Form, state: &State, settings: &Settings) -> Vec<String> {
+    let mut notes = vec![NOTE.to_owned()];
+    let merge = (!from_device(form))
+        .then(|| chosen_device(form, state))
+        .flatten()
+        .and_then(|device| settings.state.devices.get(device.id()))
+        .and_then(|saved| {
+            let chosen = libraries::picked(form);
+            let last = saved.merges_with(&chosen)?;
+            Some((state.known.name_of(last)?, state.known.name_of(&chosen)?))
+        });
+    if let Some((last, chosen)) = merge {
+        notes.push(format!(
+            "This device was last synced from library {last}. Syncing library {chosen} will \
+merge the two libraries on this device."
+        ));
+    }
+    notes
 }
 
 /// The device and its choices; `None` while no device is chosen.
@@ -341,6 +393,8 @@ pub(super) fn answers(form: &Form, state: &State) -> Option<Answers> {
         format,
         quality: quality_of(form, QUALITY),
         keep_cover: flag_of(form, COVER),
+        library: libraries::picked(form),
+        ..DeviceChoice::default()
     };
     Some(Answers::SyncDevice { device, choice })
 }
@@ -350,7 +404,7 @@ pub(super) fn look_again(state: &mut State, conv: &mut Conversation) -> Vec<Cmd>
     state.folders_for = None;
     conv.wait_for(Some("Looking for devices"));
     conv.changed();
-    vec![Cmd::Send(
+    vec![Cmd::send(
         TaskId::SyncDevice,
         Command::Offer(Offer::Devices),
     )]

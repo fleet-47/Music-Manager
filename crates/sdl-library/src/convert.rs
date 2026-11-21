@@ -8,8 +8,8 @@ use futures::{StreamExt, stream};
 use sdl_core::format::existing_format;
 use sdl_core::playlist::PLAYLIST_EXTENSION;
 use sdl_core::{
-    Attention, ConvertChoice, Counts, EventKind, EventSender, Format, PlanSummary, Playlist,
-    Preset, StopFlag, library_files,
+    Attention, ConvertChoice, Counts, EventKind, EventSender, Format, Library, PlanSummary,
+    Playlist, Preset, StopFlag, library_files,
 };
 
 use crate::converter::{convert_file, output_size, parallelism};
@@ -20,7 +20,7 @@ use crate::{LibraryError, io_err};
 #[derive(Debug, Clone)]
 pub struct ConvertPlan {
     summary: PlanSummary,
-    music_root: PathBuf,
+    library: Library,
     destination: PathBuf,
     preset: Preset,
     /// The ticked playlists' file stems.
@@ -39,7 +39,7 @@ impl ConvertPlan {
     }
 }
 
-/// Plan a Convert: the files of the ticked selection (the whole library via
+/// Plan a Convert from `library` (F12): the files of the ticked selection (the whole library via
 /// [`sdl_core::library_files`], and each ticked playlist's songs that exist), each mapped to
 /// `<destination>/<same relative path>` with the preset's extension. Files whose stem is already
 /// there in any format count as "already there". Sizes are estimated from each file's duration
@@ -49,11 +49,11 @@ impl ConvertPlan {
 ///
 /// # Errors
 /// [`LibraryError::Io`] when a library folder or a file cannot be read.
-pub async fn plan(music_root: &Path, choice: &ConvertChoice) -> Result<ConvertPlan, LibraryError> {
-    std::future::ready(plan_now(music_root, choice)).await
+pub async fn plan(library: &Library, choice: &ConvertChoice) -> Result<ConvertPlan, LibraryError> {
+    std::future::ready(plan_now(library, choice)).await
 }
 
-fn plan_now(music_root: &Path, choice: &ConvertChoice) -> Result<ConvertPlan, LibraryError> {
+fn plan_now(library: &Library, choice: &ConvertChoice) -> Result<ConvertPlan, LibraryError> {
     let preset = choice.preset();
     let mut plan = ConvertPlan {
         summary: PlanSummary {
@@ -64,7 +64,7 @@ fn plan_now(music_root: &Path, choice: &ConvertChoice) -> Result<ConvertPlan, Li
             free_bytes: None,
             refusal: None,
         },
-        music_root: music_root.to_path_buf(),
+        library: library.clone(),
         destination: choice.destination.clone(),
         preset,
         playlists: choice.what.playlists.clone(),
@@ -79,6 +79,7 @@ fn plan_now(music_root: &Path, choice: &ConvertChoice) -> Result<ConvertPlan, Li
         return Ok(plan);
     };
     plan.destination.clone_from(&destination);
+    let music_root = library.music_root();
     if resolve(&destination).starts_with(resolve(music_root)) {
         plan.summary.refusal = Some(format!(
             "The destination is inside your music library ({}). Convert never writes into the \
@@ -87,7 +88,7 @@ fn plan_now(music_root: &Path, choice: &ConvertChoice) -> Result<ConvertPlan, Li
         ));
         return Ok(plan);
     }
-    for (source, relative) in selected_songs(music_root, choice)? {
+    for (source, relative) in selected_songs(library, choice)? {
         if existing_in(&destination, &relative)?.is_some() {
             plan.summary.already = plan.summary.already.saturating_add(1);
             continue;
@@ -115,7 +116,7 @@ fn plan_now(music_root: &Path, choice: &ConvertChoice) -> Result<ConvertPlan, Li
 /// playlist line counts when it is `<artist>/<album>/<file>` and a file with its stem exists in
 /// the library in some format (the line's extension may be out of date).
 fn selected_songs(
-    music_root: &Path,
+    library: &Library,
     choice: &ConvertChoice,
 ) -> Result<Vec<(PathBuf, PathBuf)>, LibraryError> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
@@ -126,14 +127,14 @@ fn selected_songs(
         }
     };
     if choice.what.whole_library {
-        for file in library_files(music_root).map_err(io_err(music_root))? {
-            if let Ok(relative) = file.strip_prefix(music_root) {
+        for file in library_files(library).map_err(io_err(library.root()))? {
+            if let Ok(relative) = file.strip_prefix(library.root()) {
                 add(file.clone(), relative.to_path_buf());
             }
         }
     }
     for stem in &choice.what.playlists {
-        let path = music_root.join(format!("{stem}.{PLAYLIST_EXTENSION}"));
+        let path = library.root().join(format!("{stem}.{PLAYLIST_EXTENSION}"));
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -147,9 +148,12 @@ fn selected_songs(
             if !is_song_path {
                 continue;
             }
-            if let Some(found) = existing_in(music_root, &entry)? {
+            if let Some(found) = existing_in(library.root(), &entry)? {
                 add(
-                    music_root.join(&entry).with_extension(found.extension()),
+                    library
+                        .root()
+                        .join(&entry)
+                        .with_extension(found.extension()),
                     entry,
                 );
             }
@@ -233,7 +237,7 @@ pub async fn run(
                 counts.failed = counts.failed.saturating_add(1);
                 events.send(EventKind::Attention(attention(
                     source,
-                    &plan.music_root,
+                    plan.library.root(),
                     &error,
                 )));
             }
@@ -243,7 +247,7 @@ pub async fn run(
     drop(finished);
     if !stop.is_requested() {
         for stem in &plan.playlists {
-            write_for_destination(&plan.music_root, &plan.destination, stem)?;
+            write_for_destination(&plan.library, &plan.destination, stem)?;
         }
     }
     Ok(counts)
@@ -278,13 +282,13 @@ fn ends_the_run(error: &LibraryError) -> bool {
 }
 
 /// The attention item of a failed file: its title and artist from its place in the library.
-fn attention(source: &Path, music_root: &Path, error: &LibraryError) -> Attention {
+fn attention(source: &Path, library_root: &Path, error: &LibraryError) -> Attention {
     let title = source
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let artist = source
-        .strip_prefix(music_root)
+        .strip_prefix(library_root)
         .ok()
         .and_then(|relative| relative.components().next())
         .map(|part| part.as_os_str().to_string_lossy().into_owned())
@@ -298,7 +302,7 @@ mod tests {
 
     use super::*;
     use crate::playlists;
-    use crate::testkit::{TestResult, make_song, probe};
+    use crate::testkit::{TestResult, lib, make_song, probe};
 
     fn song(id: &str, title: &str) -> WantedSong {
         WantedSong {
@@ -320,6 +324,7 @@ mod tests {
 
     fn choice(dest: &Path, what: Selection, format: Format) -> ConvertChoice {
         ConvertChoice {
+            library: sdl_core::LibraryId::Own,
             what,
             format,
             quality: Quality::Medium,
@@ -335,12 +340,13 @@ mod tests {
         }
     }
 
-    /// A library of three songs: `a` and `b` as Opus, `c` as an old MP3; a playlist `Mix` of a, c.
+    /// A library folder `root` of three songs: `a` and `b` as Opus, `c` as an old MP3; a playlist
+    /// `Mix` of a, c. Tests make `root` a folder `Me` under their music root.
     fn library(root: &Path) -> TestResult {
         make_song(&root.join("A/Al/a.opus"), 1, "a")?;
         make_song(&root.join("A/Al/b.opus"), 1, "b")?;
         make_song(&root.join("A/Al/c.mp3"), 1, "c")?;
-        playlists::write(root, "Mix", "i", &[song("1", "a"), song("3", "c")])?;
+        playlists::write(&lib(root), "Mix", "i", &[song("1", "a"), song("3", "c")])?;
         Ok(())
     }
 
@@ -352,13 +358,14 @@ mod tests {
     #[tokio::test]
     async fn whole_library_is_planned_and_run_with_the_layout_kept() -> TestResult {
         let root = tempfile::tempdir()?;
+        let me = root.path().join("Me");
         let out = tempfile::tempdir()?;
-        library(root.path())?;
+        library(&me)?;
         // `b` is already there, in another format.
         std::fs::create_dir_all(out.path().join("A/Al"))?;
         std::fs::write(out.path().join("A/Al/b.m4a"), b"x")?;
         let picked = choice(out.path(), whole(), Format::Mp3);
-        let planned = plan(root.path(), &picked).await?;
+        let planned = plan(&lib(&me), &picked).await?;
         let summary = planned.summary();
         assert_eq!((summary.files, summary.already), (2, 1));
         assert!(summary.estimated && summary.can_start() && summary.free_bytes.is_none());
@@ -373,7 +380,7 @@ mod tests {
         // `c` was an MP3 already: copied as it is, still tagged.
         assert_eq!(
             std::fs::read(out.path().join("A/Al/c.mp3"))?,
-            std::fs::read(root.path().join("A/Al/c.mp3"))?
+            std::fs::read(me.join("A/Al/c.mp3"))?
         );
         assert!(!out.path().join("A/Al/b.mp3").exists());
         assert_eq!(
@@ -383,7 +390,7 @@ mod tests {
             Some("a")
         );
         // The library is untouched.
-        assert!(root.path().join("A/Al/a.opus").exists());
+        assert!(me.join("A/Al/a.opus").exists());
         let mut last = None;
         while let Ok(event) = rx.try_recv() {
             if let EventKind::Counts(counts) = event.kind {
@@ -397,8 +404,9 @@ mod tests {
     #[tokio::test]
     async fn a_playlist_resolves_to_its_songs_and_is_written_at_the_destination() -> TestResult {
         let root = tempfile::tempdir()?;
+        let me = root.path().join("Me");
         let out = tempfile::tempdir()?;
-        library(root.path())?;
+        library(&me)?;
         // The playlist line says `.opus` but only an MP3 exists for `c`: the stem is what counts.
         let picked = choice(
             out.path(),
@@ -408,7 +416,7 @@ mod tests {
             },
             Format::M4a,
         );
-        let planned = plan(root.path(), &picked).await?;
+        let planned = plan(&lib(&me), &picked).await?;
         assert_eq!(planned.summary().files, 2);
         let (events, _rx) = sender();
         run(&planned, &events, &StopFlag::new()).await?;
@@ -425,24 +433,21 @@ mod tests {
     #[tokio::test]
     async fn a_title_with_a_dot_is_found_through_its_playlist_and_kept_whole() -> TestResult {
         let root = tempfile::tempdir()?;
+        let me = root.path().join("Me");
         let out = tempfile::tempdir()?;
-        make_song(
-            &root.path().join("A/Al/Mr. Brightside.opus"),
-            1,
-            "Mr. Brightside",
-        )?;
-        playlists::write(root.path(), "Dot", "i", &[song("1", "Mr. Brightside")])?;
+        make_song(&me.join("A/Al/Mr. Brightside.opus"), 1, "Mr. Brightside")?;
+        playlists::write(&lib(&me), "Dot", "i", &[song("1", "Mr. Brightside")])?;
         let what = Selection {
             whole_library: false,
             playlists: vec!["Dot".into()],
         };
-        let planned = plan(root.path(), &choice(out.path(), what, Format::Mp3)).await?;
+        let planned = plan(&lib(&me), &choice(out.path(), what, Format::Mp3)).await?;
         assert_eq!(planned.summary().files, 1);
         let (events, _rx) = sender();
         run(&planned, &events, &StopFlag::new()).await?;
         assert!(out.path().join("A/Al/Mr. Brightside.mp3").exists());
         let again = plan(
-            root.path(),
+            &lib(&me),
             &choice(
                 out.path(),
                 Selection {
@@ -460,11 +465,12 @@ mod tests {
     #[tokio::test]
     async fn a_song_in_the_library_and_a_playlist_is_converted_once() -> TestResult {
         let root = tempfile::tempdir()?;
+        let me = root.path().join("Me");
         let out = tempfile::tempdir()?;
-        library(root.path())?;
+        library(&me)?;
         let mut what = whole();
         what.playlists.push("Mix".into());
-        let planned = plan(root.path(), &choice(out.path(), what, Format::Mp3)).await?;
+        let planned = plan(&lib(&me), &choice(out.path(), what, Format::Mp3)).await?;
         assert_eq!(planned.summary().files, 3);
         Ok(())
     }
@@ -472,7 +478,8 @@ mod tests {
     #[tokio::test]
     async fn a_destination_inside_the_library_is_refused_by_where_it_really_is() -> TestResult {
         let root = tempfile::tempdir()?;
-        library(root.path())?;
+        let me = root.path().join("Me");
+        library(&me)?;
         let other = tempfile::tempdir()?;
         let inside = root.path().join("sub/deeper");
         let link = other.path().join("shortcut");
@@ -481,9 +488,9 @@ mod tests {
             inside,
             root.path().to_path_buf(),
             link.join("via-link"),
-            root.path().join("A/../A/new"),
+            me.join("A/../A/new"),
         ] {
-            let planned = plan(root.path(), &choice(&typed, whole(), Format::Mp3)).await?;
+            let planned = plan(&lib(&me), &choice(&typed, whole(), Format::Mp3)).await?;
             let summary = planned.summary();
             assert!(
                 summary.refusal.is_some() && !summary.can_start(),
@@ -493,10 +500,10 @@ mod tests {
             let (events, _rx) = sender();
             assert!(run(&planned, &events, &StopFlag::new()).await.is_err());
         }
-        assert!(!root.path().join("sub").exists() && !root.path().join("A/new").exists());
+        assert!(!root.path().join("sub").exists() && !me.join("A/new").exists());
         // A folder beside the library is fine, made or not.
         let beside = other.path().join("not/made/yet");
-        let planned = plan(root.path(), &choice(&beside, whole(), Format::Mp3)).await?;
+        let planned = plan(&lib(&me), &choice(&beside, whole(), Format::Mp3)).await?;
         assert!(planned.summary().refusal.is_none());
         Ok(())
     }
@@ -504,9 +511,10 @@ mod tests {
     #[tokio::test]
     async fn stop_lets_the_run_end_without_starting_more_files() -> TestResult {
         let root = tempfile::tempdir()?;
+        let me = root.path().join("Me");
         let out = tempfile::tempdir()?;
-        library(root.path())?;
-        let planned = plan(root.path(), &choice(out.path(), whole(), Format::Mp3)).await?;
+        library(&me)?;
+        let planned = plan(&lib(&me), &choice(out.path(), whole(), Format::Mp3)).await?;
         let stop = StopFlag::new();
         stop.request();
         let (events, _rx) = sender();
@@ -519,10 +527,11 @@ mod tests {
     #[tokio::test]
     async fn one_broken_file_is_listed_and_the_rest_go_on() -> TestResult {
         let root = tempfile::tempdir()?;
+        let me = root.path().join("Me");
         let out = tempfile::tempdir()?;
-        library(root.path())?;
-        std::fs::write(root.path().join("A/Al/b.opus"), b"not audio")?;
-        let planned = plan(root.path(), &choice(out.path(), whole(), Format::M4a)).await?;
+        library(&me)?;
+        std::fs::write(me.join("A/Al/b.opus"), b"not audio")?;
+        let planned = plan(&lib(&me), &choice(out.path(), whole(), Format::M4a)).await?;
         // The broken file counts at its own size, so the plan still starts.
         assert_eq!(planned.summary().files, 3);
         let (events, mut rx) = sender();

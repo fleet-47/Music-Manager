@@ -1,5 +1,5 @@
 //! Shared types for `sdl`: the wanted song, match outcome, library layout and playlist model,
-//! review list, presets, task events, config and state files.
+//! libraries, review list, presets, task events, config and state files.
 //! Library crates depend on this crate only, never on each other (`sdl-devices` also on
 //! `sdl-library`).
 
@@ -7,6 +7,7 @@ pub mod config;
 pub mod device;
 pub mod event;
 pub mod format;
+pub mod library;
 pub mod matching;
 pub mod place;
 pub mod playlist;
@@ -26,12 +27,13 @@ pub use event::{
     channel,
 };
 pub use format::Format;
+pub use library::{Library, LibraryId, NewLibraryError};
 pub use matching::{Candidate, MatchOutcome};
 pub use place::{Place, library_files};
 pub use playlist::Playlist;
 pub use preset::{Preset, Quality};
 pub use review::{HeldSong, ReviewList};
 pub use song::{SongSource, WantedSong};
-pub use state::{LastRun, RunOutcome, State};
+pub use state::{LastRun, Never, RunOutcome, State};
 pub use stop::StopFlag;
 pub use storage::StoreError;

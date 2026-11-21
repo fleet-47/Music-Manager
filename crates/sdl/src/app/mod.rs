@@ -85,6 +85,18 @@ pub struct Hits {
     pub popup: HitMap<PopupTarget>,
     /// The footer's hints, each with the key a click on it presses.
     pub footer: HitMap<crossterm::event::KeyCode>,
+    /// Where each open popup's frame was drawn, bottom first, so a popup keeps its place while it
+    /// is open even when its content gets shorter.
+    pub anchors: Vec<Anchor>,
+}
+
+/// Where a popup's frame has its top left corner, and which popup that is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Anchor {
+    /// The popup's title: another popup in the same place in the stack starts centred.
+    pub title: String,
+    /// The frame's top left corner.
+    pub at: ratatui::layout::Position,
 }
 
 /// The whole app state.

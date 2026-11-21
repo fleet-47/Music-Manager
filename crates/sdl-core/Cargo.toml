@@ -13,3 +13,4 @@ directories.workspace = true
 sanitize-filename.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tempfile.workspace = true
+url.workspace = true

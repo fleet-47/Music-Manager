@@ -4,7 +4,7 @@
 //! The interface layer drives tasks only through [`Runner`]: it starts a function with
 //! [`Runner::start`], answers what the function asks with [`Runner::send`] and a [`Command`]
 //! carrying [`Answers`] (or an [`Offer`]), and reads what comes back as [`sdl_core::Event`]s on the
-//! channel it gave the runner (offers: `Lists`, `Devices`, `Playlists`, `Folders`; the plan:
+//! channel it gave the runner (offers: `Lists`, `Libraries`, `Devices`, `Playlists`, `Folders`; the plan:
 //! `NewOfTotal`, `Plan`; the run: `Started`, then `Headline`, `Counts`, `Attention`, `HeldCount`;
 //! the end: `Finished`, `Stopped`, `Error`, `RateLimited`). The full conversation per function is
 //! in the [`Runner`] documentation. The UI folds every event into an [`sdl_core::TaskState`] per
@@ -21,7 +21,7 @@ mod tasks;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub use conversation::{Answers, Offer, Resolution, ReviewChoice};
+pub use conversation::{Answers, Offer, Recipient, Resolution, ReviewChoice};
 pub use progress::estimate_remaining;
 pub(crate) use runner::{Flow, TaskContext};
 pub use runner::{Runner, StartError};
@@ -40,7 +40,7 @@ pub enum Command {
     /// The form's answers; the task replies with its plan (or, for Download link and Review,
     /// starts at once).
     Answer(Answers),
-    /// Sync device: something the form needs before it can be answered.
+    /// Something the form needs before it can be answered.
     Offer(Offer),
     /// Start, after an answer whose plan can start; or, for Sync Spotify at
     /// `SignIn(NeedsBrowser)`, "Continue" to the browser sign-in.
@@ -70,4 +70,7 @@ pub(crate) enum TaskError {
     /// A settings file could not be written.
     #[error(transparent)]
     State(#[from] sdl_core::StoreError),
+    /// A new library was refused or its folder could not be made.
+    #[error(transparent)]
+    NewLibrary(#[from] sdl_core::NewLibraryError),
 }

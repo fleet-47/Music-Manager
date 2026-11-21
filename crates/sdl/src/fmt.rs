@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use sdl_core::LibraryId;
+
 /// A size in decimal units with one decimal: `0 B`, `950 B`, `4.2 GB`.
 #[must_use]
 pub fn bytes(n: u64) -> String {
@@ -23,6 +25,16 @@ pub fn bytes(n: u64) -> String {
         .and_then(|rest| rest.checked_div(scale))
         .unwrap_or(0);
     format!("{whole}.{tenth} {name}")
+}
+
+/// `library Sam` for another person's library; `None` for the owner's own, which is never named
+/// where it would only be noise.
+#[must_use]
+pub fn library_words(library: &LibraryId) -> Option<String> {
+    match library {
+        LibraryId::Own => None,
+        LibraryId::Other(name) => Some(format!("library {name}")),
+    }
 }
 
 /// How long ago `at` was, relative to `now` (both seconds since the Unix epoch).

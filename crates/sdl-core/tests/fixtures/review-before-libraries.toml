@@ -1,0 +1,50 @@
+[[held]]
+from = []
+reason = "No result matched the title, the artist and the length closely enough."
+
+[held.song]
+title = "#さユり (Sayuri) - #ミカヅキ (Mikazuki) Japanese lyrics (+ rōmaji)"
+artists = ["Ady & Hyrea"]
+duration = 264
+cover_url = "https://i.ytimg.com/vi/f3_jWbM20AY/maxresdefault.jpg"
+
+[held.song.source]
+kind = "link"
+item_url = "https://www.youtube.com/watch?v=f3_jWbM20AY"
+video_id = "f3_jWbM20AY"
+direct = false
+
+[[held.candidates]]
+video_id = "1BfIfMk3u0g"
+title = "ミカヅキ - Mikazuki"
+artists = ["SAYURI"]
+album = "mikazuki no Koukai"
+duration = 262
+
+[[held.candidates]]
+video_id = "yQ2aA57BkAM"
+title = "ミカヅキ-「め」弾き語りver.- - Mikazuki (me Hikigatari Version)"
+artists = ["SAYURI"]
+album = "Mikazuki me (hikigatari Version)"
+duration = 262
+
+[[held.candidates]]
+video_id = "ICei61N5948"
+title = "ミカヅキ-street弾き語りver. - Mikazuki - Street Hikigatari Version"
+artists = ["SAYURI"]
+album = "Mikazuki (Special Edition)"
+duration = 275
+
+[[held.candidates]]
+video_id = "fwyT_iGrl4A"
+title = "ミカヅキ-Hiro(MY FIRST STORY)Vo ver.- - Mikazuki (Hiro (My First Story) Vocal Version)"
+artists = ["Hiro"]
+album = "Dawn"
+duration = 261
+
+[[held.candidates]]
+video_id = "eb24daX6eGQ"
+title = "三日月 - Mikazuki"
+artists = ["YUKI"]
+album = "BETWEEN THE TEN"
+duration = 237

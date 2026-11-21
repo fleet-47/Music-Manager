@@ -5,7 +5,10 @@
 
 use std::collections::VecDeque;
 
-use sdl_core::{ConvertChoice, Device, DeviceChoice, EventKind, EventSender, ListChoice};
+use sdl_core::{
+    Config, ConvertChoice, Device, DeviceChoice, EventKind, EventSender, Library, LibraryId,
+    ListChoice,
+};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::runner::Flow;
@@ -29,10 +32,54 @@ pub enum Resolution {
 /// One held song and what was chosen for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewChoice {
+    /// The library the song is held for (`HeldSong::library`); with the key it names one entry.
+    pub library: LibraryId,
     /// The held song's key (`WantedSong::key`).
     pub key: String,
     /// The choice.
     pub resolution: Resolution,
+}
+
+/// Whose library Sync Spotify and Download link add to: the form's **For me** toggle and, when it
+/// is off, its **Library** dropdown (F12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recipient {
+    /// For me: the owner's own library.
+    Me,
+    /// An existing other library, by name.
+    Existing(String),
+    /// **New library…**: a library to make, by the name as typed (made FAT-safe when it is made).
+    /// The form has already checked it with `Library::check_new_name`.
+    New(String),
+}
+
+impl Recipient {
+    /// The library this recipient names, for planning: nothing is created, so a new library is
+    /// only checked ([`Library::check_new_name`]) and named.
+    ///
+    /// # Errors
+    /// A new library whose name is empty or taken, or `music_root` cannot be read.
+    pub(crate) fn library(&self, config: &Config) -> Result<Library, TaskError> {
+        match self {
+            Self::Me => Ok(Library::mine(config)),
+            Self::Existing(name) => Ok(Library::resolve(config, &LibraryId::Other(name.clone()))),
+            Self::New(typed) => {
+                let name = Library::check_new_name(&Library::list(config)?, typed)?;
+                Ok(Library::at(&name, &config.music_root.join(&name), false))
+            }
+        }
+    }
+
+    /// The library to add songs to once the run has started: a new library's folder is made now.
+    ///
+    /// # Errors
+    /// A new library that is refused (the name is empty or taken) or whose folder cannot be made.
+    pub(crate) fn make(&self, config: &Config) -> Result<Library, TaskError> {
+        match self {
+            Self::New(typed) => Ok(Library::create(config, typed)?),
+            Self::Me | Self::Existing(_) => self.library(config),
+        }
+    }
 }
 
 /// The form's answers, one shape per function.
@@ -42,11 +89,15 @@ pub enum Answers {
     SyncSpotify {
         /// The ticked lists.
         lists: Vec<ListChoice>,
+        /// Whose library the songs go into.
+        recipient: Recipient,
     },
     /// Download link: the link. The run starts at once; no `Go` follows.
     DownloadLink {
         /// The pasted link.
         url: String,
+        /// Whose library the songs go into.
+        recipient: Recipient,
     },
     /// Review: a choice per held song the owner decided on ("Download N chosen"). The run starts
     /// at once; no `Go` follows.
@@ -54,24 +105,33 @@ pub enum Answers {
         /// The decided songs.
         choices: Vec<ReviewChoice>,
     },
-    /// Sync device: the device and what was chosen for it (remembered per device, and as the last
-    /// device). Answered with `Plan`.
+    /// Sync device: the device and what was chosen for it, including the library
+    /// (`choice.library`); remembered per device, and as the last device. Answered with `Plan`.
     SyncDevice {
         /// The chosen device.
         device: Device,
-        /// Direction, selection, folders and format.
+        /// Library, direction, selection, folders and format.
         choice: DeviceChoice,
     },
-    /// Convert: what, format, quality, cover and destination (remembered). Answered with `Plan`.
+    /// Convert: library, what, format, quality, cover and destination (remembered). Answered with
+    /// `Plan`.
     Convert(ConvertChoice),
 }
 
-/// A request for something the form offers before it can be answered (Sync device only).
+/// A request for something the form offers before it can be answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Offer {
-    /// Look for devices again (the `r` key). Answered with `Devices`.
+    /// Look at the libraries on disk again (Sync Spotify, Download link, Sync device, Convert).
+    /// Answered with `Libraries`.
+    Libraries,
+    /// The playlists of this library, when the Library field changes (Sync device and Convert).
+    /// Answered with `Playlists`. Never makes the plan out of date by itself: the form answers
+    /// again with the new choice.
+    Playlists(LibraryId),
+    /// Sync device: look for devices again (the `r` key). Answered with `Devices`.
     Devices,
-    /// The top-level folders of `device` (folders directly in its root), for From device.
+    /// Sync device: the top-level folders of `device` (folders directly in its root), for From
+    /// device.
     /// Answered with `Folders`.
     Folders(Device),
 }
@@ -151,8 +211,7 @@ impl Inbox {
     }
 
     /// Whether a `Cancel` is already queued behind the command just read (the owner stopped the
-    /// task as it was starting). Nothing reads commands once the run has started, so a `Cancel`
-    /// sent with `Go` would otherwise be lost and a run the owner stopped would carry on.
+    /// task as it was starting).
     fn cancel_queued(&mut self) -> bool {
         while let Ok(command) = self.commands.try_recv() {
             self.waiting.push_back(command);
@@ -240,25 +299,35 @@ pub(crate) async fn drive(
                 match answered? {
                     Answered::Ignored => {}
                     Answered::Waiting { can_start } => ready = can_start,
-                    Answered::Run if inbox.cancel_queued() => return Ok(Flow::Cancelled),
-                    Answered::Run => return run(step, events).await,
+                    Answered::Run => return run(step, events, &mut inbox).await,
                 }
             }
             Some(Command::Go) => {
                 if ready {
-                    if inbox.cancel_queued() {
-                        return Ok(Flow::Cancelled);
-                    }
-                    return run(step, events).await;
+                    return run(step, events, &mut inbox).await;
                 }
             }
         }
     }
 }
 
-/// Announce the run, then carry it out.
-async fn run(step: &mut impl Step, events: &EventSender) -> Result<Flow, TaskError> {
+/// Announce the run, then carry it out, unless the owner has stopped it. Nothing reads commands
+/// once the run has started, so a `Cancel` is looked for twice: before the announcement (so a run
+/// stopped in time never shows as started), and after it. [`crate::Runner::stop`] sends `Cancel`
+/// and then reads whether the run has started; a stop that read "not started" just before the
+/// announcement sent its `Cancel` before this second look, so it is never lost.
+async fn run(
+    step: &mut impl Step,
+    events: &EventSender,
+    inbox: &mut Inbox,
+) -> Result<Flow, TaskError> {
+    if inbox.cancel_queued() {
+        return Ok(Flow::Cancelled);
+    }
     events.send(EventKind::Started);
+    if inbox.cancel_queued() {
+        return Ok(Flow::Cancelled);
+    }
     step.go().await
 }
 
@@ -331,6 +400,31 @@ mod tests {
                 outcome: RunOutcome::Done,
             }))
         }
+    }
+
+    #[test]
+    fn a_new_library_is_made_only_when_the_run_starts() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let config = Config {
+            client_id: "id".into(),
+            music_root: dir.path().to_path_buf(),
+            my_library: "Me".into(),
+            download_jobs: std::num::NonZeroUsize::MIN,
+            animations: true,
+        };
+        let new = Recipient::New("S:am".into());
+        let planned = new.library(&config)?;
+        assert_eq!((planned.name(), planned.is_own()), ("Sam", false));
+        assert!(!planned.root().exists(), "planning makes nothing");
+        let made = new.make(&config)?;
+        assert_eq!(made.root(), planned.root());
+        assert!(made.root().is_dir());
+        assert!(new.library(&config).is_err() && new.make(&config).is_err());
+        assert!(Recipient::New("  ..".into()).library(&config).is_err());
+        assert!(Recipient::Me.make(&config)?.is_own());
+        let existing = Recipient::Existing("Sam".into()).make(&config)?;
+        assert_eq!(existing.root(), made.root());
+        Ok(())
     }
 
     fn convert() -> Command {
@@ -418,7 +512,10 @@ mod tests {
             can_start: true,
             ..Fake::default()
         };
-        let other = Command::Answer(Answers::DownloadLink { url: "u".into() });
+        let other = Command::Answer(Answers::DownloadLink {
+            url: "u".into(),
+            recipient: Recipient::Me,
+        });
         let cancelled = run(&mut step, vec![convert(), other, Command::Go]).await?;
         assert!(!cancelled);
         assert_eq!(step.log, ["open", "answer", "answer", "go"]);

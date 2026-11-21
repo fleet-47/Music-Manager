@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::Device;
+use crate::{Device, Library};
 
 /// Id of the Liked Songs entry in a list of [`ListChoice`]. It contains a hyphen, which a Spotify
 /// playlist id (base 62) never does, so it cannot collide with one.
@@ -239,8 +239,13 @@ pub enum EventKind {
     /// Sync device: the mounted external or removable volumes found (sent on start, and again
     /// when a volume appears or goes, or after `r`). Empty means none.
     Devices(Vec<Device>),
-    /// The playlists in the library (file stems), for the What tick list of Convert and Sync
-    /// device (To device). Sent when the form opens.
+    /// The libraries on disk, the owner's own first (F12): the Library dropdown of the four forms
+    /// that choose one (Sync Spotify, Download link, Sync device, Convert). Sent when the form
+    /// opens. A list made in the form is not in it until the form asks again (`Offer::Libraries`).
+    Libraries(Vec<Library>),
+    /// The playlists of one library (file stems), for the What tick list of Convert and Sync
+    /// device (To device). Sent when the form opens, for the owner's own library, and again for
+    /// the library asked for by `Offer::Playlists`; the last one received is the one on show.
     Playlists(Vec<String>),
     /// Sync device, From device: the device's top-level folders (names not starting with a dot),
     /// answering `Offer::Folders`.

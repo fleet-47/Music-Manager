@@ -376,6 +376,70 @@ fn the_popup_rectangle_is_the_frame_that_was_drawn() -> TestResult {
     Ok(())
 }
 
+/// Draw like the loop does: the popups see where they were drawn last frame, and the frame
+/// remembers where they are now. The rectangle of the top popup.
+fn draw_remembering(app: &mut App) -> Result<ratatui::layout::Rect, Box<dyn std::error::Error>> {
+    let mut terminal = Terminal::new(TestBackend::new(app.size.width, app.size.height))?;
+    let mut hits = Hits::default();
+    let mut rect = None;
+    terminal.draw(|frame| {
+        let _ = panels::draw(frame, app, Theme::new(true), &mut hits);
+        rect = popups::draw(frame, app, Theme::new(true), &mut hits);
+    })?;
+    app.hits = hits;
+    rect.ok_or_else(|| "no popup was drawn".into())
+}
+
+fn press(app: &mut App, code: crossterm::event::KeyCode) {
+    let key = crossterm::event::KeyEvent::new(code, KeyModifiers::NONE);
+    let _ = app.update(Msg::Key(key), clock());
+}
+
+#[test]
+fn a_popup_keeps_its_place_when_its_content_gets_shorter() -> TestResult {
+    let mut app = app(100, 30);
+    let (dialog, _) = Dialog::open(TaskId::DownloadLink, &app.settings);
+    app.popups.push(Popup::Dialog(Box::new(dialog)));
+    let before = draw_remembering(&mut app)?;
+    // The first frame is centred, with "Paste a link" among what is missing.
+    assert_eq!(
+        before.x,
+        100_u16.saturating_sub(before.width) / 2,
+        "centred across"
+    );
+    // A link is pasted: what was missing is gone, so the form is shorter.
+    press(&mut app, crossterm::event::KeyCode::Tab);
+    let _ = app.update(
+        Msg::Paste("https://music.youtube.com/watch?v=abc".into()),
+        clock(),
+    );
+    let after = draw_remembering(&mut app)?;
+    assert!(after.height < before.height, "{before:?} then {after:?}");
+    assert_eq!((after.x, after.y), (before.x, before.y));
+    // Closing it and opening another popup starts centred again, not where the form was.
+    app.popups.clear();
+    app.popups.push(Popup::Confirm(Confirm::Quit));
+    let other = draw_remembering(&mut app)?;
+    assert_ne!(other.y, before.y);
+    Ok(())
+}
+
+#[test]
+fn a_popup_that_no_longer_fits_where_it_was_moves_inside_the_screen() -> TestResult {
+    let mut app = app(100, 30);
+    let (dialog, _) = Dialog::open(TaskId::DownloadLink, &app.settings);
+    app.popups.push(Popup::Dialog(Box::new(dialog)));
+    let first = draw_remembering(&mut app)?;
+    // A smaller terminal cannot hold it where it was: it moves in, and is not cut off.
+    app.size = Size::new(100, first.y.saturating_add(first.height).saturating_sub(2));
+    let smaller = draw_remembering(&mut app)?;
+    assert!(
+        smaller.y.saturating_add(smaller.height) < app.size.height,
+        "{smaller:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn clicking_a_function_row_chooses_it_and_a_second_click_runs_it() -> TestResult {
     let mut app = app(100, 30);
@@ -448,7 +512,7 @@ fn buttons_answer_questions_and_a_click_outside_changes_nothing() -> TestResult 
     let yes = app.hits.popup.area_of(&PopupTarget::Yes).ok_or("no yes")?;
     assert_eq!(
         click(&mut app, yes.x, yes.y),
-        vec![Cmd::Send(TaskId::SyncSpotify, Command::Go)]
+        vec![Cmd::send(TaskId::SyncSpotify, Command::Go)]
     );
     assert!(app.popups.is_empty());
     Ok(())
@@ -471,7 +535,7 @@ fn the_waiting_popup_cancel_button_sends_cancel() -> TestResult {
         .ok_or("no cancel")?;
     assert_eq!(
         click(&mut app, cancel.x, cancel.y),
-        vec![Cmd::Send(TaskId::SyncSpotify, Command::Cancel)]
+        vec![Cmd::send(TaskId::SyncSpotify, Command::Cancel)]
     );
     Ok(())
 }

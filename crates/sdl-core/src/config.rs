@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use directories::BaseDirs;
 use serde::Deserialize;
 
+use crate::place::component;
+
+const DEFAULT_MY_LIBRARY: &str = "Me";
+
 const DEFAULT_DOWNLOAD_JOBS: NonZeroUsize = match NonZeroUsize::new(4) {
     Some(jobs) => jobs,
     None => NonZeroUsize::MIN,
@@ -33,6 +37,12 @@ pub enum ConfigError {
         /// Underlying error.
         source: toml::de::Error,
     },
+    /// `my_library` is not a usable folder name once made FAT-safe (F7).
+    #[error("config file {}: my_library is not a usable folder name", path.display())]
+    LibraryName {
+        /// The config path.
+        path: PathBuf,
+    },
 }
 
 /// Settings from the config file.
@@ -42,6 +52,9 @@ pub struct Config {
     pub client_id: String,
     /// Music library root (default `~/Music`); a leading `~` is expanded.
     pub music_root: PathBuf,
+    /// Name of the owner's own library, the folder `<music_root>/<my_library>` (default `Me`),
+    /// made FAT-safe like a path component (F12).
+    pub my_library: String,
     /// Parallel song downloads (default 4). Zero is a parse error.
     pub download_jobs: NonZeroUsize,
     /// Motion on (default true). `false` turns effects off.
@@ -53,6 +66,7 @@ pub struct Config {
 struct RawConfig {
     client_id: String,
     music_root: Option<PathBuf>,
+    my_library: Option<String>,
     download_jobs: Option<NonZeroUsize>,
     animations: Option<bool>,
 }
@@ -119,9 +133,17 @@ impl Config {
             Some(root) => expand_home(&root, home),
             None => home.join("Music"),
         };
+        let my_library = match raw.my_library {
+            Some(name) => Some(component(&name)).filter(|safe| !safe.is_empty()),
+            None => Some(DEFAULT_MY_LIBRARY.to_owned()),
+        }
+        .ok_or_else(|| ConfigError::LibraryName {
+            path: path.to_path_buf(),
+        })?;
         Ok(Self {
             client_id: raw.client_id,
             music_root,
+            my_library,
             download_jobs: raw.download_jobs.unwrap_or(DEFAULT_DOWNLOAD_JOBS),
             animations: raw.animations.unwrap_or(true),
         })
@@ -152,6 +174,24 @@ mod tests {
         assert_eq!(cfg.download_jobs.get(), 4);
         assert!(cfg.animations);
         assert!(cfg.music_root.ends_with("Music"));
+        assert_eq!(cfg.my_library, "Me");
+        Ok(())
+    }
+
+    #[test]
+    fn my_library_is_made_safe_and_must_not_be_empty() -> TestResult {
+        let cfg = Config::parse(
+            "client_id = \"a\"\nmy_library = \"Yazid: music\"\n",
+            Path::new("/c.toml"),
+        )?;
+        assert_eq!(cfg.my_library, "Yazid music");
+        for bad in ["", "..", "///"] {
+            let err = Config::parse(
+                &format!("client_id = \"a\"\nmy_library = \"{bad}\"\n"),
+                Path::new("/c.toml"),
+            );
+            assert!(matches!(err, Err(ConfigError::LibraryName { .. })), "{bad}");
+        }
         Ok(())
     }
 

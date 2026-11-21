@@ -11,7 +11,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use sdl_core::{
     Candidate, ConvertChoice, Device, DeviceChoice, Direction, EventKind, Format, HeldSong,
-    ListChoice, PlanSummary, ReviewList, Selection, SongSource, State, TaskId, WantedSong,
+    Library, LibraryId, ListChoice, PlanSummary, ReviewList, Selection, SongSource, State, TaskId,
+    WantedSong,
 };
 use sdl_form::{Focus, FormStyle, Target, Value, render};
 use sdl_tasks::{Answers, Command, Offer, Resolution, ReviewChoice};
@@ -68,6 +69,16 @@ impl Rig {
         commands(self.press(code(crossterm::event::KeyCode::Enter)))
     }
 
+    /// Tab until the keyboard is on the field `key`.
+    fn focus(&mut self, key: &'static str) {
+        for _ in 0..40 {
+            if *self.dialog.form().focus() == Focus::Field(key) {
+                return;
+            }
+            let _ = self.press(code(crossterm::event::KeyCode::Tab));
+        }
+    }
+
     /// Tab until the keyboard is on the primary button.
     fn focus_primary(&mut self) {
         for _ in 0..40 {
@@ -111,8 +122,19 @@ impl Rig {
     }
 }
 
+/// The libraries the task lists: the owner's own, `Me`, then `others`.
+fn libraries(others: &[&str]) -> EventKind {
+    let mut all = vec![Library::at("Me", &PathBuf::from("/music/Me"), true)];
+    all.extend(
+        others
+            .iter()
+            .map(|name| Library::at(name, &PathBuf::from("/music").join(name), false)),
+    );
+    EventKind::Libraries(all)
+}
+
 fn send(task: TaskId, command: Command) -> Cmd {
-    Cmd::Send(task, command)
+    Cmd::send(task, command)
 }
 
 fn song(key: &str, title: &str, link: bool) -> WantedSong {
@@ -143,8 +165,10 @@ fn song(key: &str, title: &str, link: bool) -> WantedSong {
 
 fn held(key: &str, title: &str, link: bool) -> HeldSong {
     HeldSong {
+        library: sdl_core::LibraryId::Own,
         song: song(key, title, link),
         from: vec!["Liked Songs".into()],
+        from_files: Vec::new(),
         candidates: vec![
             Candidate {
                 video_id: "same".into(),
@@ -242,7 +266,8 @@ fn sync_spotify_walks_from_the_lists_to_start() {
         vec![send(
             TaskId::SyncSpotify,
             Command::Answer(Answers::SyncSpotify {
-                lists: vec![lists().remove(0)]
+                lists: vec![lists().remove(0)],
+                recipient: sdl_tasks::Recipient::Me,
             })
         )]
     );
@@ -290,6 +315,7 @@ fn changing_the_ticks_after_the_summary_goes_back_to_continue() {
         total: 1,
         waiting: 0,
     });
+    rig.focus("lists");
     let _ = rig.press(code(crossterm::event::KeyCode::Down));
     let _ = rig.press(ch(' '));
     assert_eq!(rig.dialog.form().summary(), None);
@@ -303,6 +329,7 @@ fn a_plan_that_arrives_after_a_change_is_not_shown() {
     let _ = rig.event(&EventKind::Lists(lists()));
     let _ = rig.enter();
     // The owner ticks another list while the first plan is still being made.
+    rig.focus("lists");
     let _ = rig.press(code(crossterm::event::KeyCode::Down));
     let _ = rig.press(ch(' '));
     let _ = rig.event(&EventKind::NewOfTotal {
@@ -339,7 +366,7 @@ fn sync_spotify_continues_and_starts_with_the_mouse() -> TestResult {
     let sent = commands(rig.click(&Target::Primary)?);
     assert!(matches!(
         sent.as_slice(),
-        [Cmd::Send(TaskId::SyncSpotify, Command::Answer(_))]
+        [Cmd::Send(TaskId::SyncSpotify, command)] if matches!(**command, Command::Answer(_))
     ));
     let _ = rig.event(&EventKind::NewOfTotal {
         new: 2,
@@ -359,6 +386,7 @@ fn download_link_starts_with_a_pasted_link() {
     assert_eq!(rig.busy(), None);
     assert_eq!(rig.dialog.form().primary(), "Start");
     assert!(rig.enter().is_empty(), "no link yet");
+    rig.focus("link");
     let _ = rig.dialog.paste("not a link", &rig.settings);
     assert_eq!(rig.enter(), Vec::new());
     assert!(
@@ -382,7 +410,8 @@ fn download_link_starts_with_a_pasted_link() {
         vec![send(
             TaskId::DownloadLink,
             Command::Answer(Answers::DownloadLink {
-                url: "https://music.youtube.com/watch?v=abc".into()
+                url: "https://music.youtube.com/watch?v=abc".into(),
+                recipient: sdl_tasks::Recipient::Me,
             })
         )]
     );
@@ -448,6 +477,7 @@ fn review_walk_from_the_list_to_download() {
             TaskId::Review,
             Command::Answer(Answers::Review {
                 choices: vec![ReviewChoice {
+                    library: sdl_core::LibraryId::Own,
                     key: "t1".into(),
                     resolution: Resolution::Candidate("same".into()),
                 }]
@@ -569,6 +599,7 @@ fn review_offers_the_links_own_audio_only_for_link_songs_and_a_pasted_link_asks_
             TaskId::Review,
             Command::Answer(Answers::Review {
                 choices: vec![ReviewChoice {
+                    library: sdl_core::LibraryId::Own,
                     key: "https://x/y".into(),
                     resolution: Resolution::PastedLink("https://youtu.be/abc".into()),
                 }]
@@ -628,7 +659,7 @@ fn a_song_that_leaves_the_list_while_open_drops_its_choice() {
     assert_eq!(rig.dialog.form().title(), "Held song");
     assert!(rig.dialog.form().notes()[0].starts_with("Wanted: First"));
     // Another task landed the first song: the runner's list no longer holds it.
-    let _ = rig.settings.review.resolve("t1");
+    let _ = rig.settings.review.resolve(&sdl_core::LibraryId::Own, "t1");
     let step = rig.event(&EventKind::HeldCount(1));
     assert!(!is_closed(&step));
     assert_eq!(rig.dialog.form().title(), "Review", "back to the list");
@@ -651,6 +682,7 @@ fn device_settings(last: Option<&str>) -> Settings {
             format: Some(Format::M4a),
             quality: sdl_core::Quality::Small,
             keep_cover: false,
+            ..DeviceChoice::default()
         },
     );
     state.last_device = last.map(str::to_owned);
@@ -660,13 +692,21 @@ fn device_settings(last: Option<&str>) -> Settings {
     }
 }
 
-fn answer_of(commands: &[Cmd]) -> Option<(&Device, &DeviceChoice)> {
-    commands.iter().find_map(|cmd| match cmd {
-        Cmd::Send(TaskId::SyncDevice, Command::Answer(Answers::SyncDevice { device, choice })) => {
-            Some((device, choice))
-        }
+/// The command sent to `task`, when `cmd` is one.
+fn sent_to(cmd: &Cmd, task: TaskId) -> Option<&Command> {
+    match cmd {
+        Cmd::Send(to, command) if *to == task => Some(command),
         _ => None,
-    })
+    }
+}
+
+fn answer_of(commands: &[Cmd]) -> Option<(&Device, &DeviceChoice)> {
+    commands
+        .iter()
+        .find_map(|cmd| match sent_to(cmd, TaskId::SyncDevice)? {
+            Command::Answer(Answers::SyncDevice { device, choice }) => Some((device, choice)),
+            _ => None,
+        })
 }
 
 #[test]
@@ -681,7 +721,8 @@ fn sync_device_follows_the_devices_and_the_remembered_choices() -> TestResult {
             .iter()
             .any(|n| n.contains(".m3u8"))
     );
-    // The devices arrive first, then the playlists: one plan, asked for once both are in.
+    // The devices arrive first, then the playlists and the libraries: one plan, asked for once
+    // all are in.
     let step = rig.event(&EventKind::Devices(vec![
         device("PHILIPS", "U2", 5_000_000_000),
         device("SNOWSKY", "U1", 12_300_000_000),
@@ -689,6 +730,8 @@ fn sync_device_follows_the_devices_and_the_remembered_choices() -> TestResult {
     assert!(commands(step).is_empty(), "the playlists are still to come");
     assert_eq!(rig.busy(), Some("Looking for devices"));
     let step = rig.event(&EventKind::Playlists(vec!["Road trip".into()]));
+    assert!(commands(step).is_empty(), "the libraries are still to come");
+    let step = rig.event(&libraries(&[]));
     let sent = commands(step);
     let (chosen, choice) = answer_of(&sent).ok_or("an answer")?;
     assert_eq!(chosen.id(), "U1", "the last device is preselected");
@@ -706,6 +749,7 @@ fn sync_device_follows_the_devices_and_the_remembered_choices() -> TestResult {
         Some("412 files, about 3.2 GB to copy · 3 already there · 12.3 GB free on SNOWSKY")
     );
     assert_eq!(rig.dialog.form().primary(), "Start");
+    rig.focus_primary();
     assert_eq!(rig.enter(), vec![send(TaskId::SyncDevice, Command::Go)]);
     assert!(is_closed(&rig.event(&EventKind::Started)));
     Ok(())
@@ -741,6 +785,7 @@ fn the_device_list_updates_when_volumes_change() {
     let (mut rig, _) = Rig::open(TaskId::SyncDevice, device_settings(Some("U1")));
     let _ = rig.event(&EventKind::Devices(Vec::new()));
     let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let _ = rig.event(&libraries(&[]));
     assert_eq!(rig.busy(), None);
     assert!(
         rig.dialog
@@ -774,6 +819,7 @@ fn the_device_list_updates_when_volumes_change() {
 fn the_only_device_is_chosen_when_none_was_synced_before() {
     let (mut rig, _) = Rig::open(TaskId::SyncDevice, device_settings(None));
     let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let _ = rig.event(&libraries(&[]));
     let _ = rig.event(&EventKind::Devices(vec![device("SDLTEST", "U9", 1)]));
     assert_eq!(
         rig.dialog.form().value("device"),
@@ -797,6 +843,7 @@ fn not_enough_room_says_so_with_the_numbers_and_start_is_unavailable() {
         1_100_000_000,
     )]));
     let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let _ = rig.event(&libraries(&[]));
     let _ = rig.event(&EventKind::Plan(plan(
         10,
         3_200_000_000,
@@ -826,6 +873,7 @@ fn from_device_reads_the_folders_then_plans_and_the_format_rows_follow_the_forma
     let (mut rig, _) = Rig::open(TaskId::SyncDevice, device_settings(Some("U1")));
     let _ = rig.event(&EventKind::Devices(vec![device("SNOWSKY", "U1", 9)]));
     let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let _ = rig.event(&libraries(&[]));
     let visible = |rig: &Rig, key: &str| {
         rig.dialog
             .form()
@@ -870,7 +918,8 @@ fn r_looks_for_devices_again_except_where_it_is_typed() {
     let (mut rig, _) = Rig::open(TaskId::SyncDevice, device_settings(Some("U1")));
     let _ = rig.event(&EventKind::Devices(vec![device("SNOWSKY", "U1", 9)]));
     let _ = rig.event(&EventKind::Playlists(Vec::new()));
-    let _ = rig.press(code(crossterm::event::KeyCode::Tab));
+    let _ = rig.event(&libraries(&[]));
+    rig.focus("device");
     assert!(rig.dialog.hints().iter().any(|hint| hint.key == "r"));
     let step = rig.press(ch('r'));
     assert_eq!(
@@ -882,9 +931,8 @@ fn r_looks_for_devices_again_except_where_it_is_typed() {
     let (mut rig, _) = Rig::open(TaskId::SyncDevice, device_settings(Some("U1")));
     let _ = rig.event(&EventKind::Devices(vec![device("SNOWSKY", "U1", 9)]));
     let _ = rig.event(&EventKind::Playlists(Vec::new()));
-    for _ in 0..2 {
-        let _ = rig.press(code(crossterm::event::KeyCode::Tab));
-    }
+    let _ = rig.event(&libraries(&[]));
+    rig.focus("what");
     assert!(matches!(rig.dialog.form().focus(), Focus::Field("what")));
     assert!(!rig.dialog.hints().iter().any(|hint| hint.key == "r"));
     assert_eq!(commands(rig.press(ch('r'))), Vec::new());
@@ -898,6 +946,7 @@ fn choosing_another_device_sets_the_form_from_what_it_remembered() -> TestResult
         device("PHILIPS", "U2", 9),
     ]));
     let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let _ = rig.event(&libraries(&[]));
     assert_eq!(
         rig.dialog.form().value("format"),
         Some(Value::Choice(Some("m4a".into())))
@@ -935,10 +984,12 @@ fn convert_settings() -> Settings {
 }
 
 fn convert_answer(commands: &[Cmd]) -> Option<&ConvertChoice> {
-    commands.iter().find_map(|cmd| match cmd {
-        Cmd::Send(TaskId::Convert, Command::Answer(Answers::Convert(choice))) => Some(choice),
-        _ => None,
-    })
+    commands
+        .iter()
+        .find_map(|cmd| match sent_to(cmd, TaskId::Convert)? {
+            Command::Answer(Answers::Convert(choice)) => Some(choice),
+            _ => None,
+        })
 }
 
 #[test]
@@ -947,6 +998,8 @@ fn convert_plans_the_remembered_choices_then_starts() -> TestResult {
     assert_eq!(opened, vec![Cmd::Start(TaskId::Convert)]);
     assert_eq!(rig.busy(), Some("Reading your playlists"));
     let step = rig.event(&EventKind::Playlists(vec!["Road trip".into()]));
+    assert!(commands(step).is_empty(), "the libraries are still to come");
+    let step = rig.event(&libraries(&[]));
     let sent = commands(step);
     let choice = convert_answer(&sent).ok_or("an answer")?;
     assert_eq!(choice.format, Format::Mp3);
@@ -958,6 +1011,7 @@ fn convert_plans_the_remembered_choices_then_starts() -> TestResult {
         Some("12 files to convert · 3 already there")
     );
     assert_eq!(rig.dialog.form().primary(), "Start");
+    rig.focus_primary();
     assert_eq!(rig.enter(), vec![send(TaskId::Convert, Command::Go)]);
     assert!(is_closed(&rig.event(&EventKind::Started)));
     Ok(())
@@ -967,6 +1021,7 @@ fn convert_plans_the_remembered_choices_then_starts() -> TestResult {
 fn convert_says_why_a_destination_is_refused() {
     let (mut rig, _) = Rig::open(TaskId::Convert, convert_settings());
     let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let _ = rig.event(&libraries(&[]));
     let _ = rig.event(&EventKind::Plan(PlanSummary {
         refusal: Some("The destination is inside your library.".into()),
         ..plan(12, 0, None)
@@ -982,11 +1037,10 @@ fn convert_says_why_a_destination_is_refused() {
 fn typing_a_destination_makes_no_plan_until_enter() -> TestResult {
     let (mut rig, _) = Rig::open(TaskId::Convert, convert_settings());
     let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let _ = rig.event(&libraries(&[]));
     let _ = rig.event(&EventKind::Plan(plan(12, 0, None)));
     // Move to the destination field and type.
-    for _ in 0..4 {
-        let _ = rig.press(code(crossterm::event::KeyCode::Tab));
-    }
+    rig.focus("destination");
     assert!(matches!(
         rig.dialog.form().focus(),
         Focus::Field("destination")
@@ -1005,6 +1059,7 @@ fn typing_a_destination_makes_no_plan_until_enter() -> TestResult {
 fn a_new_format_relabels_the_quality_and_makes_a_new_plan() -> TestResult {
     let (mut rig, _) = Rig::open(TaskId::Convert, convert_settings());
     let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let _ = rig.event(&libraries(&[]));
     let _ = rig.event(&EventKind::Plan(plan(12, 0, None)));
     let label = |rig: &Rig| -> Result<String, Box<dyn std::error::Error>> {
         let area = Rect::new(0, 0, 100, 60);
@@ -1022,8 +1077,8 @@ fn a_new_format_relabels_the_quality_and_makes_a_new_plan() -> TestResult {
             .join("\n"))
     };
     assert!(label(&rig)?.contains("High (about 190 kbps)"));
-    // The format dropdown is the second field: Tab, Enter opens, Down, Enter chooses M4A.
-    let _ = rig.press(code(crossterm::event::KeyCode::Tab));
+    // The format dropdown: Enter opens, Down, Enter chooses M4A.
+    rig.focus("format");
     let _ = rig.press(code(crossterm::event::KeyCode::Enter));
     let _ = rig.press(code(crossterm::event::KeyCode::Down));
     let step = rig.press(code(crossterm::event::KeyCode::Enter));
@@ -1041,4 +1096,386 @@ fn convert_cancel_tells_the_task() {
     let step = rig.press(code(crossterm::event::KeyCode::Esc));
     assert!(is_closed(&step));
     assert_eq!(commands(step), vec![send(TaskId::Convert, Command::Cancel)]);
+}
+
+// ----- Libraries (F12) -----
+
+/// The form as the owner sees it, drawn on a tall terminal.
+fn drawn(rig: &Rig) -> String {
+    let area = Rect::new(0, 0, 100, 60);
+    let mut buf = Buffer::empty(area);
+    let _ = render(rig.dialog.form(), area, &mut buf, &FormStyle::default());
+    area.rows()
+        .map(|row| {
+            row.columns()
+                .filter_map(|p| buf.cell((p.x, p.y)))
+                .map(|cell| cell.symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_visible(rig: &Rig, key: &str) -> bool {
+    rig.dialog
+        .form()
+        .fields()
+        .iter()
+        .any(|field| field.key() == key && field.is_visible())
+}
+
+fn choice_of(rig: &Rig, key: &'static str) -> Option<String> {
+    match rig.dialog.form().value(key) {
+        Some(Value::Choice(id)) => id,
+        _ => None,
+    }
+}
+
+/// Open the dropdown `key`, press `keys`, and choose with Enter.
+fn pick(rig: &mut Rig, key: &'static str, keys: &[crossterm::event::KeyCode]) -> Vec<Cmd> {
+    rig.focus(key);
+    let _ = rig.press(code(crossterm::event::KeyCode::Enter));
+    for each in keys {
+        let _ = rig.press(code(*each));
+    }
+    commands(rig.press(code(crossterm::event::KeyCode::Enter)))
+}
+
+/// A download form open with the libraries Kim and Sam listed and Sam used last, and what it must
+/// have before it can start (a ticked list, or a link).
+fn download_rig(task: TaskId, others: &[&str]) -> Rig {
+    let mut settings = spotify_settings();
+    settings.state.last_friend.insert(task, "Sam".to_owned());
+    let (mut rig, _) = Rig::open(task, settings);
+    let _ = rig.event(&libraries(others));
+    if task == TaskId::SyncSpotify {
+        let _ = rig.event(&EventKind::Lists(lists()));
+    } else {
+        rig.focus("link");
+        let _ = rig
+            .dialog
+            .paste("https://music.youtube.com/watch?v=abc", &rig.settings);
+    }
+    rig
+}
+
+/// The recipient of the answer the form gives now.
+fn recipient_sent(rig: &mut Rig) -> Option<sdl_tasks::Recipient> {
+    rig.focus_primary();
+    rig.enter().into_iter().find_map(|cmd| match cmd {
+        Cmd::Send(_, command) => match *command {
+            Command::Answer(
+                Answers::SyncSpotify { recipient, .. } | Answers::DownloadLink { recipient, .. },
+            ) => Some(recipient),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+#[test]
+fn the_download_forms_start_for_me_and_offer_a_library_when_it_is_turned_off() -> TestResult {
+    for task in [TaskId::SyncSpotify, TaskId::DownloadLink] {
+        let mut rig = download_rig(task, &["Kim", "Sam"]);
+        // For me is the first field and is on; nothing about libraries shows.
+        assert_eq!(*rig.dialog.form().fields()[0].key(), *"for_me");
+        assert_eq!(rig.dialog.form().value("for_me"), Some(Value::Flag(true)));
+        assert!(!is_visible(&rig, "library") && !is_visible(&rig, "new_library"));
+        // Off: the dropdown shows with the library used last chosen.
+        rig.focus("for_me");
+        let _ = rig.press(ch(' '));
+        assert!(is_visible(&rig, "library") && !is_visible(&rig, "new_library"));
+        assert_eq!(choice_of(&rig, "library"), Some("Sam".to_owned()));
+        // It offers the other libraries, then New library…; not the owner's own.
+        rig.focus("library");
+        let _ = rig.press(code(crossterm::event::KeyCode::Enter));
+        let shown = drawn(&rig);
+        let kim = shown.find("Kim").ok_or("no Kim")?;
+        let sam = shown.rfind("Sam").ok_or("no Sam")?;
+        let new = shown.find("New library…").ok_or("no New library…")?;
+        assert!(kim < sam && sam < new, "{shown}");
+        assert!(!shown.contains("Me"), "{shown}");
+        let _ = rig.press(code(crossterm::event::KeyCode::Esc));
+        assert_eq!(
+            recipient_sent(&mut rig),
+            Some(sdl_tasks::Recipient::Existing("Sam".to_owned()))
+        );
+        // Another library, chosen with the keyboard; then For me again.
+        let mut rig = download_rig(task, &["Kim", "Sam"]);
+        rig.focus("for_me");
+        let _ = rig.press(ch(' '));
+        let _ = pick(&mut rig, "library", &[crossterm::event::KeyCode::Up]);
+        assert_eq!(
+            recipient_sent(&mut rig),
+            Some(sdl_tasks::Recipient::Existing("Kim".to_owned()))
+        );
+        let mut rig = download_rig(task, &["Kim", "Sam"]);
+        assert_eq!(recipient_sent(&mut rig), Some(sdl_tasks::Recipient::Me));
+    }
+    Ok(())
+}
+
+#[test]
+fn the_for_me_toggle_is_on_every_time_a_download_form_opens_and_works_with_the_mouse() -> TestResult
+{
+    let mut rig = download_rig(TaskId::DownloadLink, &["Sam"]);
+    let _ = rig.click(&Target::Field("for_me"))?;
+    assert_eq!(rig.dialog.form().value("for_me"), Some(Value::Flag(false)));
+    assert!(is_visible(&rig, "library"));
+    // The library last used is remembered, but For me is on again at the next open.
+    let mut again = download_rig(TaskId::DownloadLink, &["Sam"]);
+    assert_eq!(again.dialog.form().value("for_me"), Some(Value::Flag(true)));
+    assert_eq!(recipient_sent(&mut again), Some(sdl_tasks::Recipient::Me));
+    Ok(())
+}
+
+#[test]
+fn a_new_library_needs_a_name_that_is_not_taken() {
+    for task in [TaskId::SyncSpotify, TaskId::DownloadLink] {
+        let mut rig = download_rig(task, &["Kim", "Sam"]);
+        rig.focus("for_me");
+        let _ = rig.press(ch(' '));
+        let _ = pick(&mut rig, "library", &[crossterm::event::KeyCode::Down]);
+        assert_eq!(choice_of(&rig, "library"), Some("/new".to_owned()));
+        assert!(is_visible(&rig, "new_library"));
+        // Empty: the form says what is missing and does not start.
+        let missing = rig.dialog.form().missing();
+        assert_eq!(missing, vec!["Type a name for the library".to_owned()]);
+        assert_eq!(recipient_sent(&mut rig), None);
+        // Taken, whatever the case.
+        rig.focus("new_library");
+        let _ = rig.dialog.paste("sam", &rig.settings);
+        assert_eq!(
+            rig.dialog.form().missing(),
+            vec!["A library named Sam already exists. Choose another name.".to_owned()]
+        );
+        assert_eq!(recipient_sent(&mut rig), None);
+        // Good.
+        rig.focus("new_library");
+        let _ = rig.press(KeyEvent {
+            modifiers: KeyModifiers::CONTROL,
+            ..ch('u')
+        });
+        let _ = rig.dialog.paste("Lee", &rig.settings);
+        assert_eq!(rig.dialog.form().missing(), Vec::<String>::new());
+        assert_eq!(
+            recipient_sent(&mut rig),
+            Some(sdl_tasks::Recipient::New("Lee".to_owned()))
+        );
+    }
+}
+
+#[test]
+fn with_no_other_library_the_only_choice_is_a_new_one() {
+    let mut rig = download_rig(TaskId::DownloadLink, &[]);
+    rig.focus("for_me");
+    let _ = rig.press(ch(' '));
+    assert_eq!(choice_of(&rig, "library"), Some("/new".to_owned()));
+    assert!(is_visible(&rig, "new_library"));
+}
+
+fn sam_device_settings() -> Settings {
+    let mut settings = device_settings(Some("U1"));
+    if let Some(saved) = settings.state.devices.get_mut("U1") {
+        saved.library = LibraryId::Other("Sam".into());
+        saved.last_synced = Some(LibraryId::Own);
+    }
+    settings
+}
+
+fn playlists_of(library: &str) -> Cmd {
+    send(
+        TaskId::SyncDevice,
+        Command::Offer(Offer::Playlists(match library {
+            "" => LibraryId::Own,
+            name => LibraryId::Other(name.to_owned()),
+        })),
+    )
+}
+
+#[test]
+fn sync_device_starts_with_the_remembered_library_and_its_playlists() -> TestResult {
+    let (mut rig, _) = Rig::open(TaskId::SyncDevice, sam_device_settings());
+    assert_eq!(rig.dialog.form().fields()[0].key(), "library");
+    assert!(matches!(rig.dialog.form().focus(), Focus::Field("library")));
+    let _ = rig.event(&EventKind::Devices(vec![device(
+        "SNOWSKY",
+        "U1",
+        9_000_000_000,
+    )]));
+    // The owner's own playlists come first, as the task sends them at open.
+    let _ = rig.event(&EventKind::Playlists(vec!["Mine".into()]));
+    let step = rig.event(&libraries(&["Kim", "Sam"]));
+    assert!(commands(step.clone()).contains(&playlists_of("Sam")));
+    assert!(
+        answer_of(&commands(step)).is_none(),
+        "the playlists are awaited"
+    );
+    assert_eq!(rig.busy(), Some("Reading the playlists"));
+    let step = rig.event(&EventKind::Playlists(vec!["Sam's mix".into()]));
+    let sent = commands(step);
+    let (_, choice) = answer_of(&sent).ok_or("an answer")?;
+    assert_eq!(choice.library, LibraryId::Other("Sam".into()));
+    // The What list is the chosen library's.
+    let shown = drawn(&rig);
+    assert!(
+        shown.contains("Sam's mix") && !shown.contains("Mine"),
+        "{shown}"
+    );
+    // The library was last synced from the owner's: the note says the two merge there.
+    let notes = rig.dialog.form().notes().join(" ");
+    assert!(
+        notes.contains("last synced from library Me")
+            && notes.contains("will merge the two libraries on this device"),
+        "{notes}"
+    );
+    // Back to the owner's own library: its playlists are asked for, and nothing merges.
+    let sent = pick(
+        &mut rig,
+        "library",
+        &[crossterm::event::KeyCode::Up, crossterm::event::KeyCode::Up],
+    );
+    assert!(sent.contains(&playlists_of("")), "{sent:?}");
+    assert!(!rig.dialog.form().notes().join(" ").contains("merge"));
+    assert_eq!(rig.busy(), Some("Reading the playlists"));
+    let step = rig.event(&EventKind::Playlists(vec!["Mine".into()]));
+    let sent = commands(step);
+    let (_, choice) = answer_of(&sent).ok_or("an answer")?;
+    assert_eq!(choice.library, LibraryId::Own);
+    assert!(drawn(&rig).contains("Mine"));
+    Ok(())
+}
+
+#[test]
+fn a_remembered_library_that_is_gone_gives_way_to_the_owners_own() {
+    let (mut rig, _) = Rig::open(TaskId::SyncDevice, sam_device_settings());
+    let _ = rig.event(&EventKind::Devices(vec![device("SNOWSKY", "U1", 9)]));
+    let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let step = rig.event(&libraries(&["Kim"]));
+    assert_eq!(choice_of(&rig, "library"), Some("/own".to_owned()));
+    assert!(!commands(step.clone()).contains(&playlists_of("Sam")));
+    assert!(answer_of(&commands(step)).is_some());
+}
+
+#[test]
+fn convert_starts_with_the_remembered_library_and_follows_a_change() -> TestResult {
+    let mut settings = convert_settings();
+    settings.state.convert.library = LibraryId::Other("Sam".into());
+    let (mut rig, _) = Rig::open(TaskId::Convert, settings);
+    assert!(matches!(rig.dialog.form().focus(), Focus::Field("library")));
+    let _ = rig.event(&EventKind::Playlists(vec!["Mine".into()]));
+    let step = rig.event(&libraries(&["Kim", "Sam"]));
+    let asked = Cmd::send(
+        TaskId::Convert,
+        Command::Offer(Offer::Playlists(LibraryId::Other("Sam".into()))),
+    );
+    assert_eq!(commands(step), vec![asked]);
+    assert_eq!(rig.busy(), Some("Reading your playlists"));
+    let step = rig.event(&EventKind::Playlists(vec!["Sam's mix".into()]));
+    let sent = commands(step);
+    let choice = convert_answer(&sent).ok_or("an answer")?;
+    assert_eq!(choice.library, LibraryId::Other("Sam".into()));
+    assert!(drawn(&rig).contains("Sam's mix"));
+    // The owner's own first in the dropdown; choosing Kim asks for Kim's playlists.
+    let sent = pick(&mut rig, "library", &[crossterm::event::KeyCode::Up]);
+    assert_eq!(
+        sent,
+        vec![Cmd::send(
+            TaskId::Convert,
+            Command::Offer(Offer::Playlists(LibraryId::Other("Kim".into())))
+        )]
+    );
+    assert_eq!(rig.dialog.form().summary(), None);
+    let step = rig.event(&EventKind::Playlists(vec!["Kim's mix".into()]));
+    let sent = commands(step);
+    let choice = convert_answer(&sent).ok_or("a new plan")?;
+    assert_eq!(choice.library, LibraryId::Other("Kim".into()));
+    Ok(())
+}
+
+#[test]
+fn convert_opens_on_the_owners_own_library_when_none_was_remembered() -> TestResult {
+    let (mut rig, _) = Rig::open(TaskId::Convert, convert_settings());
+    let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let sent = commands(rig.event(&libraries(&["Sam"])));
+    let choice = convert_answer(&sent).ok_or("an answer")?;
+    assert_eq!(choice.library, LibraryId::Own);
+    assert!(
+        !sent.iter().any(
+            |cmd| matches!(cmd, Cmd::Send(_, command) if matches!(**command, Command::Offer(_)))
+        )
+    );
+    assert!(drawn(&rig).contains("Me"));
+    Ok(())
+}
+
+#[test]
+fn review_names_a_songs_library_when_it_is_not_the_owners_own() -> TestResult {
+    let mut review = ReviewList::default();
+    review.hold(held("t1", "First", false));
+    let mut sams = held("t1", "First", false);
+    sams.library = LibraryId::Other("Sam".into());
+    review.hold(sams);
+    let settings = Settings {
+        review,
+        ..Settings::default()
+    };
+    let (mut rig, _) = Rig::open(TaskId::Review, settings);
+    let shown = drawn(&rig);
+    assert_eq!(shown.matches("library Sam").count(), 1, "{shown}");
+    assert_eq!(shown.matches("First").count(), 2, "{shown}");
+    // Open Sam's song: the detail names the library. Never download it.
+    let _ = rig.click(&Target::Row {
+        field: "songs",
+        index: 1,
+    })?;
+    assert!(
+        rig.dialog
+            .form()
+            .notes()
+            .iter()
+            .any(|note| note == "Goes in library Sam")
+    );
+    choose_never(&mut rig);
+    rig.focus_primary();
+    let _ = rig.enter();
+    // The same key held for two libraries stays two songs: only Sam's is decided.
+    rig.focus_primary();
+    let sent = rig.enter();
+    assert_eq!(
+        sent,
+        vec![send(
+            TaskId::Review,
+            Command::Answer(Answers::Review {
+                choices: vec![ReviewChoice {
+                    library: LibraryId::Other("Sam".into()),
+                    key: "t1".into(),
+                    resolution: Resolution::Never,
+                }]
+            })
+        )]
+    );
+    // The owner's own song has no library line.
+    let (mut rig, _) = Rig::open(TaskId::Review, review_settings());
+    assert!(!drawn(&rig).contains("library"));
+    let _ = rig.enter();
+    assert!(
+        !rig.dialog
+            .form()
+            .notes()
+            .iter()
+            .any(|n| n.contains("library"))
+    );
+    Ok(())
+}
+
+/// Choose `Never download` in the open detail.
+fn choose_never(rig: &mut Rig) {
+    rig.focus("choice");
+    for _ in 0..6 {
+        if choice_of(rig, "choice").as_deref() == Some("never") {
+            break;
+        }
+        let _ = rig.press(code(crossterm::event::KeyCode::Down));
+    }
 }

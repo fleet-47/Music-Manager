@@ -19,7 +19,7 @@ use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 use super::keys::{BINDINGS, Scope};
 use super::theme::Theme;
-use crate::app::{App, Confirm, Hits, Popup, PopupTarget, Waiting};
+use crate::app::{Anchor, App, Confirm, Hits, Popup, PopupTarget, Waiting};
 
 /// Widest a plain popup gets, in columns.
 const PLAIN_WIDTH: u16 = 60;
@@ -194,24 +194,22 @@ fn room(frame: &Frame) -> Rect {
 /// Draw every open popup, bottom first, and record the top one's rectangles in `hits`. Returns
 /// the top popup's frame, so an effect can play over just it.
 pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Option<Rect> {
-    let area = room(frame);
     let last = app.popups.len().saturating_sub(1);
     let mut top = None;
+    let mut stack = Stack {
+        before: &app.hits.anchors,
+        now: &mut hits.anchors,
+    };
     for (index, popup) in app.popups.iter().enumerate() {
         let on_top = index == last;
         let shown = match popup {
-            Popup::Dialog(dialog) => {
-                let form = dialog.form();
-                let wanted = sdl_form::size(form, area.width.saturating_sub(4));
-                let width = wanted.width.min(area.width.saturating_sub(2));
-                let height = wanted.height.min(area.height.saturating_sub(2));
-                let body = FormBody {
-                    form,
-                    style: theme.form_style(),
-                    hits: on_top.then_some(&mut hits.form),
-                };
-                show(frame, theme, form.title(), body, (width, height), on_top)
-            }
+            Popup::Dialog(dialog) => dialog_popup(
+                frame,
+                theme,
+                dialog.form(),
+                on_top.then_some(&mut hits.form),
+                &mut stack,
+            ),
             Popup::Confirm(confirm) => {
                 let words = question(confirm);
                 let enter_yes = confirm.enter_answers_yes();
@@ -226,6 +224,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                     &[words.text],
                     &buttons,
                     on_top.then_some(&mut hits.popup),
+                    &mut stack,
                 )
             }
             Popup::Error(info) => plain(
@@ -235,6 +234,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                 &[info.message.clone(), info.advice.clone()],
                 &[Button::close()],
                 on_top.then_some(&mut hits.popup),
+                &mut stack,
             ),
             Popup::Ejected(device) => plain(
                 frame,
@@ -245,6 +245,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                 )],
                 &[Button::close()],
                 on_top.then_some(&mut hits.popup),
+                &mut stack,
             ),
             Popup::Waiting(waiting) => {
                 let spinner = sdl_form::spinner(app.spin);
@@ -267,6 +268,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                     &[text],
                     &buttons,
                     on_top.then_some(&mut hits.popup),
+                    &mut stack,
                 )
             }
             Popup::Help { scroll } | Popup::Attention { scroll, .. } => {
@@ -279,6 +281,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                     content,
                     *scroll,
                     on_top.then_some(&mut hits.popup),
+                    &mut stack,
                 )
             }
         };
@@ -287,6 +290,64 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
         }
     }
     top
+}
+
+/// Where the open popups were drawn last frame, and where they are drawn in this one. Popups are
+/// drawn bottom first, so the next one to be drawn has the next place in the stack.
+struct Stack<'a> {
+    before: &'a [Anchor],
+    now: &'a mut Vec<Anchor>,
+}
+
+impl Stack<'_> {
+    /// The frame of the next popup, `size` big inside `area`: centred when it opens, and where it
+    /// was ever after, even when its content gets shorter. Only a frame that would leave `area`
+    /// is moved back in, and it returns to its place when it fits again.
+    fn place(&mut self, title: &str, area: Rect, size: (u16, u16)) -> Rect {
+        let (width, height) = size;
+        let centred = area.centered(Constraint::Length(width), Constraint::Length(height));
+        let at = self
+            .before
+            .get(self.now.len())
+            .filter(|anchor| anchor.title == title)
+            .map_or(centred.as_position(), |anchor| anchor.at);
+        self.now.push(Anchor {
+            title: title.to_owned(),
+            at,
+        });
+        let x = at.x.min(area.right().saturating_sub(width)).max(area.x);
+        let y = at.y.min(area.bottom().saturating_sub(height)).max(area.y);
+        Rect::new(x, y, width, height)
+    }
+}
+
+/// A dialog's form in its popup.
+fn dialog_popup(
+    frame: &mut Frame,
+    theme: Theme,
+    form: &sdl_form::Form,
+    hits: Option<&mut HitMap<sdl_form::Target>>,
+    stack: &mut Stack,
+) -> Rect {
+    let area = room(frame);
+    let wanted = sdl_form::size(form, area.width.saturating_sub(4));
+    let width = wanted.width.min(area.width.saturating_sub(2));
+    let height = wanted.height.min(area.height.saturating_sub(2));
+    let on_top = hits.is_some();
+    let body = FormBody {
+        form,
+        style: theme.form_style(),
+        hits,
+    };
+    show(
+        frame,
+        theme,
+        form.title(),
+        body,
+        (width, height),
+        on_top,
+        stack,
+    )
 }
 
 /// Draw `body` in a popup of `width` by `height`; the frame's rectangle. Only the popup on
@@ -298,8 +359,11 @@ fn show<W: Widget>(
     body: W,
     (width, height): (u16, u16),
     on_top: bool,
+    stack: &mut Stack,
 ) -> Rect {
-    let area = room(frame);
+    // The body plus a border on each side.
+    let frame_size = (width.saturating_add(2), height.saturating_add(2));
+    let placed = stack.place(title, room(frame), frame_size);
     let widget = KnownSizeWrapper::new(body, usize::from(width), usize::from(height));
     let popup = Chrome::new(widget)
         .title(Line::styled(format!(" {title} "), theme.heading()))
@@ -309,12 +373,9 @@ fn show<W: Widget>(
             theme.border()
         })
         .style(theme.background());
-    frame.render_widget(popup, area);
-    // Where `tui-popup` put the frame: centred, the body plus a border on each side.
-    area.centered(
-        Constraint::Length(width.saturating_add(2)),
-        Constraint::Length(height.saturating_add(2)),
-    )
+    // `tui-popup` centres its frame in the rectangle it is given: this one is the frame itself.
+    frame.render_widget(popup, placed);
+    placed
 }
 
 /// A dialog's form as a popup body.
@@ -449,6 +510,7 @@ fn plain(
     paragraphs: &[String],
     buttons: &[Button],
     hits: Option<&mut HitMap<PopupTarget>>,
+    stack: &mut Stack,
 ) -> Rect {
     let area = room(frame);
     let width = PLAIN_WIDTH.min(area.width.saturating_sub(4)).max(10);
@@ -471,7 +533,7 @@ fn plain(
         theme,
         hits,
     };
-    show(frame, theme, title, body, (width, height), on_top)
+    show(frame, theme, title, body, (width, height), on_top, stack)
 }
 
 struct PlainBody<'a> {
@@ -509,6 +571,7 @@ fn scrolling(
     content: Content,
     scroll: usize,
     hits: Option<&mut HitMap<PopupTarget>>,
+    stack: &mut Stack,
 ) -> Rect {
     let area = frame.area();
     let size = Size::new(area.width, area.height);
@@ -526,7 +589,7 @@ fn scrolling(
         theme,
         hits,
     };
-    show(frame, theme, &title, body, (width, height), on_top)
+    show(frame, theme, &title, body, (width, height), on_top, stack)
 }
 
 struct ScrollBody<'a> {

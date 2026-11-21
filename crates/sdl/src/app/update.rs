@@ -150,8 +150,9 @@ impl App {
             SignInState::KeychainProblem(reason) => {
                 self.popups.push(Popup::Error(ErrorInfo {
                     message: reason.clone(),
-                    advice: "The sync goes on. You may be asked to sign in again next time."
-                        .to_owned(),
+                    advice:
+                        "The sync goes on. The next start will ask you to sign in to Spotify again."
+                            .to_owned(),
                 }));
                 true
             }
@@ -313,7 +314,7 @@ impl App {
     /// The owner left the sign-in: the task is told, and the form that waited for it goes.
     fn cancel_sign_in(&mut self) -> Vec<Cmd> {
         self.close_dialog(TaskId::SyncSpotify);
-        vec![Cmd::Send(TaskId::SyncSpotify, Command::Cancel)]
+        vec![Cmd::send(TaskId::SyncSpotify, Command::Cancel)]
     }
 }
 
@@ -527,7 +528,7 @@ mod tests {
         );
         assert!(matches!(app.top(), Some(Popup::Confirm(Confirm::Browser))));
         let go = app.update(key(KeyCode::Enter), clock());
-        assert_eq!(go, vec![Cmd::Send(TaskId::SyncSpotify, Command::Go)]);
+        assert_eq!(go, vec![Cmd::send(TaskId::SyncSpotify, Command::Go)]);
         let _ = task(
             &mut app,
             TaskId::SyncSpotify,
@@ -537,7 +538,7 @@ mod tests {
         let cancel = app.update(key(KeyCode::Esc), clock());
         assert_eq!(
             cancel,
-            vec![Cmd::Send(TaskId::SyncSpotify, Command::Cancel)]
+            vec![Cmd::send(TaskId::SyncSpotify, Command::Cancel)]
         );
         // The form that waited for the sign-in is gone with it.
         assert!(app.popups.is_empty());
@@ -555,7 +556,7 @@ mod tests {
         let cancel = app.update(key(KeyCode::Char('n')), clock());
         assert_eq!(
             cancel,
-            vec![Cmd::Send(TaskId::SyncSpotify, Command::Cancel)]
+            vec![Cmd::send(TaskId::SyncSpotify, Command::Cancel)]
         );
         assert!(app.popups.is_empty());
     }
@@ -577,6 +578,32 @@ mod tests {
             app.view(TaskId::SyncSpotify)
                 .is_some_and(FunctionView::is_open)
         );
+    }
+
+    #[test]
+    fn a_keychain_problem_mid_run_is_said_once_in_plain_words_and_the_run_goes_on() {
+        let mut app = app();
+        running(&mut app, TaskId::SyncSpotify);
+        let commands = task(
+            &mut app,
+            TaskId::SyncSpotify,
+            EventKind::SignIn(SignInState::KeychainProblem(
+                "The macOS Keychain could not save the Spotify sign-in".into(),
+            )),
+        );
+        assert_eq!(commands, Vec::new());
+        assert!(matches!(
+            app.top(),
+            Some(Popup::Error(info))
+                if info.message.contains("could not save the Spotify sign-in")
+                    && info.advice.contains("next start will ask you to sign in")
+        ));
+        assert_eq!(app.popups.len(), 1);
+        // The run is not interrupted, and closing the message leaves it running.
+        assert!(app.running().any(|view| view.task == TaskId::SyncSpotify));
+        let _ = app.update(key(KeyCode::Enter), clock());
+        assert!(app.popups.is_empty());
+        assert!(app.running().any(|view| view.task == TaskId::SyncSpotify));
     }
 
     #[test]

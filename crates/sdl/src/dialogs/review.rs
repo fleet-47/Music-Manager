@@ -18,16 +18,17 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use sdl_core::{Candidate, EventKind, HeldSong};
+use sdl_core::{Candidate, EventKind, HeldSong, LibraryId};
 use sdl_form::{Choice, Field, Form, Part, Value};
 use sdl_tasks::{Answers, Resolution, ReviewChoice};
 
 use super::choices::{chosen_of, text_of};
 use super::link;
 use crate::app::Settings;
+use crate::fmt::library_words;
 use sdl_core::words::thousands;
 
-/// The list of held songs. Row ids are `WantedSong::key`.
+/// The list of held songs. Row ids name the song's library and its `WantedSong::key` ([`row_id`]).
 pub(super) const SONGS: &str = "songs";
 
 /// The detail's radio group. Option ids: a candidate's video id, or one of [`OWN_AUDIO`],
@@ -56,15 +57,32 @@ pub fn is_candidate(id: &str) -> bool {
     ![OWN_AUDIO, PASTE, LATER, NEVER].contains(&id)
 }
 
+/// A held song is one entry per library and key (F12).
+type Held = (LibraryId, String);
+
+fn held_of(held: &HeldSong) -> Held {
+    (held.library.clone(), held.song.key().to_owned())
+}
+
+/// The id of a held song's row: its library (empty for the owner's own), a separator no name or
+/// key holds, and its key.
+fn row_id(held: &HeldSong) -> String {
+    format!(
+        "{}\u{1f}{}",
+        String::from(held.library.clone()),
+        held.song.key()
+    )
+}
+
 /// What this dialog keeps besides its form.
 #[derive(Debug, Default)]
 pub(super) struct State {
-    /// The choice made so far per held song key.
-    chosen: BTreeMap<String, Resolution>,
+    /// The choice made so far per held song.
+    chosen: BTreeMap<Held, Resolution>,
     /// The list form, kept while a song's detail form is shown.
     pub(super) list: Option<Form>,
-    /// The key of the song whose detail is shown.
-    detail: Option<String>,
+    /// The held song whose detail is shown.
+    detail: Option<Held>,
 }
 
 /// The list form: one row per held song, the filter box, and `Download 0 chosen`, blocked.
@@ -79,25 +97,22 @@ pub(super) fn open(settings: &Settings) -> (Form, State) {
     (form, state)
 }
 
-fn rows(settings: &Settings, chosen: &BTreeMap<String, Resolution>) -> Vec<Choice> {
+fn rows(settings: &Settings, chosen: &BTreeMap<Held, Resolution>) -> Vec<Choice> {
     settings
         .review
         .songs()
         .iter()
         .map(|held| {
-            let key = held.song.key();
             let detail = chosen
-                .get(key)
+                .get(&held_of(held))
                 .and_then(|resolution| choice_words(held, resolution))
                 .unwrap_or_else(|| held.from.join(", "));
-            Choice::from_parts(
-                key.to_owned(),
-                vec![
-                    Part::plain(held.song.title.clone()),
-                    Part::plain(held.song.artists_joined()),
-                ],
-            )
-            .with_detail(detail)
+            let mut parts = vec![
+                Part::plain(held.song.title.clone()),
+                Part::plain(held.song.artists_joined()),
+            ];
+            parts.extend(library_words(&held.library).map(Part::plain));
+            Choice::from_parts(row_id(held), parts).with_detail(detail)
         })
         .collect()
 }
@@ -120,11 +135,12 @@ fn choice_words(held: &HeldSong, resolution: &Resolution) -> Option<String> {
     }
 }
 
-fn decided(chosen: &BTreeMap<String, Resolution>) -> Vec<ReviewChoice> {
+fn decided(chosen: &BTreeMap<Held, Resolution>) -> Vec<ReviewChoice> {
     chosen
         .iter()
         .filter(|(_, resolution)| **resolution != Resolution::Later)
-        .map(|(key, resolution)| ReviewChoice {
+        .map(|((library, key), resolution)| ReviewChoice {
+            library: library.clone(),
             key: key.clone(),
             resolution: resolution.clone(),
         })
@@ -136,7 +152,7 @@ const EMPTY: &str = "Nothing is waiting. A song comes here when Sync Spotify or 
 finds no match it is sure of.";
 
 /// The list's button and what blocks it; `held` is how many songs the list shows.
-fn label_start(form: &mut Form, chosen: &BTreeMap<String, Resolution>, held: usize) {
+fn label_start(form: &mut Form, chosen: &BTreeMap<Held, Resolution>, held: usize) {
     let count = decided(chosen).len();
     form.set_primary(format!("Download {} chosen", thousands(count)));
     let blocked = match (held, count) {
@@ -154,13 +170,8 @@ fn list_of<'a>(form: &'a mut Form, state: &'a mut State) -> &'a mut Form {
 
 /// Rebuild the rows from the runner's review list, and the button from the choices.
 fn rebuild(form: &mut Form, state: &mut State, settings: &Settings) {
-    let held: Vec<&str> = settings
-        .review
-        .songs()
-        .iter()
-        .map(|held| held.song.key())
-        .collect();
-    state.chosen.retain(|key, _| held.contains(&key.as_str()));
+    let held: Vec<Held> = settings.review.songs().iter().map(held_of).collect();
+    state.chosen.retain(|each, _| held.contains(each));
     let options = rows(settings, &state.chosen);
     let chosen = state.chosen.clone();
     let held = settings.review.len();
@@ -178,32 +189,37 @@ pub(super) fn on_event(form: &mut Form, state: &mut State, kind: &EventKind, set
     rebuild(form, state, settings);
     let gone = state
         .detail
-        .as_deref()
-        .is_some_and(|key| find(settings, key).is_none());
+        .as_ref()
+        .is_some_and(|detail| find(settings, detail).is_none());
     if gone {
         back(form, state);
     }
 }
 
-fn find<'a>(settings: &'a Settings, key: &str) -> Option<&'a HeldSong> {
+fn find<'a>(settings: &'a Settings, wanted: &Held) -> Option<&'a HeldSong> {
     settings
         .review
         .songs()
         .iter()
-        .find(|held| held.song.key() == key)
+        .find(|held| held_of(held) == *wanted)
 }
 
-/// Enter or a click on a row: show that song's detail.
-pub(super) fn open_detail(form: &mut Form, state: &mut State, key: &str, settings: &Settings) {
+/// Enter or a click on a row (`id`, a [`row_id`]): show that song's detail.
+pub(super) fn open_detail(form: &mut Form, state: &mut State, id: &str, settings: &Settings) {
     if state.list.is_some() {
         return;
     }
-    let Some(held) = find(settings, key) else {
+    let Some(held) = settings
+        .review
+        .songs()
+        .iter()
+        .find(|held| row_id(held) == id)
+    else {
         return;
     };
-    let detail = detail_form(held, state.chosen.get(key));
+    let detail = detail_form(held, state.chosen.get(&held_of(held)));
     state.list = Some(std::mem::replace(form, detail));
-    state.detail = Some(key.to_owned());
+    state.detail = Some(held_of(held));
 }
 
 /// Return to the list, keeping what was chosen before. `false` when the list is already shown.
@@ -219,12 +235,12 @@ pub(super) fn back(form: &mut Form, state: &mut State) -> bool {
 /// `Done` in the detail: record the choice, return to the list.
 pub(super) fn done(form: &mut Form, state: &mut State, settings: &Settings) {
     let resolution = match (chosen_of(form, CHOICE), state.detail.clone()) {
-        (Some(id), Some(key)) => Some((key, resolution_of(form, &id))),
+        (Some(id), Some(held)) => Some((held, resolution_of(form, &id))),
         _ => None,
     };
     back(form, state);
-    if let Some((key, resolution)) = resolution {
-        state.chosen.insert(key, resolution);
+    if let Some((held, resolution)) = resolution {
+        state.chosen.insert(held, resolution);
     }
     rebuild(form, state, settings);
 }
@@ -254,7 +270,7 @@ pub(super) fn chosen_candidate<'a>(
     settings: &'a Settings,
 ) -> Option<&'a Candidate> {
     let id = chosen_of(form, CHOICE).filter(|id| is_candidate(id))?;
-    let held = find(settings, state.detail.as_deref()?)?;
+    let held = find(settings, state.detail.as_ref()?)?;
     held.candidates
         .iter()
         .find(|candidate| candidate.video_id == id)
@@ -304,7 +320,10 @@ fn detail_form(held: &HeldSong, previous: Option<&Resolution>) -> Form {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(" · ");
-    form.set_notes(vec![format!("Wanted: {wanted}"), held.reason.clone()]);
+    let mut notes = vec![format!("Wanted: {wanted}")];
+    notes.extend(library_words(&held.library).map(|library| format!("Goes in {library}")));
+    notes.push(held.reason.clone());
+    form.set_notes(notes);
     form.set_primary("Done");
     form.set_back(true);
     match previous {

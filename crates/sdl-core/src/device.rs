@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Format, Preset, Quality};
+use crate::{Format, LibraryId, Preset, Quality};
 
 /// A mounted external or removable volume, as `diskutil info -plist` describes it when it is
 /// listed.
@@ -71,7 +71,7 @@ impl Direction {
 /// `sdl_library::playlists::list`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
-    /// Every file of the library ([`crate::library_files`]).
+    /// Every file of the chosen library ([`crate::library_files`]).
     #[serde(default)]
     pub whole_library: bool,
     /// The ticked playlists' file stems. Their songs are included, and each playlist file is
@@ -95,6 +95,19 @@ impl Selection {
 /// device, a meaning that no longer exists, so it is not read as the From device folders.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceChoice {
+    /// The device's name as shown to the owner ([`Device::label`]) when this was saved, so the
+    /// main panel can name the device after a restart, before it is plugged in. Empty in a file
+    /// written before names were kept.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// The library the sync reads from (To device) or writes into (From device). Remembered per
+    /// device (F12).
+    #[serde(default, skip_serializing_if = "LibraryId::is_own")]
+    pub library: LibraryId,
+    /// The library the last To-device run copied from, when it differs from the one now chosen the
+    /// form's note says the two merge on the device (F12). `None` before any such run.
+    #[serde(default)]
+    pub last_synced: Option<LibraryId>,
     /// Copy direction.
     #[serde(default)]
     pub direction: Direction,
@@ -116,6 +129,13 @@ pub struct DeviceChoice {
 }
 
 impl DeviceChoice {
+    /// The library the device was last synced from, when that is not `chosen`: the device holds
+    /// that other person's music, and syncing `chosen` merges the two there (F12).
+    #[must_use]
+    pub fn merges_with(&self, chosen: &LibraryId) -> Option<&LibraryId> {
+        self.last_synced.as_ref().filter(|last| *last != chosen)
+    }
+
     /// The preset to convert with, or `None` when files are copied as they are.
     #[must_use]
     pub fn preset(&self) -> Option<Preset> {
@@ -130,6 +150,9 @@ impl DeviceChoice {
 impl Default for DeviceChoice {
     fn default() -> Self {
         Self {
+            name: String::new(),
+            library: LibraryId::default(),
+            last_synced: None,
             direction: Direction::default(),
             what: Selection::default(),
             from_folders: Vec::new(),
@@ -143,6 +166,9 @@ impl Default for DeviceChoice {
 /// What the owner chose for Convert, remembered from run to run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConvertChoice {
+    /// The library to convert from (F12).
+    #[serde(default, skip_serializing_if = "LibraryId::is_own")]
+    pub library: LibraryId,
     /// What to convert.
     #[serde(default)]
     pub what: Selection,
@@ -199,6 +225,7 @@ impl ConvertChoice {
 impl Default for ConvertChoice {
     fn default() -> Self {
         Self {
+            library: LibraryId::default(),
             what: Selection::default(),
             format: Self::default_format(),
             quality: Quality::default(),

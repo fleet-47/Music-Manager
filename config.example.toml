@@ -7,3 +7,6 @@ client_id = "your-spotify-client-id"
 # download_jobs = 4
 # Motion: fades and slides (default: true)
 # animations = true
+# Name of your own library, the folder music_root/<name> (default: Me). Songs you download for
+# other people go in libraries of their own, made in the app.
+# my_library = "Me"

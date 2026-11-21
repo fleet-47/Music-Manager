@@ -4,16 +4,17 @@
 
 use std::path::PathBuf;
 
-use sdl_core::{ConvertChoice, EventKind, Format};
+use sdl_core::{ConvertChoice, EventKind, Format, TaskId};
 use sdl_form::{Choice, Field, Form, Value};
-use sdl_tasks::Answers;
+use sdl_tasks::{Answers, Command};
 
 use super::choices::{
     chosen_of, flag_of, quality_of, quality_options, selection_of, text_of, what_options,
     what_value,
 };
 use super::conversation::Conversation;
-use crate::app::Settings;
+use super::libraries::{self, Follow, Known};
+use crate::app::{Cmd, Settings};
 use sdl_core::words::{files, thousands};
 
 /// Tick list: Whole library, then each playlist.
@@ -27,10 +28,18 @@ pub(super) const COVER: &str = "cover";
 /// Folder field.
 pub(super) const DESTINATION: &str = "destination";
 
+/// What this dialog keeps besides its form.
+#[derive(Debug, Default)]
+pub(super) struct State {
+    known: Known,
+    follow: Follow,
+}
+
 /// The form pre-filled from `settings.state.convert`, waiting for the playlists.
-pub(super) fn open(settings: &Settings) -> (Form, Conversation) {
+pub(super) fn open(settings: &Settings) -> (Form, State, Conversation) {
     let choice = &settings.state.convert;
     let mut form = Form::new("Convert")
+        .field(libraries::picker())
         .field(
             Field::ticks(WHAT, "What")
                 .needs("Tick what to convert")
@@ -47,6 +56,7 @@ pub(super) fn open(settings: &Settings) -> (Form, Conversation) {
         .field(Field::dropdown(QUALITY, "Quality").options(quality_options(choice.format)))
         .field(Field::toggle(COVER, "Keep cover art"))
         .field(Field::folder(DESTINATION, "Destination").needs("Choose a destination"));
+    libraries::pick(&mut form, &choice.library);
     form.set(
         FORMAT,
         Value::Choice(Some(choice.format.extension().to_owned())),
@@ -62,16 +72,28 @@ pub(super) fn open(settings: &Settings) -> (Form, Conversation) {
         Value::Text(choice.destination.display().to_string()),
     );
     let conv = Conversation::planned("Making the plan", Some("Reading your playlists"));
-    (form, conv)
+    (form, State::default(), conv)
 }
 
-/// `Playlists` adds one option per playlist; `Plan` is the summary, and its refusal (a destination
-/// inside the library) is said in the task's plain words.
-pub(super) fn on_event(form: &mut Form, conv: &mut Conversation, kind: &EventKind) {
+/// `Libraries` fills the Library dropdown, and asks for the playlists of a remembered library
+/// other than the owner's own; `Playlists` adds one option per playlist (the form waits for the
+/// last one asked for); `Plan` is the summary, and its refusal (a destination inside the library)
+/// is said in the task's plain words. Returns the commands to send.
+pub(super) fn on_event(
+    form: &mut Form,
+    state: &mut State,
+    conv: &mut Conversation,
+    kind: &EventKind,
+) -> Vec<Cmd> {
+    let mut commands = Vec::new();
     match kind {
+        EventKind::Libraries(found) => {
+            libraries::offer_all(form, &mut state.known, found);
+            commands = follow_library(form, state, conv);
+        }
         EventKind::Playlists(names) => {
             form.set_options(WHAT, what_options(names));
-            conv.wait_for(None);
+            state.follow.arrived();
         }
         EventKind::Plan(plan) => {
             let summary = format!(
@@ -86,16 +108,45 @@ pub(super) fn on_event(form: &mut Form, conv: &mut Conversation, kind: &EventKin
         EventKind::Headline(text) => conv.headline(text),
         _ => {}
     }
+    if matches!(kind, EventKind::Libraries(_) | EventKind::Playlists(_))
+        && state.known.is_in()
+        && state.follow.is_settled()
+    {
+        conv.wait_for(None);
+    }
+    commands
 }
 
-/// A field changed. The quality labels follow the format. Returns whether a plan should be asked
-/// for now (not for typing a destination).
-pub(super) fn changed(form: &mut Form, field: &str) -> bool {
-    if field == FORMAT {
-        let format = format_of(form);
-        form.set_options(QUALITY, quality_options(format));
+/// The playlists of the chosen library are asked for when they are not the ones on show; the form
+/// waits for them.
+fn follow_library(form: &Form, state: &mut State, conv: &mut Conversation) -> Vec<Cmd> {
+    let Some(offer) = state.follow.offer(form, &state.known) else {
+        return Vec::new();
+    };
+    conv.wait_for(Some("Reading your playlists"));
+    conv.changed();
+    vec![Cmd::send(TaskId::Convert, Command::Offer(offer))]
+}
+
+/// A field changed. The quality labels follow the format, the playlists follow the library.
+/// Returns the commands to send, and whether a plan should be asked for now (not for typing a
+/// destination).
+pub(super) fn changed(
+    form: &mut Form,
+    state: &mut State,
+    conv: &mut Conversation,
+    field: &str,
+) -> (Vec<Cmd>, bool) {
+    let mut commands = Vec::new();
+    match field {
+        FORMAT => {
+            let format = format_of(form);
+            form.set_options(QUALITY, quality_options(format));
+        }
+        libraries::LIBRARY => commands = follow_library(form, state, conv),
+        _ => {}
     }
-    field != DESTINATION
+    (commands, field != DESTINATION)
 }
 
 fn format_of(form: &Form) -> Format {
@@ -109,6 +160,7 @@ fn format_of(form: &Form) -> Format {
 /// The choices in the form.
 pub(super) fn answers(form: &Form) -> Answers {
     Answers::Convert(ConvertChoice {
+        library: libraries::picked(form),
         what: selection_of(form, WHAT),
         format: format_of(form),
         quality: quality_of(form, QUALITY),

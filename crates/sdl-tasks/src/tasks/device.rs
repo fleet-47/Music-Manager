@@ -7,18 +7,21 @@
 
 use std::future::pending;
 
-use sdl_core::{Device, EventKind};
+use sdl_core::{Device, Direction, EventKind, Library, LibraryId};
 use sdl_devices::{self as devices, DevicePlan, DeviceWatch};
-use sdl_library::playlists;
 
 use crate::conversation::{Answered, Answers, Offer, Opened, Step};
 use crate::progress::{stopped_line, written_line};
+use crate::tasks::{send_libraries, send_playlists};
 use crate::{Flow, TaskContext, TaskError};
 
 /// A plan and the device it is for.
 struct Planned {
     device: Device,
     plan: DevicePlan,
+    /// The library the plan reads from or writes into.
+    library: LibraryId,
+    direction: Direction,
 }
 
 /// The Sync device task.
@@ -62,9 +65,8 @@ impl Step for SyncDevice<'_> {
         events.send(EventKind::Headline("Looking for devices".to_owned()));
         self.devices = devices::list().await?;
         events.send(EventKind::Devices(self.devices.clone()));
-        events.send(EventKind::Playlists(playlists::list(
-            &self.context.config.music_root,
-        )?));
+        send_libraries(self.context)?;
+        send_playlists(self.context, &Library::mine(&self.context.config))?;
         self.watch = Some(devices::watch()?);
         events.send(EventKind::Headline(
             "Choose a device and what to copy".to_owned(),
@@ -85,6 +87,14 @@ impl Step for SyncDevice<'_> {
 
     async fn offer(&mut self, offer: Offer) -> Result<bool, TaskError> {
         match offer {
+            Offer::Libraries => {
+                send_libraries(self.context)?;
+                Ok(false)
+            }
+            Offer::Playlists(id) => {
+                send_playlists(self.context, &Library::resolve(&self.context.config, &id))?;
+                Ok(false)
+            }
             Offer::Devices => self.refresh().await,
             Offer::Folders(device) => {
                 let names = devices::folders(&device).await?;
@@ -101,10 +111,16 @@ impl Step for SyncDevice<'_> {
         let events = &self.context.events;
         self.context.remember_device(&device, choice.clone())?;
         events.send(EventKind::Headline("Counting the files".to_owned()));
-        let plan = devices::plan(&self.context.config.music_root, &device, &choice).await?;
+        let library = Library::resolve(&self.context.config, &choice.library);
+        let plan = devices::plan(&library, &device, &choice).await?;
         let summary = plan.summary().clone();
         events.send(EventKind::Plan(summary.clone()));
-        self.planned = Some(Planned { device, plan });
+        self.planned = Some(Planned {
+            device,
+            plan,
+            library: choice.library.clone(),
+            direction: choice.direction,
+        });
         Ok(Answered::Waiting {
             can_start: summary.can_start(),
         })
@@ -112,12 +128,21 @@ impl Step for SyncDevice<'_> {
 
     async fn go(&mut self) -> Result<Flow, TaskError> {
         let context = self.context;
-        let Some(Planned { device, plan }) = self.planned.take() else {
+        let Some(Planned {
+            device,
+            plan,
+            library,
+            direction,
+        }) = self.planned.take()
+        else {
             return Ok(Flow::Cancelled);
         };
         let result = devices::run(&plan, &context.events, &context.stop).await;
         // Whatever way the run ended, the files it wrote are the ones clean-up may touch.
-        context.set_device(Some((device, plan.written())));
+        context.set_device(Some((device.clone(), plan.written())));
+        if direction == Direction::ToDevice {
+            context.remember_synced_library(&device, library)?;
+        }
         let counts = result?;
         if context.stop.is_requested() {
             return Ok(Flow::Stopped {

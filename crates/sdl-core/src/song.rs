@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use crate::storage::opt_secs;
 
@@ -27,6 +28,19 @@ pub enum SongSource {
         /// matching (F3). Every other item, plain `YouTube` included, is matched.
         direct: bool,
     },
+}
+
+/// Whether `url` is an address on `YouTube` or `YouTube Music`.
+fn is_youtube(url: &str) -> bool {
+    let host = Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_owned));
+    matches!(
+        host.as_deref(),
+        Some(
+            "youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be"
+        )
+    )
 }
 
 /// One song the library should hold, with as much as its source knows (F3). Every field except
@@ -71,12 +85,17 @@ pub struct WantedSong {
 }
 
 impl WantedSong {
-    /// The song's identity: the Spotify track ID, or the link item's URL.
+    /// The song's identity (F8): the Spotify track ID; for a `YouTube` or `YouTube Music` item its
+    /// video ID, so the same video pasted with either address is one song; for any other link item
+    /// its URL.
     #[must_use]
     pub fn key(&self) -> &str {
         match &self.source {
             SongSource::Spotify { track_id } => track_id,
-            SongSource::Link { item_url, .. } => item_url,
+            SongSource::Link {
+                item_url, video_id, ..
+            } if video_id.is_empty() || !is_youtube(item_url) => item_url,
+            SongSource::Link { video_id, .. } => video_id,
         }
     }
 
@@ -154,5 +173,37 @@ mod tests {
         assert_eq!(link.fallback_id(), "https://x/y");
         assert!(link.is_from_link() && link.is_direct());
         assert_eq!(link.artists_joined(), "A, B");
+    }
+
+    #[test]
+    fn a_youtube_video_has_one_identity_whichever_address_it_came_with() {
+        let link = |item_url: &str, video_id: &str| {
+            song(SongSource::Link {
+                item_url: item_url.into(),
+                video_id: video_id.into(),
+                direct: false,
+            })
+        };
+        for url in [
+            "https://music.youtube.com/watch?v=abc123",
+            "https://www.youtube.com/watch?v=abc123&list=PL1",
+            "https://youtube.com/watch?v=abc123",
+            "https://m.youtube.com/watch?v=abc123",
+            "https://youtu.be/abc123",
+        ] {
+            assert_eq!(link(url, "abc123").key(), "abc123", "{url}");
+        }
+        // Any other site, and any address that only mentions YouTube, is its URL.
+        for url in [
+            "https://soundcloud.com/a/b",
+            "https://evil.example/music.youtube.com",
+            "https://notyoutube.com/watch?v=abc123",
+            "not a url",
+        ] {
+            assert_eq!(link(url, "abc123").key(), url, "{url}");
+        }
+        // A YouTube item with no video ID falls back to its URL.
+        let bare = "https://www.youtube.com/watch?v=x";
+        assert_eq!(link(bare, "").key(), bare);
     }
 }

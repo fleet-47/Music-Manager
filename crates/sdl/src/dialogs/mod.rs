@@ -47,6 +47,7 @@ mod choices;
 mod conversation;
 mod convert;
 mod device;
+mod libraries;
 mod link;
 mod review;
 mod spotify;
@@ -75,10 +76,10 @@ pub enum Step {
 #[derive(Debug)]
 enum Extra {
     SyncSpotify(spotify::State),
-    DownloadLink,
+    DownloadLink(link::State),
     Review(Box<review::State>),
     SyncDevice(device::State),
-    Convert,
+    Convert(convert::State),
 }
 
 /// An open function dialog: its task, its current form and what is particular to the function.
@@ -100,7 +101,10 @@ impl Dialog {
                 let (form, state, conv) = spotify::open(settings);
                 (form, conv, Extra::SyncSpotify(state))
             }
-            TaskId::DownloadLink => (link::open(), Conversation::direct(), Extra::DownloadLink),
+            TaskId::DownloadLink => {
+                let (form, state) = link::open(settings);
+                (form, Conversation::direct(), Extra::DownloadLink(state))
+            }
             TaskId::Review => {
                 let (form, state) = review::open(settings);
                 (form, Conversation::direct(), Extra::Review(Box::new(state)))
@@ -110,8 +114,8 @@ impl Dialog {
                 (form, conv, Extra::SyncDevice(state))
             }
             TaskId::Convert => {
-                let (form, conv) = convert::open(settings);
-                (form, conv, Extra::Convert)
+                let (form, state, conv) = convert::open(settings);
+                (form, conv, Extra::Convert(state))
             }
         };
         let mut dialog = Self {
@@ -194,10 +198,11 @@ impl Dialog {
             Extra::SyncSpotify(state) => {
                 spotify::on_event(&mut self.form, state, &mut self.conv, kind);
             }
-            Extra::DownloadLink => {
+            Extra::DownloadLink(state) => {
                 if let EventKind::Headline(text) = kind {
                     self.conv.headline(text);
                 }
+                link::on_event(&mut self.form, state, kind);
             }
             Extra::Review(state) => {
                 if let EventKind::Headline(text) = kind {
@@ -208,11 +213,16 @@ impl Dialog {
             Extra::SyncDevice(state) => {
                 commands = device::on_event(&mut self.form, state, &mut self.conv, kind, settings);
             }
-            Extra::Convert => convert::on_event(&mut self.form, &mut self.conv, kind),
+            Extra::Convert(state) => {
+                commands = convert::on_event(&mut self.form, state, &mut self.conv, kind);
+            }
         }
         if matches!(
             kind,
-            EventKind::Devices(_) | EventKind::Playlists(_) | EventKind::Folders(_)
+            EventKind::Devices(_)
+                | EventKind::Libraries(_)
+                | EventKind::Playlists(_)
+                | EventKind::Folders(_)
         ) {
             commands.extend(self.replan());
         }
@@ -268,7 +278,7 @@ impl Dialog {
     }
 
     fn send(&self, command: Command) -> Cmd {
-        Cmd::Send(self.task, command)
+        Cmd::send(self.task, command)
     }
 
     /// Enter on the primary button (or in a field): `Done` in Review's detail; otherwise `Start`
@@ -295,10 +305,10 @@ impl Dialog {
     fn answers(&self) -> Option<Answers> {
         match &self.extra {
             Extra::SyncSpotify(state) => spotify::answers(&self.form, state),
-            Extra::DownloadLink => Some(link::answers(&self.form)),
+            Extra::DownloadLink(state) => link::answers(&self.form, state),
             Extra::Review(state) => Some(review::answers(state)),
             Extra::SyncDevice(state) => device::answers(&self.form, state),
-            Extra::Convert => Some(convert::answers(&self.form)),
+            Extra::Convert(_) => Some(convert::answers(&self.form)),
         }
     }
 
@@ -308,8 +318,11 @@ impl Dialog {
         let mut commands = Vec::new();
         let mut replans = false;
         match &mut self.extra {
-            Extra::SyncSpotify(_) => self.conv.changed(),
-            Extra::DownloadLink => {}
+            Extra::SyncSpotify(state) => {
+                self.conv.changed();
+                spotify::changed(&mut self.form, state);
+            }
+            Extra::DownloadLink(state) => link::changed(&mut self.form, state),
             Extra::Review(state) => {
                 if state.list.is_some() {
                     review::changed(&mut self.form, field);
@@ -321,10 +334,12 @@ impl Dialog {
                 commands = device::changed(&mut self.form, state, &mut self.conv, field, settings);
                 replans = true;
             }
-            Extra::Convert => {
+            Extra::Convert(state) => {
                 self.conv.changed();
                 self.form.set_blocked(None);
-                replans = convert::changed(&mut self.form, field);
+                let (more, asks) = convert::changed(&mut self.form, state, &mut self.conv, field);
+                commands = more;
+                replans = asks;
             }
         }
         if replans {

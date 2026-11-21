@@ -9,24 +9,28 @@ use std::sync::{Mutex, PoisonError};
 
 use futures::StreamExt;
 use futures::stream;
-use sdl_core::{Attention, EventKind, WantedSong};
+use sdl_core::{Attention, EventKind, Library, WantedSong};
 use sdl_library::playlists;
 use sdl_youtube::{LinkItem, list_link, read_item};
 
-use crate::conversation::{Answered, Answers, Opened, Step};
+use crate::conversation::{Answered, Answers, Offer, Opened, Recipient, Step};
 use crate::progress::{Outcome, drive, summary_line};
-use crate::tasks::intake::{Intake, Route, ends_the_run, failed};
+use crate::tasks::intake::{Intake, Listed, Route, ends_the_run, failed};
+use crate::tasks::send_libraries;
 use crate::{Flow, TaskContext, TaskError};
 
 /// The Download link task.
 pub(crate) struct DownloadLink<'a> {
     context: &'a TaskContext,
-    url: Option<String>,
+    answered: Option<(String, Recipient)>,
 }
 
 impl<'a> DownloadLink<'a> {
     pub(crate) const fn new(context: &'a TaskContext) -> Self {
-        Self { context, url: None }
+        Self {
+            context,
+            answered: None,
+        }
     }
 }
 
@@ -35,7 +39,8 @@ impl<'a> DownloadLink<'a> {
 async fn read_and_take(
     at: usize,
     item: &LinkItem,
-    from: &[String],
+    from: &[Listed],
+    library: &Library,
     intake: &Intake<'_>,
     read: &Mutex<Vec<(usize, WantedSong)>>,
 ) -> Result<Outcome, TaskError> {
@@ -70,44 +75,63 @@ async fn read_and_take(
     read.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push((at, song.clone()));
-    intake.take(&song, from, Route::Search).await
+    intake.take(library, &song, from, Route::Search).await
 }
 
 impl Step for DownloadLink<'_> {
     fn open(&mut self) -> impl Future<Output = Result<Opened, TaskError>> + Send {
-        self.context
-            .events
-            .send(EventKind::Headline("Paste a link".to_owned()));
-        std::future::ready(Ok(Opened::Ready))
+        let events = &self.context.events;
+        let opened = send_libraries(self.context).map(|()| {
+            events.send(EventKind::Headline("Paste a link".to_owned()));
+            Opened::Ready
+        });
+        std::future::ready(opened)
+    }
+
+    fn offer(&mut self, offer: Offer) -> impl Future<Output = Result<bool, TaskError>> + Send {
+        let sent = if offer == Offer::Libraries {
+            send_libraries(self.context)
+        } else {
+            Ok(())
+        };
+        std::future::ready(sent.map(|()| false))
     }
 
     fn answer(
         &mut self,
         answers: Answers,
     ) -> impl Future<Output = Result<Answered, TaskError>> + Send {
-        let Answers::DownloadLink { url } = answers else {
+        let Answers::DownloadLink { url, recipient } = answers else {
             return std::future::ready(Ok(Answered::Ignored));
         };
-        self.url = Some(url);
+        self.answered = Some((url, recipient));
         std::future::ready(Ok(Answered::Run))
     }
 
     async fn go(&mut self) -> Result<Flow, TaskError> {
         let context = self.context;
-        let url = self.url.take().unwrap_or_default();
+        let (url, recipient) = self
+            .answered
+            .take()
+            .unwrap_or_else(|| (String::new(), Recipient::Me));
         context
             .events
             .send(EventKind::Headline("Reading the link".to_owned()));
         let listing = list_link(url.trim()).await?;
         let playlist = listing.playlist;
-        let from: Vec<String> = playlist.iter().map(|info| info.name.clone()).collect();
+        let from: Vec<Listed> = playlist
+            .iter()
+            .map(|info| Listed::new(&info.name, &info.id))
+            .collect();
+        let library = recipient.make(&context.config)?;
+        context.remember_friend(&library)?;
         let read: Mutex<Vec<(usize, WantedSong)>> = Mutex::default();
         let intake = Intake::new(context);
         let total = listing.items.len();
         // Plain loops, not closures: see the note in the Sync Spotify task.
         let mut pending = Vec::with_capacity(total);
         for (at, item) in listing.items.iter().enumerate() {
-            pending.push(read_and_take(at, item, &from, &intake, &read));
+            pending.push(read_and_take(at, item, &from, &library, &intake, &read));
         }
         let outcomes = stream::iter(pending).buffer_unordered(context.config.download_jobs.get());
         let tally = drive(outcomes, total, &context.events).await?;
@@ -118,7 +142,7 @@ impl Step for DownloadLink<'_> {
             let mut songs = read.into_inner().unwrap_or_else(PoisonError::into_inner);
             songs.sort_by_key(|(at, _)| *at);
             let songs: Vec<WantedSong> = songs.into_iter().map(|(_, song)| song).collect();
-            playlists::write(&context.config.music_root, &info.name, &info.id, &songs)?;
+            playlists::write(&library, &info.name, &info.id, &songs)?;
         }
         Ok(Flow::done(summary_line(&tally), &tally.counts()))
     }

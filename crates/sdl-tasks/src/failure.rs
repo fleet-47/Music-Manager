@@ -63,8 +63,12 @@ pub(crate) fn error_info(error: &TaskError) -> ErrorInfo {
             "Check that the file plays, then try again."
         }
         TaskError::State(_) => crate::runner::STATE_ADVICE,
+        TaskError::NewLibrary(
+            sdl_core::NewLibraryError::Empty | sdl_core::NewLibraryError::Exists(_),
+        ) => "Choose another name for the library.",
         TaskError::Youtube(YoutubeError::Io(_))
         | TaskError::Io(_)
+        | TaskError::NewLibrary(sdl_core::NewLibraryError::Io(_))
         | TaskError::Devices(DevicesError::Io { .. } | DevicesError::Library(_))
         | TaskError::Library(
             LibraryError::Io { .. } | LibraryError::Tag { .. } | LibraryError::Task(_),

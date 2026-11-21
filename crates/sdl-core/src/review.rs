@@ -5,14 +5,19 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::config_dir;
+use crate::playlist::Playlist;
 use crate::storage::{self, StoreError};
-use crate::{Candidate, WantedSong};
+use crate::{Candidate, LibraryId, WantedSong};
 
 /// A song that has no confident match and waits for the owner.
 ///
-/// Identified by [`WantedSong::key`]: its Spotify track ID, or for a link item its item URL.
+/// Identified by its library and [`WantedSong::key`] (F8, F12).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeldSong {
+    /// The library it was wanted for, and where it lands. Absent in files written before libraries,
+    /// which means the owner's own.
+    #[serde(default, skip_serializing_if = "LibraryId::is_own")]
+    pub library: LibraryId,
     /// What was wanted.
     pub song: WantedSong,
     /// The names of the playlists that list it: the ticked Spotify lists, or a playlist link's
@@ -21,6 +26,12 @@ pub struct HeldSong {
     /// lands with another extension (F7).
     #[serde(default)]
     pub from: Vec<String>,
+    /// The file names of those playlists (`<name>.m3u8`), as written by [`Playlist::file_name`]
+    /// from the list's name and ID. Kept because a list whose name is empty once made safe is
+    /// written under its ID, which the name alone cannot give back. Absent in files written
+    /// before it was kept; [`HeldSong::playlist_files`] covers both.
+    #[serde(default)]
+    pub from_files: Vec<String>,
     /// The results found, up to 5, best-ranked first.
     #[serde(default)]
     pub candidates: Vec<Candidate>,
@@ -28,9 +39,25 @@ pub struct HeldSong {
     pub reason: String,
 }
 
+impl HeldSong {
+    /// The playlist files that list this song: the names kept when it was held, else (an older
+    /// entry) the file names its list names would have.
+    #[must_use]
+    pub fn playlist_files(&self) -> Vec<String> {
+        if self.from_files.is_empty() {
+            self.from
+                .iter()
+                .map(|name| Playlist::file_name(name, ""))
+                .collect()
+        } else {
+            self.from_files.clone()
+        }
+    }
+}
+
 /// The review list. A sync never searches again for a song that is in it (F8).
 ///
-/// Invariant: at most one entry per [`WantedSong::key`]; order is the order songs were held.
+/// Invariant: at most one entry per library and [`WantedSong::key`]; order is the order songs were held.
 /// Only the task layer's runner writes the file (F11); everyone else reads a copy.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewList {
@@ -89,27 +116,33 @@ impl ReviewList {
         self.held.is_empty()
     }
 
-    /// Whether a song with this key ([`WantedSong::key`]) is held.
+    /// Whether a song with this key ([`WantedSong::key`]) is held for `library`.
     #[must_use]
-    pub fn contains(&self, key: &str) -> bool {
-        self.held.iter().any(|held| held.song.key() == key)
+    pub fn contains(&self, library: &LibraryId, key: &str) -> bool {
+        self.held
+            .iter()
+            .any(|held| held.library == *library && held.song.key() == key)
     }
 
-    /// Hold a song. A song with the same key is replaced in place (its position is kept).
+    /// Hold a song. A song with the same library and key is replaced in place (its position is
+    /// kept).
     pub fn hold(&mut self, song: HeldSong) {
         match self
             .held
             .iter_mut()
-            .find(|held| held.song.key() == song.song.key())
+            .find(|held| held.library == song.library && held.song.key() == song.song.key())
         {
             Some(existing) => *existing = song,
             None => self.held.push(song),
         }
     }
 
-    /// Remove and return the song with this key, when it is held.
-    pub fn resolve(&mut self, key: &str) -> Option<HeldSong> {
-        let index = self.held.iter().position(|held| held.song.key() == key)?;
+    /// Remove and return the song with this key held for `library`, when there is one.
+    pub fn resolve(&mut self, library: &LibraryId, key: &str) -> Option<HeldSong> {
+        let index = self
+            .held
+            .iter()
+            .position(|held| held.library == *library && held.song.key() == key)?;
         Some(self.held.remove(index))
     }
 }
@@ -125,6 +158,7 @@ mod tests {
 
     fn held(key: &str, reason: &str) -> HeldSong {
         HeldSong {
+            library: LibraryId::Own,
             song: WantedSong {
                 source: SongSource::Spotify {
                     track_id: key.into(),
@@ -141,6 +175,7 @@ mod tests {
                 cover_url: None,
             },
             from: vec!["Liked Songs".into()],
+            from_files: vec!["Liked Songs.m3u8".into()],
             candidates: vec![Candidate {
                 video_id: "v1".into(),
                 title: "T (live)".into(),
@@ -202,12 +237,52 @@ mod tests {
             list.songs().first().map(|h| h.reason.as_str()),
             Some("three")
         );
-        assert!(list.contains("b"));
+        let own = LibraryId::Own;
+        assert!(list.contains(&own, "b"));
         assert_eq!(
-            list.resolve("a").map(|h| h.reason),
+            list.resolve(&own, "a").map(|h| h.reason),
             Some("three".to_owned())
         );
-        assert!(!list.contains("a"));
-        assert!(list.resolve("a").is_none());
+        assert!(!list.contains(&own, "a"));
+        assert!(list.resolve(&own, "a").is_none());
+    }
+
+    #[test]
+    fn the_same_song_held_for_two_libraries_is_two_entries() {
+        let mut list = ReviewList::default();
+        let mut sams = held("a", "sam's");
+        sams.library = LibraryId::Other("Sam".into());
+        list.hold(held("a", "mine"));
+        list.hold(sams);
+        assert_eq!(list.len(), 2);
+        let sam = LibraryId::Other("Sam".into());
+        assert!(list.contains(&sam, "a") && list.contains(&LibraryId::Own, "a"));
+        assert_eq!(
+            list.resolve(&sam, "a").map(|h| h.reason),
+            Some("sam's".to_owned())
+        );
+        assert!(list.contains(&LibraryId::Own, "a") && !list.contains(&sam, "a"));
+    }
+
+    #[test]
+    fn an_old_entry_has_no_library_and_its_files_come_from_its_names() -> TestResult {
+        // A byte copy of ~/.config/sdl/review.toml as it was when libraries were added.
+        let text = include_str!("../tests/fixtures/review-before-libraries.toml");
+        let path = std::path::Path::new("/r.toml");
+        let list: ReviewList = crate::storage::parse(text, path)?;
+        let only = list.songs().first().ok_or("entry lost")?;
+        assert_eq!(list.len(), 1);
+        assert_eq!(only.library, LibraryId::Own);
+        assert_eq!(only.song.key(), "f3_jWbM20AY");
+        assert!(list.contains(&LibraryId::Own, "f3_jWbM20AY"));
+        assert_eq!(only.playlist_files(), Vec::<String>::new());
+        let mut named = only.clone();
+        named.from = vec!["Road: trip".into()];
+        assert_eq!(named.playlist_files(), ["Road trip.m3u8"]);
+        // A list written under its ID keeps that file name.
+        named.from = vec!["???".into()];
+        named.from_files = vec!["37i9dQZF1DX.m3u8".into()];
+        assert_eq!(named.playlist_files(), ["37i9dQZF1DX.m3u8"]);
+        Ok(())
     }
 }

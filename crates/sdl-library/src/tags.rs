@@ -15,7 +15,7 @@ use musicbrainz_rs::entity::genre::Genre;
 use musicbrainz_rs::entity::recording::{Recording, RecordingSearchQuery};
 use musicbrainz_rs::entity::release::Release;
 use musicbrainz_rs::prelude::*;
-use sdl_core::{Place, WantedSong};
+use sdl_core::{Library, Place, WantedSong};
 use tokio::sync::OnceCell;
 
 use crate::LibraryError;
@@ -288,14 +288,14 @@ fn fill_tag(tag: &mut Tag, song: &WantedSong, enrichment: &Enrichment) {
     }
 }
 
-/// Where a file that carries tags belongs in the library under `music_root` (F10, From device):
+/// Where a file that carries tags belongs in `library` (F10, F12, From device):
 /// album artist (else first artist), album (else `Singles`) and title from its tags, by
 /// [`Place::new`], with the file's stem as the ID fallback. `None` when the file has no title or
 /// no artist tag; the caller then files it under `Unsorted` (F10).
 ///
 /// # Errors
 /// [`LibraryError::Tag`] when the file cannot be read.
-pub fn place_from_tags(file: &Path, music_root: &Path) -> Result<Option<Place>, LibraryError> {
+pub fn place_from_tags(file: &Path, library: &Library) -> Result<Option<Place>, LibraryError> {
     let tagged = lofty::read_from_path(file).map_err(|e| LibraryError::Tag {
         path: file.to_path_buf(),
         message: e.to_string(),
@@ -319,7 +319,7 @@ pub fn place_from_tags(file: &Path, music_root: &Path) -> Result<Option<Place>, 
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     Ok(Some(Place::new(
-        music_root,
+        library,
         artist,
         text(ItemKey::AlbumTitle),
         title,
@@ -360,7 +360,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&cache.cell("r"), &cache.cell("q")));
     }
 
-    use crate::testkit::{TestResult, make_audio, make_cover};
+    use crate::testkit::{TestResult, lib, make_audio, make_cover};
     use sdl_core::SongSource;
 
     fn wanted(source: SongSource) -> WantedSong {
@@ -518,9 +518,9 @@ mod tests {
         let mut tag = Tag::new(tagged.primary_tag_type());
         fill_tag(&mut tag, &song, &Enrichment::default());
         tag.save_to_path(&file, WriteOptions::default())?;
-        let place = place_from_tags(&file, &root)?.ok_or("no place")?;
+        let place = place_from_tags(&file, &lib(&root))?.ok_or("no place")?;
         // No album artist tag: the first artist.
-        assert_eq!(place, Place::of(&root, &song));
+        assert_eq!(place, Place::of(&lib(&root), &song));
         assert_eq!(
             place.path(sdl_core::Format::Opus),
             root.join("Miles Davis/Kind of Blue/Blue in Green.opus")
@@ -533,14 +533,14 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let bare = dir.path().join("bare.opus");
         make_audio(&bare, 1)?;
-        assert_eq!(place_from_tags(&bare, dir.path())?, None);
+        assert_eq!(place_from_tags(&bare, &lib(dir.path()))?, None);
         let half = dir.path().join("half.opus");
         make_audio(&half, 1)?;
         let mut tag = Tag::new(lofty::read_from_path(&half)?.primary_tag_type());
         tag.set_title("Only a title".to_owned());
         tag.save_to_path(&half, WriteOptions::default())?;
-        assert_eq!(place_from_tags(&half, dir.path())?, None);
-        let missing = place_from_tags(&dir.path().join("gone.opus"), dir.path());
+        assert_eq!(place_from_tags(&half, &lib(dir.path()))?, None);
+        let missing = place_from_tags(&dir.path().join("gone.opus"), &lib(dir.path()));
         assert!(matches!(missing, Err(LibraryError::Tag { .. })));
         Ok(())
     }

@@ -9,7 +9,7 @@ use sdl_core::StoreError;
 use sdl_core::place::remove_tmp_dir_if_empty;
 use sdl_core::{
     Config, ConvertChoice, Device, DeviceChoice, ErrorInfo, Event, EventKind, EventSender,
-    HeldSong, LastRun, ReviewList, RunOutcome, State, StopFlag, TaskId,
+    HeldSong, LastRun, Library, LibraryId, Never, ReviewList, RunOutcome, State, StopFlag, TaskId,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
@@ -135,23 +135,22 @@ impl TaskContext {
             .clone()
     }
 
-    /// Whether the song with `key` is in the review list (read without copying the list).
+    /// Whether the song with `key` is held for `library` (read without copying the list).
     #[must_use]
-    pub fn is_held(&self, key: &str) -> bool {
+    pub fn is_held(&self, library: &LibraryId, key: &str) -> bool {
         self.review
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains(key)
+            .contains(library, key)
     }
 
-    /// Whether the song with `key` was marked "never download".
+    /// Whether the song with `key` was marked "never download" in `library`.
     #[must_use]
-    pub fn is_never(&self, key: &str) -> bool {
+    pub fn is_never(&self, library: &LibraryId, key: &str) -> bool {
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .never
-            .contains(key)
+            .is_never(library, key)
     }
 
     /// Change the state and save it, holding the lock so concurrent tasks cannot save out of
@@ -197,14 +196,60 @@ impl TaskContext {
         self.update_state(|state| state.ticked_lists = ids)
     }
 
-    /// Remember a device's choices and that it was the last one used.
+    /// Remember a device's choices, its name as shown ([`Device::label`], so the main panel can
+    /// name it after a restart) and that it was the last one used.
     ///
     /// # Errors
     /// The state file could not be written.
-    pub fn remember_device(&self, device: &Device, choice: DeviceChoice) -> Result<(), StoreError> {
+    pub fn remember_device(
+        &self,
+        device: &Device,
+        mut choice: DeviceChoice,
+    ) -> Result<(), StoreError> {
+        choice.name = device.label();
         self.update_state(|state| {
+            // The form does not know which library the device was last synced from; the saved
+            // entry does.
+            if let Some(saved) = state.devices.get(device.id()) {
+                choice.last_synced.clone_from(&saved.last_synced);
+            }
             state.devices.insert(device.id().to_owned(), choice);
             state.last_device = Some(device.id().to_owned());
+        })
+    }
+
+    /// Remember that a To-device run copied `library` to `device` (F12: the form's note says when
+    /// another library was copied there before).
+    ///
+    /// # Errors
+    /// The state file could not be written.
+    pub fn remember_synced_library(
+        &self,
+        device: &Device,
+        library: LibraryId,
+    ) -> Result<(), StoreError> {
+        self.update_state(|state| {
+            state
+                .devices
+                .entry(device.id().to_owned())
+                .or_default()
+                .last_synced = Some(library);
+        })
+    }
+
+    /// Remember that this function added to `library`, so its form preselects it next time (F12).
+    /// The owner's own library is the "For me" toggle and is not remembered.
+    ///
+    /// # Errors
+    /// The state file could not be written.
+    pub fn remember_friend(&self, library: &Library) -> Result<(), StoreError> {
+        if library.is_own() {
+            return Ok(());
+        }
+        let task = self.task();
+        let name = library.name().to_owned();
+        self.update_state(|state| {
+            state.last_friend.insert(task, name);
         })
     }
 
@@ -216,13 +261,13 @@ impl TaskContext {
         self.update_state(|state| state.convert = choice)
     }
 
-    /// Add a song to the "never download" set (by `WantedSong::key`).
+    /// Add a song to the "never download" set of `library` (by `WantedSong::key`).
     ///
     /// # Errors
     /// The state file could not be written.
-    pub fn mark_never(&self, key: String) -> Result<(), StoreError> {
+    pub fn mark_never(&self, library: LibraryId, key: String) -> Result<(), StoreError> {
         self.update_state(|state| {
-            state.never.insert(key);
+            state.never.insert(Never { library, key });
         })
     }
 
@@ -321,8 +366,9 @@ struct Running {
 ///
 /// * [`Runner::start`] starts a task (or fails with [`StartError::AlreadyRunning`]); its first
 ///   event, a headline, arrives at once. The UI then drives the one step form with [`Command`]s
-///   through [`Runner::send`]: `Answer` (as often as the owner changes a row), `Offer` (Sync
-///   device), `Go`, `Cancel`.
+///   through [`Runner::send`]: `Answer` (as often as the owner changes a row), `Offer`, `Go`,
+///   `Cancel`. Four forms choose a library (F12) and so also get `Libraries(..)` when they open and
+///   answer `Offer::Libraries` with it again.
 /// * [`Runner::stop`] ends a running task from outside (the `s` key, after its confirmation):
 ///   Sync Spotify, Download link and Review are aborted; Convert and Sync device finish the file in
 ///   hand, then end. Either way the last-run line says "stopped" with the count finished.
@@ -342,22 +388,24 @@ struct Running {
 /// * **Sync Spotify**: `Headline`. With no working stored sign-in: `SignIn(NeedsBrowser)`, and the
 ///   task waits; `Go` continues to the browser sign-in (`SignIn(WaitingForBrowser)`), `Cancel`
 ///   ends it. `SignIn(KeychainProblem)` at most once. Then `SignIn(SignedIn)`, `Lists(..)`.
-///   `Answer(SyncSpotify { lists })` (ticked ids are saved): `Headline`s while listing,
+///   `Answer(SyncSpotify { lists, recipient })` (ticked ids are saved): `Headline`s while listing,
 ///   `NewOfTotal`. `Go`: `Started`, `Headline`s, `Counts` (a full snapshot after every song),
 ///   `Attention`, `HeldCount`, `Finished`.
-/// * **Download link**: `Headline`. `Answer(DownloadLink { url })` starts the run at once:
+/// * **Download link**: `Headline`. `Answer(DownloadLink { url, recipient })` starts the run at once:
 ///   `Started`, `Headline`s (reading the link: no total yet), `Counts`, `Attention`, `HeldCount`,
 ///   `Finished`.
 /// * **Review**: `Headline`; the held songs are [`Runner::review`]. `Answer(Review { choices })`
 ///   starts the run at once: `Started`, `Headline`s, `Counts`, `Attention`, `HeldCount`,
 ///   `Finished`.
 /// * **Sync device**: `Headline`, `Devices(..)` (empty means none; sent again when a volume
-///   appears or goes), `Playlists(..)`. `Offer::Devices`: `Devices`. `Offer::Folders(device)`:
+///   appears or goes), `Libraries(..)`, `Playlists(..)` (the owner's own library's).
+///   `Offer::Playlists(library)`: `Playlists` of that library. `Offer::Devices`: `Devices`. `Offer::Folders(device)`:
 ///   `Folders`. `Answer(SyncDevice { device, choice })` (saved per device): `Headline`, `Plan`.
 ///   `Go`: `Started`, `Headline`, `Counts`, `Attention`, `Finished`. Then the UI asks "Clean up
 ///   and eject <device>?" and on yes awaits [`Runner::eject_device`], showing that it is
 ///   ejecting until the future ends.
-/// * **Convert**: `Headline`, `Playlists(..)`. `Answer(Convert(choice))` (saved): `Headline`,
+/// * **Convert**: `Headline`, `Libraries(..)`, `Playlists(..)` (the owner's own library's);
+///   `Offer::Playlists(library)` answers as in Sync device. `Answer(Convert(choice))` (saved): `Headline`,
 ///   `Plan`; a destination inside the library comes back as a plan with a `refusal`. `Go`:
 ///   `Started`, `Headline`, `Counts`, `Attention`, `Finished`.
 ///
@@ -493,7 +541,13 @@ impl Runner {
             return false;
         }
         if !running.context.events.snapshot().started {
-            return running.commands.send(Command::Cancel).is_ok();
+            let sent = running.commands.send(Command::Cancel).is_ok();
+            // The run may have started between the check and the send, and then nothing reads the
+            // `Cancel`. Look again after sending: a run that has started is stopped below, and one
+            // that has not will find the `Cancel` when it starts (`conversation::run`).
+            if !running.context.events.snapshot().started {
+                return sent;
+            }
         }
         if matches!(task, TaskId::Convert | TaskId::SyncDevice) {
             running.context.stop.request();
@@ -522,8 +576,9 @@ impl Runner {
             return None;
         }
         running.handle.abort();
-        let _ = running.handle.await; // Err(cancelled) is the expected result of an abort.
-        Some(running.context)
+        // `Err(cancelled)` is the expected result of an abort. `Ok` means the task ended by
+        // itself before the abort took effect, and has already sent its own terminal event.
+        running.handle.await.err().map(|_| running.context)
     }
 
     /// Clean up and eject the device the last Sync device run wrote to
@@ -602,6 +657,7 @@ mod tests {
         let config = Config {
             client_id: "id".into(),
             music_root: dir.join("music"),
+            my_library: "Me".into(),
             download_jobs: NonZeroUsize::MIN,
             animations: true,
         };
@@ -761,7 +817,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let (mut runner, mut rx) = runner(dir.path());
         runner.spawn(TaskId::Review, |context, _commands| async move {
-            let _ = context.mark_never("t1".into());
+            let _ = context.mark_never(LibraryId::Own, "t1".into());
             let _ = context.remember_ticked(vec!["liked-songs".into()]);
         })?;
         runner.spawn(TaskId::SyncSpotify, |context, _commands| async move {
@@ -771,7 +827,7 @@ mod tests {
         assert_eq!(event.kind, EventKind::HeldCount(0));
         tokio::task::yield_now().await;
         let state = runner.state();
-        assert!(state.never.contains("t1"));
+        assert!(state.is_never(&LibraryId::Own, "t1"));
         assert_eq!(state.ticked_lists, ["liked-songs"]);
         assert_eq!(State::load_from(&dir.path().join("state.toml"))?, state);
         assert!(dir.path().join("review.toml").exists());
@@ -838,8 +894,47 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn a_remembered_device_keeps_its_name_for_the_next_start() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (runner, _rx) = runner(dir.path());
+        let device = Device {
+            name: "DISC".into(),
+            mount_point: "/Volumes/DISC".into(),
+            volume_uuid: Some("U1".into()),
+            free_bytes: 0,
+            disk_image: true,
+        };
+        runner
+            .context(TaskId::SyncDevice)
+            .remember_device(&device, DeviceChoice::default())?;
+        let reloaded = State::load_from(&dir.path().join("state.toml"))?;
+        assert_eq!(reloaded.last_device_name(), Some("DISC (disk image)"));
+        Ok(())
+    }
+
+    #[test]
+    fn the_friend_last_added_to_is_remembered_but_the_owner_is_not() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (runner, _rx) = runner(dir.path());
+        let context = runner.context(TaskId::DownloadLink);
+        context.remember_friend(&Library::at("Me", &dir.path().join("Me"), true))?;
+        assert!(runner.state().last_friend.is_empty());
+        context.remember_friend(&Library::at("Sam", &dir.path().join("Sam"), false))?;
+        let reloaded = State::load_from(&dir.path().join("state.toml"))?;
+        assert_eq!(
+            reloaded
+                .last_friend
+                .get(&TaskId::DownloadLink)
+                .map(String::as_str),
+            Some("Sam")
+        );
+        Ok(())
+    }
+
     fn held(key: &str) -> HeldSong {
         HeldSong {
+            library: LibraryId::Own,
             song: sdl_core::WantedSong {
                 source: sdl_core::SongSource::Spotify {
                     track_id: key.into(),
@@ -856,6 +951,7 @@ mod tests {
                 cover_url: None,
             },
             from: Vec::new(),
+            from_files: Vec::new(),
             candidates: Vec::new(),
             reason: "no result".into(),
         }
@@ -885,7 +981,7 @@ mod tests {
             barrier.wait();
             for n in 0..200 {
                 review.update_review(|list| {
-                    list.resolve(&format!("old{n}"));
+                    list.resolve(&LibraryId::Own, &format!("old{n}"));
                 })?;
             }
             Ok(())
@@ -900,8 +996,8 @@ mod tests {
             200,
             "every new song kept, every landed one gone"
         );
-        assert!((0..200).all(|n| list.contains(&format!("new{n}"))));
-        assert!((0..200).all(|n| !list.contains(&format!("old{n}"))));
+        assert!((0..200).all(|n| list.contains(&LibraryId::Own, &format!("new{n}"))));
+        assert!((0..200).all(|n| !list.contains(&LibraryId::Own, &format!("old{n}"))));
         assert_eq!(
             ReviewList::load_from(&dir.path().join("review.toml"))?,
             list
@@ -952,6 +1048,57 @@ mod tests {
             run.attention.first().map(|a| a.reason.as_str()),
             Some("gone")
         );
+        Ok(())
+    }
+
+    /// A step whose every answer starts the run, and whose run never ends by itself.
+    struct Runs;
+
+    impl crate::conversation::Step for Runs {
+        fn open(&mut self) -> impl Future<Output = Result<crate::conversation::Opened, TaskError>> {
+            std::future::ready(Ok(crate::conversation::Opened::Ready))
+        }
+
+        fn answer(
+            &mut self,
+            _answers: crate::conversation::Answers,
+        ) -> impl Future<Output = Result<crate::conversation::Answered, TaskError>> {
+            std::future::ready(Ok(crate::conversation::Answered::Run))
+        }
+
+        fn go(&mut self) -> impl Future<Output = Result<Flow, TaskError>> {
+            std::future::pending()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stop_at_the_instant_a_run_starts_still_stops_it() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        for _ in 0..300 {
+            let (mut runner, mut rx) = runner(dir.path());
+            runner.spawn(TaskId::DownloadLink, |context, commands| async move {
+                let result = drive(&mut Runs, &context.events, commands).await;
+                context.conclude(result);
+            })?;
+            // The answer starts the run on another thread while this one stops it: whichever way
+            // the two interleave, the run must end with `Stopped` and not carry on for ever.
+            let answer = Command::Answer(crate::conversation::Answers::DownloadLink {
+                url: "u".into(),
+                recipient: crate::conversation::Recipient::Me,
+            });
+            assert!(runner.send(TaskId::DownloadLink, answer));
+            runner.stop(TaskId::DownloadLink).await;
+            let ended = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while let Some(event) = rx.recv().await {
+                    if event.kind == EventKind::Stopped {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await;
+            assert_eq!(ended, Ok(true), "the stop was lost and the run carried on");
+        }
         Ok(())
     }
 

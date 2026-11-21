@@ -94,7 +94,7 @@ impl App {
             }
             Some(Popup::Confirm(Confirm::Browser)) => {
                 if yes {
-                    vec![Cmd::Send(TaskId::SyncSpotify, Command::Go)]
+                    vec![Cmd::send(TaskId::SyncSpotify, Command::Go)]
                 } else {
                     self.cancel_sign_in()
                 }
@@ -252,7 +252,7 @@ mod tests {
         app.popups.push(Popup::Confirm(Confirm::Browser));
         assert_eq!(
             app.update(key(KeyCode::Enter), clock()),
-            vec![Cmd::Send(TaskId::SyncSpotify, Command::Go)]
+            vec![Cmd::send(TaskId::SyncSpotify, Command::Go)]
         );
     }
 

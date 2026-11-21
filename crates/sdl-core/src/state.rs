@@ -1,15 +1,13 @@
 //! `~/.config/sdl/state.toml`: everything remembered between runs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use std::collections::BTreeSet;
-
 use crate::config::config_dir;
 use crate::storage::{self, StoreError};
-use crate::{Attention, ConvertChoice, Counts, DeviceChoice, Format, TaskId};
+use crate::{Attention, ConvertChoice, Counts, DeviceChoice, Format, LibraryId, TaskId};
 
 /// How a run ended; it picks the colour of the last-run line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +89,45 @@ impl From<RawLastRun> for LastRun {
     }
 }
 
+/// A song marked "Never download" in one library (F8, F12): the same song is still wanted in
+/// another library.
+///
+/// Files written before libraries kept each entry as a bare key; those read as the owner's own
+/// library.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(from = "RawNever")]
+pub struct Never {
+    /// The library it applies to.
+    #[serde(skip_serializing_if = "LibraryId::is_own")]
+    pub library: LibraryId,
+    /// The song, by [`crate::WantedSong::key`].
+    pub key: String,
+}
+
+/// A "never" entry as stored: a bare key (old files) or a table.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawNever {
+    Key(String),
+    Entry {
+        key: String,
+        #[serde(default)]
+        library: LibraryId,
+    },
+}
+
+impl From<RawNever> for Never {
+    fn from(raw: RawNever) -> Self {
+        match raw {
+            RawNever::Key(key) => Self {
+                library: LibraryId::Own,
+                key,
+            },
+            RawNever::Entry { key, library } => Self { library, key },
+        }
+    }
+}
+
 /// Everything remembered between runs. Every field has a default, and keys this version does not
 /// know (the old `formats` table, a device's old keys) are ignored, so a file written by an older
 /// version loads.
@@ -105,19 +142,40 @@ pub struct State {
     /// What was chosen per device, keyed by [`crate::Device::id`].
     #[serde(default)]
     pub devices: BTreeMap<String, DeviceChoice>,
-    /// The [`crate::Device::id`] of the device last synced; preselected next time.
+    /// The [`crate::Device::id`] of the device last synced; preselected next time. Its name is
+    /// `devices[id].name` ([`State::last_device_name`]).
     #[serde(default)]
     pub last_device: Option<String>,
-    /// Songs marked "Never download", by [`crate::WantedSong::key`]. A sync never searches for
-    /// them again.
+    /// Songs marked "Never download", each in its library. A sync never searches for them again.
     #[serde(default)]
-    pub never: BTreeSet<String>,
+    pub never: BTreeSet<Never>,
+    /// The other library each download function (Sync Spotify, Download link) last used, by name;
+    /// preselected next time (F12). Absent for a function that has only been used "For me".
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_friend: BTreeMap<TaskId, String>,
     /// Last-run line, time, outcome and attention items per function.
     #[serde(default)]
     pub last_run: BTreeMap<TaskId, LastRun>,
 }
 
 impl State {
+    /// Whether `key` ([`crate::WantedSong::key`]) was marked "Never download" in `library`.
+    #[must_use]
+    pub fn is_never(&self, library: &LibraryId, key: &str) -> bool {
+        self.never
+            .iter()
+            .any(|entry| entry.library == *library && entry.key == key)
+    }
+
+    /// The name of the device last synced, as saved with its choices, so the main panel can show
+    /// it after a restart. `None` before any device was synced, or for a device saved before names
+    /// were kept.
+    #[must_use]
+    pub fn last_device_name(&self) -> Option<&str> {
+        let saved = self.devices.get(self.last_device.as_deref()?)?;
+        Some(saved.name.as_str()).filter(|name| !name.is_empty())
+    }
+
     /// Path of the state file, `~/.config/sdl/state.toml`.
     ///
     /// # Errors
@@ -205,6 +263,9 @@ mod tests {
         devices.insert(
             "AAAA-BBBB".to_owned(),
             DeviceChoice {
+                name: "SNOWSKY".into(),
+                library: LibraryId::Other("Sam".into()),
+                last_synced: Some(LibraryId::Own),
                 direction: crate::Direction::FromDevice,
                 what: Selection {
                     whole_library: true,
@@ -220,8 +281,19 @@ mod tests {
             ticked_lists: vec!["liked-songs".into(), "37i9dQZF1DX".into()],
             devices,
             last_device: Some("AAAA-BBBB".into()),
-            never: BTreeSet::from(["track1".to_owned()]),
+            never: BTreeSet::from([
+                Never {
+                    library: LibraryId::Own,
+                    key: "track1".into(),
+                },
+                Never {
+                    library: LibraryId::Other("Sam".into()),
+                    key: "track1".into(),
+                },
+            ]),
+            last_friend: BTreeMap::from([(TaskId::DownloadLink, "Sam".to_owned())]),
             convert: ConvertChoice {
+                library: LibraryId::Other("Sam".into()),
                 what: Selection::default(),
                 format: Format::M4a,
                 quality: Quality::Medium,
@@ -320,7 +392,65 @@ at = 7
         assert_eq!(outcome(TaskId::DownloadLink), Some(RunOutcome::Done));
         assert_eq!(outcome(TaskId::SyncDevice), Some(RunOutcome::Done));
         assert!(state.never.is_empty() && state.last_device.is_none());
+        assert_eq!(device.library, LibraryId::Own);
+        assert_eq!(state.convert.library, LibraryId::Own);
+        assert_eq!(state.last_device_name(), None);
         Ok(())
+    }
+
+    #[test]
+    fn the_owners_current_state_file_loads_and_everything_in_it_means_the_own_library() -> TestResult
+    {
+        // A byte copy of ~/.config/sdl/state.toml as it was when libraries were added.
+        let text = include_str!("../tests/fixtures/state-before-libraries.toml");
+        let state = State::parse(text, Path::new("/s.toml"))?;
+        let device = state
+            .devices
+            .get("0481966B-99D3-369A-B6B0-EE83F5D07E45")
+            .ok_or("device choice lost")?;
+        assert_eq!(device.library, LibraryId::Own);
+        assert!(device.name.is_empty() && device.last_synced.is_none());
+        assert_eq!(state.convert.library, LibraryId::Own);
+        assert!(state.convert.what.whole_library);
+        assert!(state.never.is_empty() && state.last_friend.is_empty());
+        let line = |task| state.last_run.get(&task).map(|run| run.line.as_str());
+        assert_eq!(line(TaskId::Convert), Some("1 converted"));
+        assert_eq!(
+            state
+                .last_run
+                .get(&TaskId::DownloadLink)
+                .map(|run| run.attention.len()),
+            Some(1)
+        );
+        // Saving what was loaded writes nothing about libraries.
+        let again = toml::to_string(&state)?;
+        assert!(
+            !again.contains("\nlibrary")
+                && !again.contains("last_friend")
+                && !again.contains("last_synced"),
+            "{again}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn old_never_entries_are_bare_keys_and_mean_the_own_library() -> TestResult {
+        let state = State::parse(
+            "never = [\"a\", { key = \"b\", library = \"Sam\" }, { key = \"c\" }]\n",
+            Path::new("/s.toml"),
+        )?;
+        let own = LibraryId::Own;
+        let sam = LibraryId::Other("Sam".into());
+        assert!(state.is_never(&own, "a") && state.is_never(&own, "c"));
+        assert!(state.is_never(&sam, "b") && !state.is_never(&own, "b"));
+        assert!(!state.is_never(&sam, "a"));
+        Ok(())
+    }
+
+    #[test]
+    fn the_last_device_is_named_after_a_restart() {
+        assert_eq!(sample().last_device_name(), Some("SNOWSKY"));
+        assert_eq!(State::default().last_device_name(), None);
     }
 
     #[test]

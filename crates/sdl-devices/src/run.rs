@@ -279,7 +279,7 @@ impl Run<'_> {
             if !stays_inside(Path::new(stem)) {
                 continue;
             }
-            match playlists::write_for_destination(&self.plan.music_root, &music_dir, stem) {
+            match playlists::write_for_destination(&self.plan.library, &music_dir, stem) {
                 Ok(_) => {
                     let file = music_dir.join(format!("{stem}.{PLAYLIST_EXTENSION}"));
                     if file.try_exists().unwrap_or(false) {
@@ -379,6 +379,7 @@ mod tests {
 
     use super::*;
     use crate::plan::plan;
+    use crate::testing::lib;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -429,7 +430,7 @@ mod tests {
             "#EXTM3U\n#PLAYLIST:Mix\nA/Al/one.opus\nA/Al/two.opus\n",
         )?;
         let device = device(dev.path());
-        let plan = plan(root.path(), &device, &choice(&["Mix"])).await?;
+        let plan = plan(&lib(root.path()), &device, &choice(&["Mix"])).await?;
         // Taken between the plan and the run, in another format: never replaced.
         touch(&dev.path().join("Music/A/Al/two.m4a"), b"theirs")?;
         let (events, mut rx) = sender();
@@ -489,7 +490,7 @@ mod tests {
                 b"data",
             )?;
         }
-        let plan = plan(root.path(), &device(dev.path()), &choice(&[])).await?;
+        let plan = plan(&lib(root.path()), &device(dev.path()), &choice(&[])).await?;
         let (events, mut rx) = sender();
         let stop = StopFlag::new();
         let asker = stop.clone();
@@ -526,7 +527,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         touch(&root.path().join("A/Al/one.opus"), b"one")?;
         let gone = device(Path::new("/this-volume-is-not-mounted/DEV"));
-        let plan = plan(root.path(), &gone, &choice(&[])).await?;
+        let plan = plan(&lib(root.path()), &gone, &choice(&[])).await?;
         let (events, _rx) = sender();
         let error = run(&plan, &events, &StopFlag::new()).await.err();
         assert!(
@@ -546,7 +547,7 @@ mod tests {
         let dev = tempfile::tempdir()?;
         touch(&root.path().join("A/Al/one.opus"), b"one")?;
         touch(&root.path().join("A/Al/two.opus"), b"two")?;
-        let plan = plan(root.path(), &device(dev.path()), &choice(&[])).await?;
+        let plan = plan(&lib(root.path()), &device(dev.path()), &choice(&[])).await?;
         std::fs::remove_file(root.path().join("A/Al/one.opus"))?;
         let (events, mut rx) = sender();
         let report = run(&plan, &events, &StopFlag::new()).await?;
@@ -604,7 +605,7 @@ mod tests {
             ..DeviceChoice::default()
         };
         let device = device(dev.path());
-        let first = plan(root.path(), &device, &choice).await?;
+        let first = plan(&lib(root.path()), &device, &choice).await?;
         let (events, _rx) = sender();
         let report = run(&first, &events, &StopFlag::new()).await?;
         assert_eq!((report.added, report.failed), (2, 0));
@@ -620,7 +621,7 @@ mod tests {
         // The same plan again: the places are taken now, so nothing is written or replaced.
         let again = run(&first, &events, &StopFlag::new()).await?;
         assert_eq!((again.added, again.skipped), (0, 2));
-        let fresh = plan(root.path(), &device, &choice).await?;
+        let fresh = plan(&lib(root.path()), &device, &choice).await?;
         assert_eq!((fresh.summary().files, fresh.summary().already), (0, 2));
         // Nothing on the device was touched.
         assert_eq!(std::fs::read(dev.path().join("Old/tagged.mp3"))?, tagged);

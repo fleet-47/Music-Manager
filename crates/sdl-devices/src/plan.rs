@@ -9,7 +9,8 @@ use sdl_core::format::is_audio_file;
 use sdl_core::place::{component, device_music_dir};
 use sdl_core::playlist::PLAYLIST_EXTENSION;
 use sdl_core::{
-    Device, DeviceChoice, Direction, Format, PlanSummary, Playlist, Selection, library_files,
+    Device, DeviceChoice, Direction, Format, Library, PlanSummary, Playlist, Selection,
+    library_files,
 };
 use sdl_library::converter::output_size;
 use sdl_library::{LibraryError, tags};
@@ -26,7 +27,7 @@ const UNSORTED: &str = "Unsorted";
 pub struct DevicePlan {
     pub(crate) summary: PlanSummary,
     pub(crate) device: Device,
-    pub(crate) music_root: PathBuf,
+    pub(crate) library: Library,
     pub(crate) choice: DeviceChoice,
     /// `(source, destination)` file pairs, copy or convert.
     pub(crate) jobs: Vec<(PathBuf, PathBuf)>,
@@ -55,7 +56,9 @@ impl DevicePlan {
     }
 }
 
-/// Plan a sync for `choice.direction`.
+/// Plan a sync for `choice.direction`, reading from (To device) or writing into (From device)
+/// `library`, which the caller resolved from `choice.library` (F12). Songs on the device have no
+/// library level: `<device>/Music/<artist>/<album>/<file>`.
 ///
 /// - **To device**: each song of the chosen selection (`choice.what`: whole library
 ///   via `sdl_core::library_files`, and each ticked playlist's songs that exist) maps to
@@ -75,12 +78,12 @@ impl DevicePlan {
 /// cannot be read never fails the plan (From device: it goes to `Unsorted`; To device: its size
 /// is estimated from the file itself, `sdl_library::converter::output_size`).
 pub async fn plan(
-    music_root: &Path,
+    library: &Library,
     device: &Device,
     choice: &DeviceChoice,
 ) -> Result<DevicePlan, DevicesError> {
-    let (music_root, device, choice) = (music_root.to_path_buf(), device.clone(), choice.clone());
-    tokio::task::spawn_blocking(move || build(music_root, device, choice))
+    let (library, device, choice) = (library.clone(), device.clone(), choice.clone());
+    tokio::task::spawn_blocking(move || build(library, device, choice))
         .await
         .map_err(|error| joined(&error))?
 }
@@ -90,13 +93,13 @@ fn joined(error: &tokio::task::JoinError) -> DevicesError {
 }
 
 fn build(
-    music_root: PathBuf,
+    library: Library,
     device: Device,
     choice: DeviceChoice,
 ) -> Result<DevicePlan, DevicesError> {
     let (jobs, already, bytes, estimated) = match choice.direction {
-        Direction::ToDevice => plan_to_device(&music_root, &device, &choice)?,
-        Direction::FromDevice => plan_from_device(&music_root, &device, &choice)?,
+        Direction::ToDevice => plan_to_device(&library, &device, &choice)?,
+        Direction::FromDevice => plan_from_device(&library, &device, &choice)?,
     };
     let free_bytes = match choice.direction {
         Direction::ToDevice => Some(device.free_bytes),
@@ -116,7 +119,7 @@ fn build(
             refusal,
         },
         device,
-        music_root,
+        library,
         choice,
         jobs,
         written: Arc::default(),
@@ -145,15 +148,15 @@ fn nothing_to_copy(device: &Device, direction: Direction, already: usize) -> Str
 type Planned = (Vec<(PathBuf, PathBuf)>, usize, u64, bool);
 
 fn plan_to_device(
-    music_root: &Path,
+    library: &Library,
     device: &Device,
     choice: &DeviceChoice,
 ) -> Result<Planned, DevicesError> {
     let preset = choice.preset();
     let dest_root = device_music_dir(&device.mount_point);
     let (mut jobs, mut already, mut bytes, mut estimated) = (Vec::new(), 0_usize, 0_u64, false);
-    for src in selected_files(music_root, &choice.what)? {
-        let Ok(relative) = src.strip_prefix(music_root) else {
+    for src in selected_files(library, &choice.what)? {
+        let Ok(relative) = src.strip_prefix(library.root()) else {
             continue;
         };
         let converts = preset.is_some_and(|preset| !preset.format.holds(&src));
@@ -177,10 +180,11 @@ fn plan_to_device(
 /// The library files the selection names: every library file when the whole library is ticked,
 /// and each ticked playlist's songs that exist (a line is followed in any format, since review can
 /// land a song with another extension). Sorted, each once, never a dot name.
-fn selected_files(music_root: &Path, what: &Selection) -> Result<BTreeSet<PathBuf>, DevicesError> {
+fn selected_files(library: &Library, what: &Selection) -> Result<BTreeSet<PathBuf>, DevicesError> {
+    let music_root = library.root();
     let mut files = BTreeSet::new();
     if what.whole_library {
-        files.extend(library_files(music_root).map_err(io_err(music_root))?);
+        files.extend(library_files(library).map_err(io_err(music_root))?);
     }
     for stem in &what.playlists {
         if !stays_inside(Path::new(stem)) {
@@ -208,7 +212,7 @@ fn selected_files(music_root: &Path, what: &Selection) -> Result<BTreeSet<PathBu
 }
 
 fn plan_from_device(
-    music_root: &Path,
+    library: &Library,
     device: &Device,
     choice: &DeviceChoice,
 ) -> Result<Planned, DevicesError> {
@@ -233,7 +237,7 @@ fn plan_from_device(
             if !entry.file_type().is_file() || !is_audio_file(entry.path()) {
                 continue;
             }
-            let dest = incoming_path(music_root, &device.mount_point, entry.path())?;
+            let dest = incoming_path(library, &device.mount_point, entry.path())?;
             if existing_in_any_format(&dest)?.is_some() {
                 already = already.saturating_add(1);
                 continue;
@@ -249,21 +253,20 @@ fn plan_from_device(
     Ok((jobs, already, bytes, false))
 }
 
-/// Where a file that comes from a device lands in the library under `music_root` (F10, From
-/// device). `file` is under `device.mount_point`. The place comes from the file's tags
+/// Where a file that comes from a device lands in `library` (F10, F12, From device). `file` is under `device.mount_point`. The place comes from the file's tags
 /// (`sdl_library::tags::place_from_tags`, F7) with the file's own extension; a file without a
 /// title or artist tag, or whose tags cannot be read, goes to
-/// `<music_root>/Unsorted/<its path relative to the device root>`, each component made safe like
+/// `<library folder>/Unsorted/<its path relative to the device root>`, each component made safe like
 /// any library name. A file that is not `.opus`, `.mp3` or `.m4a` is [`DevicesError::Io`].
-fn incoming_path(music_root: &Path, mount: &Path, file: &Path) -> Result<PathBuf, DevicesError> {
+fn incoming_path(library: &Library, mount: &Path, file: &Path) -> Result<PathBuf, DevicesError> {
     let Some(format) = Format::of(file) else {
         return Err(not_audio(file));
     };
     // A file whose tags cannot be read has no title or artist tag to go by: it goes to
     // `Unsorted` like an untagged file, so one odd file never blocks the plan.
-    match tags::place_from_tags(file, music_root) {
+    match tags::place_from_tags(file, library) {
         Ok(Some(place)) => Ok(place.path(format)),
-        Ok(None) | Err(LibraryError::Tag { .. }) => unsorted_path(music_root, mount, file),
+        Ok(None) | Err(LibraryError::Tag { .. }) => unsorted_path(library, mount, file),
         Err(other) => Err(other.into()),
     }
 }
@@ -278,13 +281,13 @@ fn not_audio(file: &Path) -> DevicesError {
     }
 }
 
-/// `<music_root>/Unsorted/<path of file relative to the device root>`, every component made safe;
+/// `<library folder>/Unsorted/<path of file relative to the device root>`, every component made safe;
 /// a component that is empty once made safe becomes `_`.
-fn unsorted_path(music_root: &Path, mount: &Path, file: &Path) -> Result<PathBuf, DevicesError> {
+fn unsorted_path(library: &Library, mount: &Path, file: &Path) -> Result<PathBuf, DevicesError> {
     let (Some(format), Ok(relative)) = (Format::of(file), file.strip_prefix(mount)) else {
         return Err(not_audio(file));
     };
-    let mut dest = music_root.join(UNSORTED);
+    let mut dest = library.root().join(UNSORTED);
     if let Some(folders) = relative.parent() {
         for part in folders.components() {
             dest.push(safe_part(&part.as_os_str().to_string_lossy()));
@@ -312,6 +315,7 @@ mod tests {
     use sdl_core::{Format, Quality};
 
     use super::*;
+    use crate::testing::lib;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -354,7 +358,12 @@ mod tests {
         touch(&root.path().join("A/.hidden/x.opus"), 5)?;
         // two is already on the device, in another format.
         touch(&dev.path().join("Music/A/Al/two.mp3"), 1)?;
-        let plan = plan(root.path(), &device(dev.path(), 10_000), &whole_library()).await?;
+        let plan = plan(
+            &lib(root.path()),
+            &device(dev.path(), 10_000),
+            &whole_library(),
+        )
+        .await?;
         let summary = plan.summary();
         assert_eq!((summary.files, summary.bytes, summary.already), (2, 400, 1));
         assert!(!summary.estimated);
@@ -372,14 +381,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_device_gets_one_librarys_songs_with_no_library_level() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let dev = tempfile::tempdir()?;
+        touch(&root.path().join("Me/A/Al/mine.opus"), 10)?;
+        touch(&root.path().join("Sam/B/Bl/theirs.opus"), 20)?;
+        let sam = Library::at("Sam", &root.path().join("Sam"), false);
+        let planned = plan(&sam, &device(dev.path(), 10_000), &whole_library()).await?;
+        let dests: Vec<_> = planned.jobs.iter().map(|(_, dest)| dest.clone()).collect();
+        assert_eq!(dests, [dev.path().join("Music/B/Bl/theirs.opus")]);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn not_enough_room_cannot_start() -> TestResult {
         let root = tempfile::tempdir()?;
         let dev = tempfile::tempdir()?;
         touch(&root.path().join("A/Al/one.opus"), 100)?;
-        let tight = plan(root.path(), &device(dev.path(), 99), &whole_library()).await?;
+        let tight = plan(&lib(root.path()), &device(dev.path(), 99), &whole_library()).await?;
         assert!(!tight.summary().fits());
         assert!(!tight.summary().can_start());
-        let exact = plan(root.path(), &device(dev.path(), 100), &whole_library()).await?;
+        let exact = plan(
+            &lib(root.path()),
+            &device(dev.path(), 100),
+            &whole_library(),
+        )
+        .await?;
         assert!(exact.summary().can_start());
         Ok(())
     }
@@ -403,7 +430,7 @@ mod tests {
             },
             ..DeviceChoice::default()
         };
-        let plan = plan(root.path(), &device(dev.path(), 1000), &choice).await?;
+        let plan = plan(&lib(root.path()), &device(dev.path(), 1000), &choice).await?;
         assert_eq!((plan.summary().files, plan.summary().bytes), (2, 30));
         Ok(())
     }
@@ -418,7 +445,7 @@ mod tests {
             quality: Quality::Small,
             ..whole_library()
         };
-        let plan = plan(root.path(), &device(dev.path(), 1000), &choice).await?;
+        let plan = plan(&lib(root.path()), &device(dev.path(), 1000), &choice).await?;
         assert_eq!(
             (plan.summary().bytes, plan.summary().estimated),
             (77, false)
@@ -432,7 +459,7 @@ mod tests {
         let root = Path::new("/lib");
         let mount = Path::new("/Volumes/D");
         let dest = unsorted_path(
-            root,
+            &lib(root),
             mount,
             &mount.join("Old Rips/CD 1/Mr. Song: live?.MP3"),
         )?;
@@ -440,10 +467,10 @@ mod tests {
             dest,
             PathBuf::from("/lib/Unsorted/Old Rips/CD 1/Mr. Song live.mp3")
         );
-        let odd = unsorted_path(root, mount, &mount.join("...x/?.m4a"))?;
+        let odd = unsorted_path(&lib(root), mount, &mount.join("...x/?.m4a"))?;
         assert_eq!(odd, PathBuf::from("/lib/Unsorted/x/_.m4a"));
-        assert!(unsorted_path(root, mount, &mount.join("a.flac")).is_err());
-        assert!(unsorted_path(root, mount, Path::new("/elsewhere/a.mp3")).is_err());
+        assert!(unsorted_path(&lib(root), mount, &mount.join("a.flac")).is_err());
+        assert!(unsorted_path(&lib(root), mount, Path::new("/elsewhere/a.mp3")).is_err());
         Ok(())
     }
 
@@ -474,7 +501,7 @@ mod tests {
             from_folders: vec!["Old".into()],
             ..DeviceChoice::default()
         };
-        let plan = plan(root.path(), &device(dev.path(), 0), &choice).await?;
+        let plan = plan(&lib(root.path()), &device(dev.path(), 0), &choice).await?;
         let summary = plan.summary();
         assert_eq!((summary.files, summary.already), (3, 1));
         assert_eq!(summary.free_bytes, None);
@@ -489,7 +516,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            incoming_path(root.path(), dev.path(), &dev.path().join("Old/tagged.mp3"))?,
+            incoming_path(
+                &lib(root.path()),
+                dev.path(),
+                &dev.path().join("Old/tagged.mp3")
+            )?,
             root.path().join("Band/Rec/Song One.mp3")
         );
         Ok(())

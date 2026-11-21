@@ -7,10 +7,12 @@
 //! saved) ends the run.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
 use sdl_core::{
-    Attention, EventKind, Format, HeldSong, MatchOutcome, Place, Preset, SongSource, WantedSong,
+    Attention, EventKind, Format, HeldSong, Library, MatchOutcome, Place, Playlist, Preset,
+    SongSource, WantedSong,
 };
 use sdl_library::LibraryError;
 use sdl_library::converter::convert_file;
@@ -34,6 +36,37 @@ pub(crate) enum Route {
     OwnAudio(String),
 }
 
+/// A playlist that lists a song: its name and the file name it is written under
+/// ([`Playlist::file_name`], with the list's ID as fallback). Held songs keep both, so a line can
+/// be corrected in the file that was written, whatever the name became once made safe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Listed {
+    pub(crate) name: String,
+    pub(crate) file: String,
+}
+
+impl Listed {
+    /// The playlist `name` with Spotify (or link) list `id`.
+    pub(crate) fn new(name: &str, id: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            file: Playlist::file_name(name, id),
+        }
+    }
+
+    /// The playlists a held song was listed in, with the files it kept.
+    pub(crate) fn of_held(held: &HeldSong) -> Vec<Self> {
+        held.from
+            .iter()
+            .zip(held.playlist_files())
+            .map(|(name, file)| Self {
+                name: name.clone(),
+                file,
+            })
+            .collect()
+    }
+}
+
 /// Takes wanted songs into the library for one run. Safe to share between the songs running at
 /// once.
 pub(crate) struct Intake<'a> {
@@ -55,18 +88,19 @@ impl<'a> Intake<'a> {
         }
     }
 
-    /// Take one song. `from` names the playlists that list it (held songs keep them, and a song
-    /// that lands in another format has its lines corrected there).
+    /// Take one song into `library`. `from` is the playlists that list it (held songs keep them,
+    /// and a song that lands in another format has its lines corrected there).
     ///
     /// # Errors
     /// Only a failure that ends the run ([`ends_the_run`]).
     pub(crate) async fn take(
         &self,
+        library: &Library,
         song: &WantedSong,
-        from: &[String],
+        from: &[Listed],
         route: Route,
     ) -> Result<Outcome, TaskError> {
-        match self.try_take(song, from, route).await {
+        match self.try_take(library, song, from, route).await {
             Err(error) if !ends_the_run(&error) => {
                 Ok(failed(&song.title, &song.artists_joined(), &error))
             }
@@ -85,31 +119,40 @@ impl<'a> Intake<'a> {
 
     async fn try_take(
         &self,
+        library: &Library,
         song: &WantedSong,
-        from: &[String],
+        from: &[Listed],
         route: Route,
     ) -> Result<Outcome, TaskError> {
+        // The temp folders are under the music root, on the same volume as every library.
         let root = &self.context.config.music_root;
-        let place = Place::of(root, song);
+        let place = Place::of(library, song);
         if place.present()?.is_some() {
             return Ok(Outcome::Skipped);
         }
         // A song that is held, or was marked "never", is never searched again (F8). Review takes
         // held songs by another route.
         if route == Route::Search {
-            if self.context.is_held(song.key()) {
+            let id = library.id();
+            if self.context.is_held(&id, song.key()) {
                 return Ok(Outcome::Held(Attention::held(
                     song.title.clone(),
                     song.artists_joined(),
                     "Already waiting in Review: choose a match there.".to_owned(),
                 )));
             }
-            if self.context.is_never(song.key()) {
+            if self.context.is_never(&id, song.key()) {
                 return Ok(Outcome::Skipped);
             }
         }
         if !self.claim(&place) {
             return Ok(Outcome::Skipped);
+        }
+        // Another library already has it (F12): copy that file, no search and no download.
+        if route == Route::Search
+            && let Some(source) = place.held_elsewhere(&Library::list(&self.context.config)?)?
+        {
+            return self.copy_from(&source, &place).await;
         }
         self.context
             .events
@@ -127,8 +170,10 @@ impl<'a> Intake<'a> {
                     MatchOutcome::Matched(candidate) => (candidate.url(), false),
                     MatchOutcome::Held { candidates, reason } => {
                         self.context.hold(HeldSong {
+                            library: library.id(),
                             song: song.clone(),
-                            from: from.to_vec(),
+                            from: from.iter().map(|list| list.name.clone()).collect(),
+                            from_files: from.iter().map(|list| list.file.clone()).collect(),
                             candidates,
                             reason: reason.clone(),
                         })?;
@@ -177,12 +222,27 @@ impl<'a> Intake<'a> {
         }
         let landed = progress::place(&file, &place.path(format)).await?;
         if landed == Outcome::Added && format != Format::Opus {
-            correct_line(root, from, &place, format)?;
+            let files: Vec<String> = from.iter().map(|list| list.file.clone()).collect();
+            correct_line(library, &files, &place, format)?;
         }
         Ok(match landed {
             Outcome::Added => added(enrichment.genre.is_none(), cover == Cover::Missing),
             other => other,
         })
+    }
+
+    /// Land a copy of `source` (a file of another library) at `place`. The copy is made to a temp
+    /// file and landed without replacing anything; `source` is only read. It counts as added.
+    async fn copy_from(&self, source: &Path, place: &Place) -> Result<Outcome, TaskError> {
+        let format = Format::of(source).unwrap_or_default();
+        let scratch = scratch_dir(&self.context.config.music_root)?;
+        let copy = scratch.path().join(format!("copy.{}", format.extension()));
+        let from = source.to_path_buf();
+        let to = copy.clone();
+        tokio::task::spawn_blocking(move || std::fs::copy(from, to))
+            .await
+            .map_err(|error| LibraryError::Task(error.to_string()))??;
+        Ok(progress::place(&copy, &place.path(format)).await?)
     }
 
     async fn find(&self, song: &WantedSong) -> Result<MatchOutcome, TaskError> {
@@ -267,6 +327,7 @@ pub(crate) mod tests {
         let config = Config {
             client_id: "id".into(),
             music_root: dir.join("music"),
+            my_library: "Me".into(),
             download_jobs: NonZeroUsize::MIN,
             animations: true,
         };
@@ -286,11 +347,14 @@ pub(crate) mod tests {
         let (runner, _rx) = runner(dir.path());
         let context = runner.context(TaskId::SyncSpotify);
         let intake = Intake::new(&context);
-        let first = Place::of(dir.path(), &song("a", "Same"));
-        let again = Place::of(dir.path(), &song("b", "Same"));
+        let first = Place::of(&Library::at("Me", dir.path(), true), &song("a", "Same"));
+        let again = Place::of(&Library::at("Me", dir.path(), true), &song("b", "Same"));
         assert!(intake.claim(&first));
         assert!(!intake.claim(&again), "same artist, album and title");
-        assert!(intake.claim(&Place::of(dir.path(), &song("c", "Other"))));
+        assert!(intake.claim(&Place::of(
+            &Library::at("Me", dir.path(), true),
+            &song("c", "Other")
+        )));
         Ok(())
     }
 
@@ -300,14 +364,151 @@ pub(crate) mod tests {
         let (runner, _rx) = runner(dir.path());
         let context = runner.context(TaskId::SyncSpotify);
         let wanted = song("a", "Here");
-        let place = Place::of(&context.config.music_root, &wanted);
+        let library = Library::mine(&context.config);
+        let place = Place::of(&library, &wanted);
         std::fs::create_dir_all(place.dir())?;
         std::fs::write(place.path(Format::Mp3), b"x")?;
         let intake = Intake::new(&context);
         assert_eq!(
-            intake.take(&wanted, &[], Route::Search).await?,
+            intake.take(&library, &wanted, &[], Route::Search).await?,
             Outcome::Skipped,
             "present in another format counts"
+        );
+        Ok(())
+    }
+
+    /// Put a file with `bytes` at the place of `wanted` in `library`, as `format`.
+    fn put(library: &Library, wanted: &WantedSong, format: Format, bytes: &[u8]) -> TestResult {
+        let place = Place::of(library, wanted);
+        std::fs::create_dir_all(place.dir())?;
+        std::fs::write(place.path(format), bytes)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_song_another_library_has_is_copied_into_the_one_wanted() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (runner, _rx) = runner(dir.path());
+        let context = runner.context(TaskId::SyncSpotify);
+        let mine = Library::mine(&context.config);
+        let sam = Library::resolve(&context.config, &sdl_core::LibraryId::Other("Sam".into()));
+        let wanted = song("a", "Shared");
+        // Sam has it as M4A; nobody searches or downloads, and nothing can (no network here).
+        put(&sam, &wanted, Format::M4a, b"sams audio")?;
+        let intake = Intake::new(&context);
+        assert_eq!(
+            intake.take(&mine, &wanted, &[], Route::Search).await?,
+            Outcome::Added
+        );
+        let landed = Place::of(&mine, &wanted).path(Format::M4a);
+        assert_eq!(std::fs::read(&landed)?, b"sams audio");
+        let source = Place::of(&sam, &wanted).path(Format::M4a);
+        assert_eq!(
+            std::fs::read(&source)?,
+            b"sams audio",
+            "the source is untouched"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_song_for_a_friend_never_lands_in_the_owners_library_or_the_reverse() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (runner, _rx) = runner(dir.path());
+        let context = runner.context(TaskId::SyncSpotify);
+        let mine = Library::mine(&context.config);
+        let sam = Library::resolve(&context.config, &sdl_core::LibraryId::Other("Sam".into()));
+        let theirs = song("t", "Theirs");
+        let ours = song("o", "Ours");
+        put(&mine, &theirs, Format::Opus, b"mine")?;
+        put(&sam, &ours, Format::Opus, b"sams")?;
+        let intake = Intake::new(&context);
+        assert_eq!(
+            intake.take(&sam, &theirs, &[], Route::Search).await?,
+            Outcome::Added
+        );
+        assert_eq!(
+            intake.take(&mine, &ours, &[], Route::Search).await?,
+            Outcome::Added
+        );
+        assert_eq!(
+            std::fs::read(Place::of(&sam, &theirs).path(Format::Opus))?,
+            b"mine"
+        );
+        assert_eq!(
+            std::fs::read(Place::of(&mine, &ours).path(Format::Opus))?,
+            b"sams"
+        );
+        // Each library holds exactly its two songs, and never a copy of a third.
+        assert_eq!(sdl_core::library_files(&mine)?.len(), 2);
+        assert_eq!(sdl_core::library_files(&sam)?.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_copy_shortcut_never_replaces_a_file_and_skips_what_is_present() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (runner, _rx) = runner(dir.path());
+        let context = runner.context(TaskId::SyncSpotify);
+        let mine = Library::mine(&context.config);
+        let sam = Library::resolve(&context.config, &sdl_core::LibraryId::Other("Sam".into()));
+        let wanted = song("a", "Both");
+        put(&sam, &wanted, Format::Opus, b"sams")?;
+        put(&mine, &wanted, Format::Mp3, b"mine")?;
+        let intake = Intake::new(&context);
+        assert_eq!(
+            intake.take(&mine, &wanted, &[], Route::Search).await?,
+            Outcome::Skipped
+        );
+        assert_eq!(
+            std::fs::read(Place::of(&mine, &wanted).path(Format::Mp3))?,
+            b"mine"
+        );
+        assert!(!Place::of(&mine, &wanted).path(Format::Opus).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_held_song_keeps_the_file_names_its_playlists_were_written_under() -> TestResult {
+        // A list whose name is empty once made safe is written under its ID (F7).
+        let listed = [
+            Listed::new("???", "37i9dQZF1DX"),
+            Listed::new("Road: trip", "p1"),
+        ];
+        assert_eq!(listed[0].file, "37i9dQZF1DX.m3u8");
+        assert_eq!(listed[1].file, "Road trip.m3u8");
+        let held = HeldSong {
+            library: sdl_core::LibraryId::Own,
+            song: song("a", "T"),
+            from: listed.iter().map(|list| list.name.clone()).collect(),
+            from_files: listed.iter().map(|list| list.file.clone()).collect(),
+            candidates: Vec::new(),
+            reason: "r".into(),
+        };
+        assert_eq!(Listed::of_held(&held), listed);
+        // The correction then finds the file that was written, not one made from the name.
+        let dir = tempfile::tempdir()?;
+        let library = Library::at("Me", dir.path(), true);
+        let wanted = song("a", "T");
+        sdl_library::playlists::write(
+            &library,
+            "???",
+            "37i9dQZF1DX",
+            std::slice::from_ref(&wanted),
+        )?;
+        let files: Vec<String> = Listed::of_held(&held).into_iter().map(|l| l.file).collect();
+        let place = Place::of(&library, &wanted);
+        correct_line(&library, &files, &place, Format::Mp3)?;
+        let text = std::fs::read_to_string(dir.path().join("37i9dQZF1DX.m3u8"))?;
+        assert!(text.contains("Band/Record/T.mp3"), "{text}");
+        // An entry kept before file names were stored falls back to the names.
+        let old = HeldSong {
+            from_files: Vec::new(),
+            ..held
+        };
+        assert_eq!(
+            Listed::of_held(&old).get(1).map(|list| list.file.as_str()),
+            Some("Road trip.m3u8")
         );
         Ok(())
     }

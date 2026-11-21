@@ -1,9 +1,12 @@
 //! Download link (F5): the link, then Start. There is no plan, so the one answer starts the run.
 
+use sdl_core::{EventKind, TaskId};
 use sdl_form::{Field, Form};
 use sdl_tasks::Answers;
 
 use super::choices::text_of;
+use super::libraries::{self, Known};
+use crate::app::Settings;
 
 /// The text field. Its value is the link.
 pub(super) const LINK: &str = "link";
@@ -29,23 +32,52 @@ pub(super) fn check(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The form: one text field that needs a link, primary button `Start`.
-pub(super) fn open() -> Form {
-    let mut form = Form::new("Download link").field(
+/// What this dialog keeps besides its form.
+#[derive(Debug, Default)]
+pub(super) struct State {
+    known: Known,
+    /// The other library last used, preselected when the Library dropdown is shown.
+    last: Option<String>,
+}
+
+/// The form: whose library, then one text field that needs a link, primary button `Start`.
+pub(super) fn open(settings: &Settings) -> (Form, State) {
+    let mut form = libraries::recipient_fields(Form::new("Download link")).field(
         Field::text(LINK, "Link")
             .placeholder("Paste a YouTube, YouTube Music or SoundCloud link")
             .validate(check)
             .needs("Paste a link"),
     );
     form.set_primary("Start");
-    form
+    let state = State {
+        known: Known::default(),
+        last: settings
+            .state
+            .last_friend
+            .get(&TaskId::DownloadLink)
+            .cloned(),
+    };
+    (form, state)
 }
 
-/// The pasted link.
-pub(super) fn answers(form: &Form) -> Answers {
-    Answers::DownloadLink {
-        url: text_of(form, LINK),
+/// The list of libraries arrives: the Library dropdown is filled.
+pub(super) fn on_event(form: &mut Form, state: &mut State, kind: &EventKind) {
+    if let EventKind::Libraries(found) = kind {
+        libraries::offer_others(form, &mut state.known, found, state.last.as_deref());
     }
+}
+
+/// A field changed: the library fields follow the toggle and the dropdown.
+pub(super) fn changed(form: &mut Form, state: &State) {
+    libraries::follow(form, &state.known);
+}
+
+/// Whose library, and the pasted link.
+pub(super) fn answers(form: &Form, state: &State) -> Option<Answers> {
+    Some(Answers::DownloadLink {
+        url: text_of(form, LINK),
+        recipient: libraries::recipient(form, &state.known)?,
+    })
 }
 
 #[cfg(test)]

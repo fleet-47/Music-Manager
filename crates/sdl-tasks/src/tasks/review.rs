@@ -6,11 +6,11 @@
 
 use futures::StreamExt;
 use futures::stream;
-use sdl_core::{Attention, EventKind, HeldSong, Place};
+use sdl_core::{Attention, EventKind, HeldSong, Library, Place};
 
 use crate::conversation::{Answered, Answers, Opened, Resolution, ReviewChoice, Step};
 use crate::progress::{Outcome, drive, summary_line};
-use crate::tasks::intake::{Intake, Route};
+use crate::tasks::intake::{Intake, Listed, Route};
 use crate::{Flow, TaskContext, TaskError};
 use sdl_core::words::thousands;
 
@@ -63,8 +63,13 @@ async fn settle(
     held: &HeldSong,
     route: &Result<Route, String>,
 ) -> Result<Outcome, TaskError> {
+    let library = Library::resolve(&context.config, &held.library);
     let outcome = match route {
-        Ok(route) => intake.take(&held.song, &held.from, route.clone()).await?,
+        Ok(route) => {
+            intake
+                .take(&library, &held.song, &Listed::of_held(held), route.clone())
+                .await?
+        }
         Err(reason) => Outcome::Failed(Attention::failed(
             held.song.title.clone(),
             held.song.artists_joined(),
@@ -75,14 +80,12 @@ async fn settle(
     // the same place is skipped in this run, but stays held if the first one failed.
     let landed = match outcome {
         Outcome::Added | Outcome::AddedMissing { .. } => true,
-        Outcome::Skipped => Place::of(&context.config.music_root, &held.song)
-            .present()?
-            .is_some(),
+        Outcome::Skipped => Place::of(&library, &held.song).present()?.is_some(),
         Outcome::Held(_) | Outcome::Failed(_) => false,
     };
     if landed {
         context.update_review(|review| {
-            review.resolve(held.song.key());
+            review.resolve(&held.library, held.song.key());
         })?;
     }
     Ok(outcome)
@@ -116,15 +119,19 @@ impl Step for Review<'_> {
         let mut jobs: Vec<(HeldSong, Result<Route, String>)> = Vec::new();
         for choice in std::mem::take(&mut self.choices) {
             // A song that was resolved meanwhile is no longer in the list; nothing to do.
-            let Some(song) = held.songs().iter().find(|h| h.song.key() == choice.key) else {
+            let Some(song) = held
+                .songs()
+                .iter()
+                .find(|h| h.library == choice.library && h.song.key() == choice.key)
+            else {
                 continue;
             };
             match &choice.resolution {
                 Resolution::Later => {}
                 Resolution::Never => {
-                    context.mark_never(choice.key.clone())?;
+                    context.mark_never(choice.library.clone(), choice.key.clone())?;
                     context.update_review(|review| {
-                        review.resolve(&choice.key);
+                        review.resolve(&choice.library, &choice.key);
                     })?;
                 }
                 other => jobs.push((song.clone(), route(song, other))),
@@ -153,8 +160,8 @@ mod tests {
     use std::time::Duration;
 
     use sdl_core::{
-        Candidate, Event, EventReceiver, Format, HeldSong, Place, RunOutcome, SongSource, TaskId,
-        WantedSong,
+        Candidate, Event, EventReceiver, Format, HeldSong, Library, LibraryId, Place, RunOutcome,
+        SongSource, TaskId, WantedSong,
     };
 
     use super::*;
@@ -165,6 +172,7 @@ mod tests {
 
     fn held(key: &str, link: bool) -> HeldSong {
         HeldSong {
+            library: LibraryId::Own,
             song: WantedSong {
                 source: if link {
                     SongSource::Link {
@@ -189,6 +197,7 @@ mod tests {
                 cover_url: None,
             },
             from: vec!["Liked Songs".into()],
+            from_files: Vec::new(),
             candidates: vec![Candidate {
                 video_id: "vid".into(),
                 title: "Song".into(),
@@ -203,6 +212,7 @@ mod tests {
     fn choice(key: &str, resolution: Resolution) -> Command {
         Command::Answer(Answers::Review {
             choices: vec![ReviewChoice {
+                library: LibraryId::Own,
                 key: key.into(),
                 resolution,
             }],
@@ -273,9 +283,12 @@ mod tests {
         assert_eq!(seen.last().map(|e| &e.kind), Some(&EventKind::Finished));
         assert!(seen.iter().any(|e| e.kind == EventKind::Started));
         let review = runner.review();
-        assert!(!review.contains("n"), "never leaves the list");
-        assert!(review.contains("l"), "later stays");
-        assert!(runner.state().never.contains("n"));
+        assert!(
+            !review.contains(&LibraryId::Own, "n"),
+            "never leaves the list"
+        );
+        assert!(review.contains(&LibraryId::Own, "l"), "later stays");
+        assert!(runner.state().is_never(&LibraryId::Own, "n"));
         let run = runner.state().last_run.get(&TaskId::Review).cloned();
         assert_eq!(
             run.map(|r| (r.line, r.outcome)),
@@ -288,7 +301,10 @@ mod tests {
     async fn a_song_landed_meanwhile_leaves_the_list_as_skipped() -> TestResult {
         let dir = tempfile::tempdir()?;
         let landed = held("s", false);
-        let place = Place::of(&dir.path().join("music"), &landed.song);
+        let place = Place::of(
+            &Library::at("Me", &dir.path().join("music/Me"), true),
+            &landed.song,
+        );
         std::fs::create_dir_all(place.dir())?;
         std::fs::write(place.path(Format::Opus), b"x")?;
         let (runner, mut rx) = start_with_held(dir.path(), vec![landed])?;
@@ -317,13 +333,36 @@ mod tests {
         assert!(seen.iter().any(
             |e| matches!(&e.kind, EventKind::Attention(a) if a.reason.contains("came from a link"))
         ));
-        assert!(runner.review().contains("s"));
+        assert!(runner.review().contains(&LibraryId::Own, "s"));
         let outcome = runner
             .state()
             .last_run
             .get(&TaskId::Review)
             .map(|r| r.outcome);
         assert_eq!(outcome, Some(RunOutcome::NeedsAttention));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn never_applies_to_one_library_only() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let sam = LibraryId::Other("Sam".into());
+        let mut theirs = held("n", false);
+        theirs.library = sam.clone();
+        let (runner, mut rx) = start_with_held(dir.path(), vec![held("n", false), theirs])?;
+        let answer = Command::Answer(Answers::Review {
+            choices: vec![ReviewChoice {
+                library: sam.clone(),
+                key: "n".into(),
+                resolution: Resolution::Never,
+            }],
+        });
+        assert!(runner.send(TaskId::Review, answer));
+        until_ended(&mut rx).await?;
+        assert!(runner.state().is_never(&sam, "n"));
+        assert!(!runner.state().is_never(&LibraryId::Own, "n"));
+        assert!(runner.review().contains(&LibraryId::Own, "n"));
+        assert!(!runner.review().contains(&sam, "n"));
         Ok(())
     }
 }

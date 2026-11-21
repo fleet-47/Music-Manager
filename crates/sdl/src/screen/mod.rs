@@ -231,7 +231,7 @@ async fn run_cmd(
             let _ = runner.start(task);
         }
         Cmd::Send(task, command) => {
-            let _ = runner.send(task, command);
+            let _ = runner.send(task, *command);
         }
         Cmd::Stop(task) => {
             let _ = runner.stop(task).await;

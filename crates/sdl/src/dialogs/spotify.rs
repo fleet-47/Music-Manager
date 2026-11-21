@@ -2,12 +2,13 @@
 //! K waiting in Review`, then Start. Listing songs costs Spotify calls, so a plan is asked for
 //! only on Continue.
 
-use sdl_core::{EventKind, ListChoice, SignInState};
+use sdl_core::{EventKind, ListChoice, SignInState, TaskId};
 use sdl_form::{Choice, Field, Form, Value};
 use sdl_tasks::Answers;
 
 use super::choices::ticked_of;
 use super::conversation::Conversation;
+use super::libraries::{self, Known};
 use crate::app::Settings;
 use sdl_core::words::thousands;
 
@@ -21,18 +22,29 @@ const SIGNING_IN: &str = "Signing in to Spotify";
 pub(super) struct State {
     /// The lists the task offered, to turn the ticked ids back into `ListChoice`s for the answer.
     lists: Vec<ListChoice>,
+    known: Known,
+    /// The other library last used, preselected when the Library dropdown is shown.
+    last: Option<String>,
 }
 
 /// The form, ticks remembered from `state.ticked_lists`, waiting for the lists.
 pub(super) fn open(settings: &Settings) -> (Form, State, Conversation) {
-    let mut form = Form::new("Sync Spotify").field(
+    let mut form = libraries::recipient_fields(Form::new("Sync Spotify")).field(
         Field::ticks(LISTS, "Spotify lists")
             .needs("Tick at least one list")
             .when_empty("Your lists will show here"),
     );
     form.set(LISTS, Value::Ticked(settings.state.ticked_lists.clone()));
     let conv = Conversation::planned("Listing your songs", Some(SIGNING_IN));
-    (form, State::default(), conv)
+    let state = State {
+        last: settings
+            .state
+            .last_friend
+            .get(&TaskId::SyncSpotify)
+            .cloned(),
+        ..State::default()
+    };
+    (form, state, conv)
 }
 
 /// `Lists` fills the tick list (`name`, detail `1,234 songs`); `NewOfTotal` is the summary. The
@@ -71,6 +83,9 @@ pub(super) fn on_event(
                 thousands(*waiting)
             ));
         }
+        EventKind::Libraries(found) => {
+            libraries::offer_others(form, &mut state.known, found, state.last.as_deref());
+        }
         EventKind::Headline(text) => conv.headline(text),
         _ => {}
     }
@@ -85,5 +100,11 @@ pub(super) fn answers(form: &Form, state: &State) -> Option<Answers> {
         .filter(|list| ticked.contains(&list.id))
         .cloned()
         .collect();
-    (!lists.is_empty()).then_some(Answers::SyncSpotify { lists })
+    let recipient = libraries::recipient(form, &state.known)?;
+    (!lists.is_empty()).then_some(Answers::SyncSpotify { lists, recipient })
+}
+
+/// A field changed: the library fields follow the toggle and the dropdown.
+pub(super) fn changed(form: &mut Form, state: &State) {
+    libraries::follow(form, &state.known);
 }

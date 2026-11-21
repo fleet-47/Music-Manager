@@ -27,5 +27,8 @@ fn config_advice(error: &ConfigError) -> &'static str {
         ConfigError::Parse { .. } => {
             "Fix the line shown above; config.example.toml lists every setting."
         }
+        ConfigError::LibraryName { .. } => {
+            "Give my_library a plain folder name such as Me, or delete the line."
+        }
     }
 }

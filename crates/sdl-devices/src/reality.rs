@@ -13,7 +13,7 @@ use sdl_core::{
     channel,
 };
 
-use crate::testing::{mp3, put};
+use crate::testing::{lib, mp3, put};
 use crate::{DevicesError, clean_up_and_eject, list, plan, run, watch};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -124,11 +124,11 @@ async fn sdl_devices_on_a_real_fat32_volume() -> TestResult {
         },
         ..DeviceChoice::default()
     };
-    let planned = plan(library.path(), &device, &choice).await?;
+    let planned = plan(&lib(library.path()), &device, &choice).await?;
     assert!(!planned.summary().can_start());
     let mut roomy = device.clone();
     roomy.free_bytes = u64::MAX;
-    let forced = plan(library.path(), &roomy, &choice).await?;
+    let forced = plan(&lib(library.path()), &roomy, &choice).await?;
     let (tx, mut rx) = channel();
     let events = EventSender::new(TaskId::SyncDevice, tx);
     let error = run(&forced, &events, &StopFlag::new()).await.err();
@@ -222,7 +222,7 @@ async fn conversion_with_the_real_ffmpeg() -> TestResult {
         quality: Quality::Small,
         ..DeviceChoice::default()
     };
-    let planned = plan(library.path(), &device, &choice).await;
+    let planned = plan(&lib(library.path()), &device, &choice).await;
     let planned = planned?;
     assert!(planned.summary().estimated);
     assert_eq!(

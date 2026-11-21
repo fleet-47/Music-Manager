@@ -101,6 +101,11 @@ mod testing {
         file
     }
 
+    /// The owner's own library with its folder at `root` itself.
+    pub(crate) fn lib(root: &Path) -> sdl_core::Library {
+        sdl_core::Library::at("Me", root, true)
+    }
+
     /// Write `content` at `path`, making its folders.
     pub(crate) fn put(path: &Path, content: &[u8]) -> Result<(), std::io::Error> {
         if let Some(parent) = path.parent() {

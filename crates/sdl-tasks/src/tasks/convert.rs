@@ -5,12 +5,12 @@
 //! cannot start. The run converts, then writes the ticked playlists, and stops after the file in
 //! hand when asked.
 
-use sdl_core::EventKind;
+use sdl_core::{EventKind, Library};
 use sdl_library::convert::{ConvertPlan, plan, run};
-use sdl_library::playlists;
 
-use crate::conversation::{Answered, Answers, Opened, Step};
+use crate::conversation::{Answered, Answers, Offer, Opened, Step};
 use crate::progress::{stopped_line, written_line};
+use crate::tasks::{send_libraries, send_playlists};
 use crate::{Flow, TaskContext, TaskError};
 use sdl_core::words::files;
 
@@ -33,14 +33,24 @@ impl Step for Convert<'_> {
     fn open(&mut self) -> impl Future<Output = Result<Opened, TaskError>> + Send {
         let events = &self.context.events;
         events.send(EventKind::Headline("Looking at your library".to_owned()));
-        let opened = playlists::list(&self.context.config.music_root)
-            .map(|lists| {
-                events.send(EventKind::Playlists(lists));
+        let opened = send_libraries(self.context)
+            .and_then(|()| send_playlists(self.context, &Library::mine(&self.context.config)))
+            .map(|()| {
                 events.send(EventKind::Headline("Choose what to convert".to_owned()));
                 Opened::Ready
-            })
-            .map_err(TaskError::from);
+            });
         std::future::ready(opened)
+    }
+
+    fn offer(&mut self, offer: Offer) -> impl Future<Output = Result<bool, TaskError>> + Send {
+        let sent = match offer {
+            Offer::Libraries => send_libraries(self.context),
+            Offer::Playlists(id) => {
+                send_playlists(self.context, &Library::resolve(&self.context.config, &id))
+            }
+            Offer::Devices | Offer::Folders(_) => Ok(()),
+        };
+        std::future::ready(sent.map(|()| false))
     }
 
     async fn answer(&mut self, answers: Answers) -> Result<Answered, TaskError> {
@@ -50,7 +60,8 @@ impl Step for Convert<'_> {
         let events = &self.context.events;
         self.context.remember_convert(choice.clone())?;
         events.send(EventKind::Headline("Counting the files".to_owned()));
-        let planned = plan(&self.context.config.music_root, &choice).await?;
+        let library = Library::resolve(&self.context.config, &choice.library);
+        let planned = plan(&library, &choice).await?;
         let summary = planned.summary().clone();
         events.send(EventKind::Plan(summary.clone()));
         self.plan = Some(planned);
@@ -80,7 +91,9 @@ impl Step for Convert<'_> {
 
 #[cfg(test)]
 mod tests {
-    use sdl_core::{ConvertChoice, Event, EventReceiver, PlanSummary, RunOutcome, TaskId};
+    use sdl_core::{
+        ConvertChoice, Event, EventReceiver, LibraryId, PlanSummary, RunOutcome, TaskId,
+    };
 
     use super::*;
     use crate::Command;
@@ -146,7 +159,7 @@ mod tests {
             "an empty library has nothing to do"
         );
         // A file that is not audio: the run goes through to its end with one failed item.
-        let song = dir.path().join("music/Band/Record/Song.opus");
+        let song = dir.path().join("music/Me/Band/Record/Song.opus");
         std::fs::create_dir_all(song.parent().ok_or("no folder")?)?;
         std::fs::write(&song, b"not audio")?;
         assert!(runner.send(TaskId::Convert, answer(&good)));
@@ -172,6 +185,40 @@ mod tests {
             ))
         );
         assert_eq!(runner.state().convert, good);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_form_offers_the_libraries_and_the_playlists_of_the_one_chosen() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let sam = dir.path().join("music/Sam");
+        std::fs::create_dir_all(&sam)?;
+        std::fs::write(sam.join("Road trip.m3u8"), b"#EXTM3U\n")?;
+        let (mut runner, mut rx) = runner(dir.path());
+        runner.start(TaskId::Convert)?;
+        assert!(runner.send(
+            TaskId::Convert,
+            Command::Offer(Offer::Playlists(LibraryId::Other("Sam".into())))
+        ));
+        let mut libraries = None;
+        let mut playlists = Vec::new();
+        while playlists.len() < 2 {
+            match rx.recv().await.ok_or("the events ended early")?.kind {
+                EventKind::Libraries(found) => libraries = Some(found),
+                EventKind::Playlists(found) => playlists.push(found),
+                _ => {}
+            }
+        }
+        let names: Vec<String> = libraries
+            .ok_or("no libraries")?
+            .iter()
+            .map(|library| library.name().to_owned())
+            .collect();
+        assert_eq!(names, ["Me", "Sam"]);
+        assert_eq!(
+            playlists,
+            [Vec::<String>::new(), vec!["Road trip".to_owned()]]
+        );
         Ok(())
     }
 

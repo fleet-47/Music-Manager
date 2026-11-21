@@ -1,4 +1,4 @@
-//! Playlist files (F7): `<music_root>/<List name>.m3u8` pointer files. The file model (format,
+//! Playlist files (F7, F12): `<library folder>/<List name>.m3u8` pointer files. The file model (format,
 //! parsing, line correction) is `sdl_core::Playlist`; this module reads and writes the files.
 //!
 //! Plain blocking file I/O on small files; call from async code directly.
@@ -7,16 +7,17 @@ use std::path::Path;
 
 use sdl_core::format::existing_format;
 use sdl_core::playlist::PLAYLIST_EXTENSION;
-use sdl_core::{Format, Place, Playlist, WantedSong};
+use sdl_core::{Format, Library, Place, Playlist, WantedSong};
 
 use crate::{LibraryError, io_err};
 
-/// The playlists in the library: the stems of the `.m3u8` files directly in `music_root`, sorted,
+/// The playlists of `library`: the stems of the `.m3u8` files directly in its folder, sorted,
 /// skipping names that start with a dot. A missing folder has none.
 ///
 /// # Errors
 /// [`LibraryError::Io`] when the folder cannot be read.
-pub fn list(music_root: &Path) -> Result<Vec<String>, LibraryError> {
+pub fn list(library: &Library) -> Result<Vec<String>, LibraryError> {
+    let music_root = library.root();
     let entries = match std::fs::read_dir(music_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -38,7 +39,7 @@ pub fn list(music_root: &Path) -> Result<Vec<String>, LibraryError> {
     Ok(names)
 }
 
-/// Write the playlist file of a synced list, rewriting it whole: `<music_root>/<name>.m3u8` with
+/// Write the playlist file of a synced list, rewriting it whole: `<library folder>/<name>.m3u8` with
 /// one line per song of `songs`, in list order, at the song's place whether or not its file exists
 /// yet. An existing file's real extension is used, otherwise `.opus`. `id` is the file-name
 /// fallback when `name` is empty once made safe.
@@ -46,14 +47,14 @@ pub fn list(music_root: &Path) -> Result<Vec<String>, LibraryError> {
 /// # Errors
 /// [`LibraryError::Io`] when a place cannot be checked or the file cannot be written.
 pub fn write(
-    music_root: &Path,
+    library: &Library,
     name: &str,
     id: &str,
     songs: &[WantedSong],
 ) -> Result<(), LibraryError> {
     let mut entries = Vec::with_capacity(songs.len());
     for song in songs {
-        let place = Place::of(music_root, song);
+        let place = Place::of(library, song);
         let format = place
             .present()
             .map_err(io_err(&place.dir()))?
@@ -64,31 +65,36 @@ pub fn write(
         name: name.to_owned(),
         entries,
     };
-    let path = music_root.join(Playlist::file_name(name, id));
+    let path = library.root().join(Playlist::file_name(name, id));
     std::fs::write(&path, playlist.render()).map_err(io_err(&path))
 }
 
 /// Correct one song's line after review landed it with another extension: in each of the playlist
-/// files named by `list_names` (the display names in a held song's `from`), the line for `place`
-/// now ends in `format`'s extension. A list with no file, or no line for the song, is left alone.
+/// files of `library` named by `files` (the file names a held song kept,
+/// [`sdl_core::HeldSong::playlist_files`], so a list written under its ID is found like any other),
+/// the line for `place` now ends in `format`'s extension. A file that is missing, or has no line
+/// for the song, is left alone.
 ///
 /// # Errors
 /// [`LibraryError::Io`] when a file cannot be read or written.
 pub fn correct_line(
-    music_root: &Path,
-    list_names: &[String],
+    library: &Library,
+    files: &[String],
     place: &Place,
     format: Format,
 ) -> Result<(), LibraryError> {
     let relative_stem = place.relative(format).with_extension("");
-    for name in list_names {
-        let path = music_root.join(Playlist::file_name(name, ""));
+    for file in files {
+        let path = library.root().join(file);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(io_err(&path)(error)),
         };
-        let mut playlist = Playlist::parse(&text, name);
+        let fallback = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned());
+        let mut playlist = Playlist::parse(&text, fallback.as_deref().unwrap_or_default());
         if playlist.correct(&relative_stem, format) {
             std::fs::write(&path, playlist.render()).map_err(io_err(&path))?;
         }
@@ -96,7 +102,7 @@ pub fn correct_line(
     Ok(())
 }
 
-/// Write the library playlist `<music_root>/<stem>.m3u8` to a device or a Convert destination as
+/// Write the playlist `<library folder>/<stem>.m3u8` of `library` to a device or a Convert destination as
 /// `<dest_music_dir>/<stem>.m3u8`, listing only the songs present under `dest_music_dir`, each
 /// with the extension it has there (`.opus`, `.mp3` or `.m4a`). Returns the number of songs
 /// listed. A missing library playlist writes nothing and lists none.
@@ -104,12 +110,12 @@ pub fn correct_line(
 /// # Errors
 /// [`LibraryError::Io`] when a file cannot be read or written.
 pub fn write_for_destination(
-    music_root: &Path,
+    library: &Library,
     dest_music_dir: &Path,
     stem: &str,
 ) -> Result<usize, LibraryError> {
     let file = format!("{stem}.{PLAYLIST_EXTENSION}");
-    let source = music_root.join(&file);
+    let source = library.root().join(&file);
     let text = match std::fs::read_to_string(&source) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -141,6 +147,7 @@ mod tests {
     use sdl_core::SongSource;
 
     use super::*;
+    use crate::testkit::lib;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -175,7 +182,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         touch(&root.path().join("A/Al/two.mp3"))?;
         write(
-            root.path(),
+            &lib(root.path()),
             "Road: trip",
             "id1",
             &[song("1", "one"), song("2", "two")],
@@ -185,20 +192,28 @@ mod tests {
             text,
             "#EXTM3U\n#PLAYLIST:Road: trip\nA/Al/one.opus\nA/Al/two.mp3\n"
         );
-        assert_eq!(list(root.path())?, ["Road trip"]);
-        assert_eq!(list(&root.path().join("missing"))?, Vec::<String>::new());
+        assert_eq!(list(&lib(root.path()))?, ["Road trip"]);
+        assert_eq!(
+            list(&lib(&root.path().join("missing")))?,
+            Vec::<String>::new()
+        );
         Ok(())
     }
 
     #[test]
     fn correct_line_changes_one_line_in_the_named_lists_only() -> TestResult {
         let root = tempfile::tempdir()?;
-        write(root.path(), "One", "i", &[song("1", "a"), song("2", "b")])?;
-        write(root.path(), "Two", "i", &[song("1", "a")])?;
-        let place = Place::of(root.path(), &song("1", "a"));
+        write(
+            &lib(root.path()),
+            "One",
+            "i",
+            &[song("1", "a"), song("2", "b")],
+        )?;
+        write(&lib(root.path()), "Two", "i", &[song("1", "a")])?;
+        let place = Place::of(&lib(root.path()), &song("1", "a"));
         correct_line(
-            root.path(),
-            &["One".to_owned(), "Missing".to_owned()],
+            &lib(root.path()),
+            &["One.m3u8".to_owned(), "Missing.m3u8".to_owned()],
             &place,
             Format::M4a,
         )?;
@@ -210,28 +225,66 @@ mod tests {
     }
 
     #[test]
+    fn a_list_written_under_its_id_is_corrected_by_its_file_name() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let library = lib(root.path());
+        write(&library, "???", "37i9dQZF1DX", &[song("1", "a")])?;
+        assert!(root.path().join("37i9dQZF1DX.m3u8").exists());
+        let place = Place::of(&library, &song("1", "a"));
+        correct_line(
+            &library,
+            &["37i9dQZF1DX.m3u8".to_owned()],
+            &place,
+            Format::Mp3,
+        )?;
+        let text = std::fs::read_to_string(root.path().join("37i9dQZF1DX.m3u8"))?;
+        assert!(text.contains("A/Al/a.mp3\n"), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_library_keeps_its_playlists_to_itself() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let mine = Library::at("Me", &root.path().join("Me"), true);
+        let sam = Library::at("Sam", &root.path().join("Sam"), false);
+        std::fs::create_dir_all(mine.root())?;
+        std::fs::create_dir_all(sam.root())?;
+        write(&sam, "Road trip", "id", &[song("1", "a")])?;
+        assert_eq!(list(&sam)?, ["Road trip"]);
+        assert_eq!(list(&mine)?, Vec::<String>::new());
+        let text = std::fs::read_to_string(sam.root().join("Road trip.m3u8"))?;
+        assert!(text.contains("A/Al/a.opus\n"), "{text}");
+        Ok(())
+    }
+
+    #[test]
     fn a_destination_playlist_lists_only_what_is_there() -> TestResult {
         let root = tempfile::tempdir()?;
         let device = tempfile::tempdir()?;
         let dest = device.path().join("Music");
         write(
-            root.path(),
+            &lib(root.path()),
             "Mix",
             "i",
             &[song("1", "a"), song("2", "b"), song("3", "c")],
         )?;
         touch(&dest.join("A/Al/a.mp3"))?;
         touch(&dest.join("A/Al/c.opus"))?;
-        assert_eq!(write_for_destination(root.path(), &dest, "Mix")?, 2);
+        assert_eq!(write_for_destination(&lib(root.path()), &dest, "Mix")?, 2);
         assert_eq!(
             std::fs::read_to_string(dest.join("Mix.m3u8"))?,
             "#EXTM3U\n#PLAYLIST:Mix\nA/Al/a.mp3\nA/Al/c.opus\n"
         );
-        assert_eq!(write_for_destination(root.path(), &dest, "Nope")?, 0);
+        assert_eq!(write_for_destination(&lib(root.path()), &dest, "Nope")?, 0);
         // A title with a dot keeps its whole name on the device.
-        write(root.path(), "Dot", "i", &[song("4", "Mr. Brightside")])?;
+        write(
+            &lib(root.path()),
+            "Dot",
+            "i",
+            &[song("4", "Mr. Brightside")],
+        )?;
         touch(&dest.join("A/Al/Mr. Brightside.mp3"))?;
-        assert_eq!(write_for_destination(root.path(), &dest, "Dot")?, 1);
+        assert_eq!(write_for_destination(&lib(root.path()), &dest, "Dot")?, 1);
         assert_eq!(
             std::fs::read_to_string(dest.join("Dot.m3u8"))?,
             "#EXTM3U\n#PLAYLIST:Dot\nA/Al/Mr. Brightside.mp3\n"
@@ -259,7 +312,7 @@ mod tests {
         songs[1].artists = vec![long.clone()];
         songs[1].album = Some(long.clone());
         songs[2].artists = vec!["#1 Dads".into()];
-        write(root.path(), "Road trip", "id", &songs)?;
+        write(&lib(root.path()), "Road trip", "id", &songs)?;
         let bytes = std::fs::read(root.path().join("Road trip.m3u8"))?;
         assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "no BOM");
         assert!(
@@ -313,7 +366,7 @@ mod tests {
         // it names the playlist after the file, which `Playlist::file_name` made safe.
         let root = tempfile::tempdir()?;
         let name = "n".repeat(400);
-        write(root.path(), &name, "id", &[song("1", "one")])?;
+        write(&lib(root.path()), &name, "id", &[song("1", "one")])?;
         let file = root.path().join(Playlist::file_name(&name, "id"));
         assert!(file.exists() && file.file_name().is_some_and(|f| f.len() <= 155));
         Ok(())

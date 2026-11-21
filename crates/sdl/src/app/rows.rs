@@ -6,7 +6,7 @@ use sdl_core::{Device, Direction, Format, RunOutcome, State, TaskId};
 use sdl_tasks::estimate_remaining;
 
 use super::{App, FunctionView};
-use crate::fmt::{ago, estimate_text, percent};
+use crate::fmt::{ago, estimate_text, library_words, percent};
 use sdl_core::words::{need_attention, thousands, x_of_y};
 
 /// A function's last-run line, with its age.
@@ -112,19 +112,33 @@ pub fn selection_text(task: TaskId, state: &State, devices: &[Device], held: usi
                         ),
                         Direction::FromDevice => choice.direction.label().to_owned(),
                     };
-                    // The device is named once the list has seen it.
-                    match devices.iter().find(|device| device.id() == id) {
-                        Some(device) => format!("{} · {how}", device.label()),
+                    let how = library_words(&choice.library)
+                        .map_or_else(|| how.clone(), |library| format!("{how} · {library}"));
+                    // The device is named by the list when it is plugged in, else by the name
+                    // saved with its choices, so the row names it after a restart.
+                    let name = devices
+                        .iter()
+                        .find(|device| device.id() == id)
+                        .map(Device::label)
+                        .or_else(|| state.last_device_name().map(str::to_owned));
+                    match name {
+                        Some(name) => format!("{name} · {how}"),
                         None => how,
                     }
                 },
             ),
-        TaskId::Convert => format!(
-            "{} {} to {}",
-            state.convert.format.label(),
-            state.convert.quality.name(),
-            state.convert.destination.display()
-        ),
+        TaskId::Convert => {
+            let line = format!(
+                "{} {} to {}",
+                state.convert.format.label(),
+                state.convert.quality.name(),
+                state.convert.destination.display()
+            );
+            match library_words(&state.convert.library) {
+                Some(library) => format!("{line} · {library}"),
+                None => line,
+            }
+        }
     }
 }
 
@@ -258,6 +272,58 @@ mod tests {
         assert_eq!(run.count, "412 of 2,117");
         assert_eq!(run.percent, Some(19));
         assert_eq!(run.attention.as_deref(), Some("3 need attention"));
+    }
+
+    #[test]
+    fn the_device_row_names_the_remembered_device_after_a_restart() {
+        // Nothing has been listed yet and no form was opened: the name comes from the saved state.
+        let mut state = State {
+            last_device: Some("uuid".into()),
+            ..State::default()
+        };
+        state.devices.insert(
+            "uuid".into(),
+            sdl_core::DeviceChoice {
+                name: "SNOWSKY".into(),
+                format: Some(Format::Mp3),
+                ..sdl_core::DeviceChoice::default()
+            },
+        );
+        let mut app = app();
+        app.settings.state = state;
+        assert_eq!(app.devices, Vec::new());
+        assert_eq!(main_rows(&app)[3].selection, "SNOWSKY · To device · MP3");
+    }
+
+    #[test]
+    fn a_selection_line_names_a_library_that_is_not_the_owners_own() {
+        let mut state = State {
+            last_device: Some("uuid".into()),
+            ..State::default()
+        };
+        state.devices.insert(
+            "uuid".into(),
+            sdl_core::DeviceChoice {
+                name: "SNOWSKY".into(),
+                library: sdl_core::LibraryId::Other("Sam".into()),
+                ..sdl_core::DeviceChoice::default()
+            },
+        );
+        state.convert.library = sdl_core::LibraryId::Other("Kim".into());
+        assert_eq!(
+            selection_text(TaskId::SyncDevice, &state, &[], 0),
+            "SNOWSKY · To device · As is · library Sam"
+        );
+        assert_eq!(
+            selection_text(TaskId::Convert, &state, &[], 0),
+            "MP3 High to ~/Music-converted · library Kim"
+        );
+        // The owner's own is not named.
+        state.convert.library = sdl_core::LibraryId::Own;
+        assert_eq!(
+            selection_text(TaskId::Convert, &state, &[], 0),
+            "MP3 High to ~/Music-converted"
+        );
     }
 
     #[test]

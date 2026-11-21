@@ -11,6 +11,11 @@ use lofty::tag::{Accessor, ItemKey, Tag, TagExt};
 
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+/// The owner's own library with its folder at `root` itself.
+pub fn lib(root: &Path) -> sdl_core::Library {
+    sdl_core::Library::at("Me", root, true)
+}
+
 /// A `seconds`-long sine (with noise) at 48 kHz stereo, encoded by the extension of `path`
 /// (`.opus`, `.mp3`, `.m4a`), tagged with a title, artist, album, track 3 of 12 and genre.
 pub fn make_song(path: &Path, seconds: u32, title: &str) -> TestResult {
