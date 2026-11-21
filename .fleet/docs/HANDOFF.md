@@ -1,35 +1,80 @@
-# Handoff
+# Handoff: Spotify-DL (`sdl`)
 
-Re-entry: read `.agents/AGENTS.md` (rulings, layout, tasks, facts) and `.fleet/docs/SPEC-tasks-ux.md`, then this file.
+Read first, end to end: `.agents/AGENTS.md` (rulings), `.fleet/docs/SPEC-tui.md` (the build contract),
+`.fleet/docs/BACKLOG.md` (tasks waiting on a condition).
 
-## What moved (2026-11-15 → 2026-11-18)
-- Toolchain and all tasks live in `.mise/config.toml` (mise secrets via fnox → Bitwarden item `Spotify-DL`). `mise tasks validate` passes; the `mise run` picker shows `download`, `sync`, `snowsky-sync`.
-- `download` (yt-dlp path): working; two SoundCloud downloads verified.
-- `snowsky-sync`: working. First `--resync` done, card unmount cleanup verified on a read-only remount (no dot-folders left), Disco picked the files up cleanly.
-- Liked Songs: 186 of 2,117 downloaded to `~/Music/Spotify/Saved tracks/` before the dev app hit Spotify's dev-mode limit (24 h lockout, ends ~2026-11-18 19:05).
-- Spotify pathway restructured to two steps (`spotify:list` with secrets → credential-free `spotdl download lists/spotify.spotdl`). One-song test of the credential-free client passed during the lockout, with full tags.
-- fnox sync cache added to close the `BW_SESSION` gap: `github:remko/age-plugin-se` is a project tool; the global `sync-age` provider (Secure Enclave key) already exists; `.fnox.local.toml` is git-ignored.
+## Where it stands (2026-11-21)
+- `sdl` is rebuilt as a music library manager: eight crates, one Rust TUI. The old mise/spotDL flow is
+  gone (jj history, change `nplromuk`).
+- The gate passes: `cargo fmt`, `cargo clippy` with the Gen.v2 flags, and 386 tests run as
+  `mise x -- cargo test` (tests use the real `ffmpeg`). Release binary: `target/release/sdl`. Everything
+  is committed in jj.
+- Proven by agents on this Mac, in temp folders only: Opus download from YouTube Music (stream-copied),
+  SoundCloud link matched or held, the review list, playlist files against Disco's reader, all
+  conversion presets, device sync both ways on FAT32 disk images, the room refusal, stop and quit
+  mid-run, eject clean-up, idle at 0% CPU, and the real Keychain store (throwaway entry, deleted).
+- **Never run live:** Spotify sign-in, token refresh and Keychain rotation; MusicBrainz at volume; a
+  real Disc importing the playlists; a real drive eject.
+- `~/Music` is empty and ready for the new layout. The old flow's files are in `~/Music-old`.
+  `~/.config/sdl/config.toml` still has an empty `client_id`.
+
+## Next: the full live run (final gate before a release build)
+1. Yazid adds the Spotify client ID to `~/.config/sdl/config.toml`.
+2. `mise run tui` from the repo. Sync Spotify: sign in, tick one small playlist, Continue, Start.
+3. Quit and start again: Sync Spotify must not open the browser.
+4. Download link: one YouTube Music song, then a playlist link.
+5. Review: resolve a held song.
+6. Sync device to the Disc, eject, then on the Disc update the library and import playlists.
+7. Change the playlist, sync again, and see how the Disc shows it (expected: a "(2)" copy).
+
+After a clean run: decide how `sdl` is installed and started (proposed: a global `sdl` command with
+yt-dlp, ffmpeg and deno in mise's global config), then the Liked Songs sync (about 46 Spotify calls;
+MusicBrainz makes it roughly two hours).
 
 ## Open
-1. **Yazid: one-time fnox sync** (not yet run; no cache file exists). In your own Terminal, in the repo: `export BW_SESSION="$(mise x -- bw unlock --raw)"` then `mise x -- fnox sync --provider sync-age --local-file`. Verify from a fresh tab: `mise x -- fnox check --all` should prompt Touch ID and pass with no `BW_SESSION`.
-2. **Re-attempt `mise run sync`** after the lockout ends (~19:05 on 2026-11-18). Note per tool whether live progress shows (spotDL here; yt-dlp via `download`; rclone via `snowsky-sync --dry-run`) and add `raw = true` only where it doesn't (SPEC "Open").
-3. **Red-team the Spotify call volume before the next large run.** Yazid's question: can everything be pulled from Spotify once and reused? Established facts (spotDL 4.6.0 source):
-   - `spotify:list`: about one call per 50 Liked Songs (`types/saved.py:44-56`), plus playlist listings for `all-user-playlists`.
-   - The download step then refetches 3 calls per song (track, artist, album) through spotDL's no-credentials client, because list entries lack `genres` and `disc_count` (`download/downloader.py:476-494` → `types/song.py:86-102`).
-   - That refetch runs before the file-exists skip (`downloader.py:494` vs `:564`), so every `sync` repeats it for songs already on disk: about 6,400 public calls per Liked Songs run.
-   - To evaluate (unverified): avoiding the refetch altogether; spotDL `--use-cache-file` (stores Spotify responses under `~/.spotdl/.spotify_cache`); rate limits of the no-credentials client; whether the saved list could carry full metadata once.
-4. **Global secret-provisioning task** (requested 2026-11-17): a global mise task that either creates a new Bitwarden item, or takes an existing item name, and provisions it for the current project (reference in `.fnox.toml` + fnox sync cache). Findings so far:
-   - mise global tasks dir on this Mac is `~/.config/mise/tasks/` (`Fleet/Config` → `~/.config`); `~/.mise/tasks/` is not read globally. Global tasks cannot list `secrets`.
-   - mise has no secret-provisioning command (`mise secrets` has only `ls`; `[bootstrap.secrets]` is for bootstrap templates).
-   - fnox has no command to add a vault reference; its Bitwarden provider is read-only (`fnox set` writes only to writable providers). Creating items needs Bitwarden's documented `bw create item` pipeline.
-   - A single task process can run `BW_SESSION="$(bw unlock --raw)" fnox sync …; bw lock` without exporting the session.
-   - Still unanswered: whether the task lives as a plain file or in the fleet flake (`bridge/`); task name; recommendation pending a full mise/fnox doc review.
-   - Requirement stated 2026-11-18: two pathways, (a) select an existing Bitwarden secret, (b) generate a secret that is stored locally and in Bitwarden, both with zero-trust generation and handling. The fnox sync of item 1 is to be done by this task, not by the manual `export BW_SESSION` steps.
-   - **Open question for Yazid: what "zero trust" means here.** Proposed reading, not yet confirmed: secret values never appear in agent context, command arguments, shell history, exported environment variables or plaintext files; a generated value is created inside the task process and piped straight to Bitwarden and to fnox's Secure Enclave cache; the select pathway writes only the reference and the encrypted cache; the Bitwarden session key lives only inside the one task process, which locks the vault on exit.
-5. **Card capacity:** Liked Songs is about 10 GB (about 4.6 MB/song); the card has 7.4 GB free. `snowsky-sync` will fail partway once the library outgrows it. Decision needed: bigger card, or a subset sync.
-6. **Not yet tested:** `snowsky:unmount` after Ctrl+C during `snowsky-sync` (on hold by Yazid's choice); recovery from interrupted runs (on hold).
+1. **Running-panel spinner.** The UI/UX gate put a spinner beside every running task, redrawing 10
+   times a second for the whole run. Spec F1 gives a spinner only to a task with no known total, and
+   Yazid ruled against constant redraws. Proposed: revert to the spec, with the one-second clock as
+   the sign of life. Awaiting Yazid.
+2. **Pasted Spotify links.** Spotify's API gives a developer-mode app the songs of a playlist only
+   when the user owns it or collaborates on it, public or not (reference page "Get Playlist Items";
+   February 2026 dev-mode changes). The route is to copy the playlist to one's own account and use
+   Sync Spotify. Proposed: say exactly that in Download link's message. Awaiting Yazid.
+3. **Agent decisions.** Yazid was given 36 one-line decisions agents took where the spec was silent
+   (chat, 2026-11-21). Six were then fixed in the UI/UX gate; none of the rest is flagged yet.
+4. **Known small limits:** the same video as a `music.youtube.com` link and a `youtube.com` link counts
+   as two songs for "held" and "never"; a Keychain write that fails mid-run is not shown; a list filter
+   cannot contain a space; a popup shifts when its "missing" lines disappear.
+5. **Card capacity** (carried): the Disc's card had 7.4 GB free against a Liked Songs library of
+   several GB. Sync device can now sync by playlist; whether to buy a bigger card is still Yazid's call.
 
-## Carried forward
-- Nothing is committed to jj yet.
-- Leftovers on the card: two `bisync/*.lst-dry` files from the first dry run; macOS `._*` files (hidden files, not folders, so they don't affect Disco).
-- spotDL credentials appear in the process list while `spotify:list` runs (spotDL takes them only as flags).
+## Carried forward (not part of this build)
+- **Global secret-provisioning task** (requested 2026-11-17): a global mise task that either creates a
+  new Bitwarden item or takes an existing item name, and provisions it for the current project
+  (reference in `.fnox.toml` plus the fnox sync cache). Findings so far:
+  - mise's global tasks dir on this Mac is `~/.config/mise/tasks/`; global tasks cannot list `secrets`.
+  - mise has no secret-provisioning command; fnox has no command to add a vault reference and its
+    Bitwarden provider is read-only. Creating items needs Bitwarden's `bw create item` pipeline.
+  - A single task process can run `BW_SESSION="$(bw unlock --raw)" fnox sync …; bw lock` without
+    exporting the session.
+  - Unanswered: plain file or fleet flake (`bridge/`); task name.
+  - Requirement (2026-11-18): two pathways, (a) select an existing Bitwarden secret, (b) generate a
+    secret stored locally and in Bitwarden, both with zero-trust generation and handling.
+  - **Open question for Yazid: what "zero trust" means here.** Proposed reading, not confirmed: secret
+    values never appear in agent context, command arguments, shell history, exported environment
+    variables or plaintext files; a generated value is created inside the task process and piped
+    straight to Bitwarden and to fnox's Secure Enclave cache; the Bitwarden session key lives only
+    inside the one task process, which locks the vault on exit.
+- `sdl` itself uses no secret: PKCE sign-in with the client ID only, refresh token in the Keychain.
+
+## For the next agent working on the code
+- Toolchain: fenix stable at `/nix/store/hpkyhn8x0bjzr735qf5nh2xwng5wqdrp-rust-stable-2026-10-15/bin`
+  (not on `PATH`). No nix commands without approval. VCS is jj; described commits are immutable here,
+  so fixes go in new changes.
+- When driving the real binary: never activate the Sync Spotify row (on 2026-11-20 an agent did so by
+  mistake and Yazid's browser opened Spotify's sign-in page), keep `client_id` blank in any test
+  config, and check `diskutil list external` before opening Sync device (Yazid plugs real drives in
+  while agents work).
+- The build pattern that worked: contracts written and reviewed first, then builders in waves with a
+  red team after the first wave, then one unified red team with a device run, then a UI/UX gate, with
+  the gate re-run and a commit between each.
