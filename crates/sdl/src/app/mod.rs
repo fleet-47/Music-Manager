@@ -83,6 +83,8 @@ pub struct Hits {
     pub form: HitMap<sdl_form::Target>,
     /// A plain popup.
     pub popup: HitMap<PopupTarget>,
+    /// The footer's hints, each with the key a click on it presses.
+    pub footer: HitMap<crossterm::event::KeyCode>,
 }
 
 /// The whole app state.

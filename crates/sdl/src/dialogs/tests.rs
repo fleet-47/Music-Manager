@@ -402,7 +402,7 @@ fn review_lists_the_held_songs_and_blocks_until_one_is_chosen() {
     assert_eq!(rig.dialog.form().primary(), "Download 0 chosen");
     assert_eq!(
         rig.dialog.form().missing(),
-        vec!["Choose what to do with at least one song".to_owned()]
+        vec!["Open a song and choose what to do with it".to_owned()]
     );
 }
 
@@ -411,7 +411,8 @@ fn review_walk_from_the_list_to_download() {
     let (mut rig, _) = Rig::open(TaskId::Review, review_settings());
     // Enter opens the first song's detail.
     assert_eq!(rig.enter(), Vec::new());
-    assert_eq!(rig.dialog.form().title(), "First");
+    assert_eq!(rig.dialog.form().title(), "Held song");
+    assert!(rig.dialog.form().notes()[0].starts_with("Wanted: First"));
     assert_eq!(rig.dialog.form().cancel(), "Back");
     assert!(
         rig.dialog
@@ -520,7 +521,8 @@ fn review_offers_the_links_own_audio_only_for_link_songs_and_a_pasted_link_asks_
         index: 1,
     })?;
     assert!(!is_closed(&step));
-    assert_eq!(rig.dialog.form().title(), "Second");
+    assert_eq!(rig.dialog.form().title(), "Held song");
+    assert!(rig.dialog.form().notes()[0].starts_with("Wanted: Second"));
     let ids = |rig: &Rig| -> Vec<&'static str> {
         ["own-audio", "paste", "later", "never"]
             .into_iter()
@@ -623,7 +625,8 @@ fn leaving_for_later_is_not_counted_and_never_is() {
 fn a_song_that_leaves_the_list_while_open_drops_its_choice() {
     let (mut rig, _) = Rig::open(TaskId::Review, review_settings());
     let _ = rig.enter();
-    assert_eq!(rig.dialog.form().title(), "First");
+    assert_eq!(rig.dialog.form().title(), "Held song");
+    assert!(rig.dialog.form().notes()[0].starts_with("Wanted: First"));
     // Another task landed the first song: the runner's list no longer holds it.
     let _ = rig.settings.review.resolve("t1");
     let step = rig.event(&EventKind::HeldCount(1));
@@ -743,7 +746,7 @@ fn the_device_list_updates_when_volumes_change() {
         rig.dialog
             .form()
             .missing()
-            .contains(&"Choose a device".to_owned())
+            .contains(&"No device to choose yet".to_owned())
     );
     // A volume appears: it is offered; the remembered device is chosen when it comes.
     let _ = rig.event(&EventKind::Devices(vec![device("PHILIPS", "U2", 1)]));
@@ -765,6 +768,24 @@ fn the_device_list_updates_when_volumes_change() {
     let _ = rig.event(&EventKind::Devices(vec![device("PHILIPS", "U2", 1)]));
     assert_eq!(rig.dialog.form().value("device"), Some(Value::Choice(None)));
     assert_eq!(rig.dialog.form().summary(), None);
+}
+
+#[test]
+fn the_only_device_is_chosen_when_none_was_synced_before() {
+    let (mut rig, _) = Rig::open(TaskId::SyncDevice, device_settings(None));
+    let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let _ = rig.event(&EventKind::Devices(vec![device("SDLTEST", "U9", 1)]));
+    assert_eq!(
+        rig.dialog.form().value("device"),
+        Some(Value::Choice(Some("U9".into())))
+    );
+    // Two devices and nothing remembered: the owner picks.
+    let (mut rig, _) = Rig::open(TaskId::SyncDevice, device_settings(None));
+    let _ = rig.event(&EventKind::Devices(vec![
+        device("A", "U8", 1),
+        device("B", "U9", 1),
+    ]));
+    assert_eq!(rig.dialog.form().value("device"), Some(Value::Choice(None)));
 }
 
 #[test]

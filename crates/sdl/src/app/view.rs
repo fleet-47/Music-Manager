@@ -87,10 +87,10 @@ impl FunctionView {
         self.phase != Phase::Idle
     }
 
-    /// Whether the running panel shows a spinner for it: running, and no total known yet.
+    /// Whether the running panel shows a spinner for it: beside its name while it runs.
     #[must_use]
     pub fn shows_spinner(&self) -> bool {
-        self.is_running() && self.state.counts.total.is_none()
+        self.is_running()
     }
 }
 
@@ -119,8 +119,12 @@ mod tests {
             }),
             now,
         );
-        assert!(!view.shows_spinner());
+        assert!(
+            view.shows_spinner(),
+            "it spins beside its name while it runs"
+        );
         assert!(view.apply(&EventKind::Finished, now));
+        assert!(!view.shows_spinner());
         assert_eq!(view.phase, Phase::Idle);
         assert_eq!(view.state.counts.total, Some(4));
     }

@@ -73,9 +73,9 @@ pub(super) fn open(settings: &Settings) -> (Form, State) {
     let mut form = Form::new("Review").field(
         Field::list(SONGS, "Held songs")
             .options(rows(settings, &state.chosen))
-            .when_empty("Nothing is waiting for review"),
+            .when_empty(EMPTY),
     );
-    label_start(&mut form, &state.chosen);
+    label_start(&mut form, &state.chosen, settings.review.len());
     (form, state)
 }
 
@@ -131,11 +131,20 @@ fn decided(chosen: &BTreeMap<String, Resolution>) -> Vec<ReviewChoice> {
         .collect()
 }
 
-/// The list's button and what blocks it.
-fn label_start(form: &mut Form, chosen: &BTreeMap<String, Resolution>) {
+/// What the list says when no song is held: that nothing waits, and how songs come to.
+const EMPTY: &str = "Nothing is waiting. A song comes here when Sync Spotify or Download link \
+finds no match it is sure of.";
+
+/// The list's button and what blocks it; `held` is how many songs the list shows.
+fn label_start(form: &mut Form, chosen: &BTreeMap<String, Resolution>, held: usize) {
     let count = decided(chosen).len();
     form.set_primary(format!("Download {} chosen", thousands(count)));
-    form.set_blocked((count == 0).then(|| "Choose what to do with at least one song".to_owned()));
+    let blocked = match (held, count) {
+        (0, _) => Some("Nothing to download"),
+        (_, 0) => Some("Open a song and choose what to do with it"),
+        _ => None,
+    };
+    form.set_blocked(blocked.map(str::to_owned));
 }
 
 /// The list form, whichever of list and detail is on screen.
@@ -154,9 +163,10 @@ fn rebuild(form: &mut Form, state: &mut State, settings: &Settings) {
     state.chosen.retain(|key, _| held.contains(&key.as_str()));
     let options = rows(settings, &state.chosen);
     let chosen = state.chosen.clone();
+    let held = settings.review.len();
     let list = list_of(form, state);
     list.set_options(SONGS, options);
-    label_start(list, &chosen);
+    label_start(list, &chosen, held);
 }
 
 /// `HeldCount` rebuilds the rows; a song that left while its detail is shown sends the detail
@@ -272,7 +282,7 @@ fn detail_form(held: &HeldSong, previous: Option<&Resolution>) -> Form {
     options.push(Choice::new(PASTE, "Paste a link"));
     options.push(Choice::new(LATER, "Leave for later"));
     options.push(Choice::new(NEVER, "Never download"));
-    let mut form = Form::new(song.title.clone())
+    let mut form = Form::new("Held song")
         .field(
             Field::radio(CHOICE, "What to do")
                 .options(options)
@@ -285,16 +295,16 @@ fn detail_form(held: &HeldSong, previous: Option<&Resolution>) -> Form {
                 .needs("Paste a link")
                 .hidden(),
         );
-    let mut wanted = vec![format!(
-        "Wanted: {}",
-        label(&song.title, &song.artists_joined())
-    )];
+    // What was wanted, in the same order as each candidate below (title · artists · album ·
+    // length), so the two read side by side; then why it was held.
     let album = song.album.clone().unwrap_or_default();
     let length = song.duration.map(clock).unwrap_or_default();
-    wanted.push(label(&album, &length));
-    wanted.push(held.reason.clone());
-    wanted.retain(|line| !line.is_empty());
-    form.set_notes(wanted);
+    let wanted = [song.title.as_str(), &song.artists_joined(), &album, &length]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    form.set_notes(vec![format!("Wanted: {wanted}"), held.reason.clone()]);
     form.set_primary("Done");
     form.set_back(true);
     match previous {
@@ -310,15 +320,6 @@ fn detail_form(held: &HeldSong, previous: Option<&Resolution>) -> Form {
     }
     changed(&mut form, CHOICE);
     form
-}
-
-/// `a · b`, leaving out an empty side.
-fn label(first: &str, second: &str) -> String {
-    [first, second]
-        .into_iter()
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ")
 }
 
 /// `3:41`.

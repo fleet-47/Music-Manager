@@ -23,6 +23,17 @@ pub enum Confirm {
     Browser,
 }
 
+impl Confirm {
+    /// What Enter answers: the safe "no" where yes does damage that cannot be undone (stopping
+    /// a run, quitting while one runs, clean-up that empties the device's Trash), and "yes" to
+    /// opening the browser, which the owner asked for by choosing Sync Spotify. The screen
+    /// highlights that button, so Enter does what is shown.
+    #[must_use]
+    pub fn enter_answers_yes(&self) -> bool {
+        matches!(self, Self::Browser)
+    }
+}
+
 /// A popup that only waits, with a spinner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Waiting {
@@ -50,6 +61,9 @@ pub enum Popup {
     Confirm(Confirm),
     /// What went wrong and what to do.
     Error(ErrorInfo),
+    /// The eject succeeded: the named device is safe to unplug. Shown even when the waiting
+    /// popup was hidden, so the owner is always told.
+    Ejected(String),
     /// Every key and mouse action; `scroll` is the first line shown.
     Help {
         /// First line shown.
@@ -66,7 +80,11 @@ impl Popup {
         match self {
             Self::Dialog(dialog) => dialog.form().is_animating(),
             Self::Waiting(_) => true,
-            Self::Attention { .. } | Self::Confirm(_) | Self::Error(_) | Self::Help { .. } => false,
+            Self::Attention { .. }
+            | Self::Confirm(_)
+            | Self::Error(_)
+            | Self::Ejected(_)
+            | Self::Help { .. } => false,
         }
     }
 }

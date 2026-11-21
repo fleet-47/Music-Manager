@@ -43,11 +43,19 @@ impl App {
             Msg::Paste(text) => self.on_paste(&text),
             Msg::Mouse(event) => self.on_mouse(event),
             Msg::Ejected(result) => {
-                self.popups
-                    .retain(|popup| !matches!(popup, Popup::Waiting(Waiting::Eject(_))));
-                if let Err(info) = result {
-                    self.popups.push(Popup::Error(info));
-                }
+                let mut device = None;
+                self.popups.retain(|popup| match popup {
+                    Popup::Waiting(Waiting::Eject(name)) => {
+                        device = Some(name.clone());
+                        false
+                    }
+                    _ => true,
+                });
+                // Hidden or not, the owner hears how it ended: safe to unplug, or what to do.
+                self.popups.push(match result {
+                    Ok(()) => Popup::Ejected(device.unwrap_or_else(|| self.synced_device())),
+                    Err(info) => Popup::Error(info),
+                });
                 Vec::new()
             }
             Msg::Wake => {
@@ -602,10 +610,19 @@ mod tests {
         assert_eq!(app.update(key(KeyCode::Char('q')), clock()), Vec::new());
         assert!(matches!(app.top(), Some(Popup::Waiting(Waiting::Eject(_)))));
         let _ = app.update(Msg::Ejected(Ok(())), clock());
+        assert!(matches!(app.top(), Some(Popup::Ejected(name)) if name == "SNOWSKY"));
+        assert_eq!(app.popups.len(), 1);
+        let _ = app.update(key(KeyCode::Enter), clock());
         assert!(app.popups.is_empty());
         app.popups.push(Popup::Waiting(Waiting::Eject("X".into())));
         assert_eq!(app.update(key(KeyCode::Esc), clock()), Vec::new());
         assert!(app.popups.is_empty(), "Esc hides it");
+        let _ = app.update(Msg::Ejected(Ok(())), clock());
+        assert!(
+            matches!(app.top(), Some(Popup::Ejected(name)) if name == "SNOWSKY"),
+            "a hidden eject that worked still says the device is safe to unplug"
+        );
+        let _ = app.update(key(KeyCode::Esc), clock());
         let failed = ErrorInfo {
             message: "m".into(),
             advice: "a".into(),

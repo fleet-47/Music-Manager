@@ -449,6 +449,13 @@ impl Field {
             return Some(format!("Fix the {} above", self.label.to_lowercase()));
         }
         let needs = self.needs.as_ref()?;
+        // With nothing offered, "Choose a device" cannot be done; the field itself says how to
+        // get an option ("No device found. Plug one in."), so this line points at it.
+        if let Kind::Dropdown(pick) | Kind::Radio(pick) = &self.kind
+            && pick.options.is_empty()
+        {
+            return Some(format!("No {} to choose yet", self.label.to_lowercase()));
+        }
         let unmet = match &self.kind {
             Kind::Text(text) => text.input.value().trim().is_empty(),
             Kind::Folder(folder) => folder.text.input.value().trim().is_empty(),
@@ -509,6 +516,10 @@ mod tests {
         if let Kind::Ticks(rows) = &ticks.kind {
             assert_eq!(rows.ticked_count(), 0);
         }
+        let none = Field::radio("d", "Device")
+            .needs("Choose a device")
+            .when_empty("No device found. Plug one in.");
+        assert_eq!(none.missing().as_deref(), Some("No device to choose yet"));
         let mut radio = Field::radio("r", "R").options(options()).needs("Choose");
         radio.set(Value::Choice(Some("gone".into())));
         assert_eq!(radio.missing().as_deref(), Some("Choose"));

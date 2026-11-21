@@ -44,9 +44,9 @@ pub struct RunView {
     pub name: &'static str,
     /// What it is doing now.
     pub headline: String,
-    /// `412 of 2,117`; with no known total, only what is done (`412`).
+    /// `412 of 2,117`; with no known total, what is done (`412 done`), or nothing before that.
     pub count: String,
-    /// Whole percent for the bar; `None` shows a spinner instead (no known total).
+    /// Whole percent for the bar; `None` (no known total) shows no bar.
     pub percent: Option<u16>,
     /// `about 3 min left`, or `estimating time left` until something is done.
     pub estimate: String,
@@ -101,7 +101,7 @@ pub fn selection_text(task: TaskId, state: &State, devices: &[Device], held: usi
             .as_ref()
             .and_then(|id| state.devices.get(id).map(|choice| (id, choice)))
             .map_or_else(
-                || "no device synced yet".to_owned(),
+                || "no device chosen yet".to_owned(),
                 // The format only applies To device.
                 |(id, choice)| {
                     let how = match choice.direction {
@@ -143,8 +143,14 @@ pub fn running_rows(app: &App) -> Vec<RunView> {
                     Some(percent(counts.done, total)),
                     estimate_text(estimate_remaining(elapsed, counts.done, total)),
                 ),
+                // No total yet (a link or a list still being read): no bar and no estimate, only
+                // what is done once something is.
                 None => (
-                    thousands(counts.done),
+                    if counts.done == 0 {
+                        String::new()
+                    } else {
+                        format!("{} done", thousands(counts.done))
+                    },
                     None,
                     "estimating time left".to_owned(),
                 ),
@@ -232,7 +238,7 @@ mod tests {
                 task: TaskId::SyncSpotify,
                 name: "Sync Spotify",
                 headline: "Downloading".into(),
-                count: "0".into(),
+                count: String::new(),
                 percent: None,
                 estimate: "estimating time left".into(),
                 attention: None,

@@ -129,7 +129,7 @@ fn attention_content(app: &App, task: TaskId, theme: Theme) -> Content {
             .collect()
     };
     Content {
-        title: format!("{} needs attention", task.name()),
+        title: format!("Attention · {}", task.name()),
         blocks,
         clickable,
     }
@@ -213,16 +213,17 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                 show(frame, theme, form.title(), body, (width, height), on_top)
             }
             Popup::Confirm(confirm) => {
-                let (title, text, yes, no) = confirm_words(confirm);
+                let words = question(confirm);
+                let enter_yes = confirm.enter_answers_yes();
                 let buttons = [
-                    Button::new("y", yes, PopupTarget::Yes),
-                    Button::new("n", no, PopupTarget::No),
+                    Button::new("y", words.yes, PopupTarget::Yes).default_if(enter_yes),
+                    Button::new("n", words.no, PopupTarget::No).default_if(!enter_yes),
                 ];
                 plain(
                     frame,
                     theme,
-                    title,
-                    &[text],
+                    words.title,
+                    &[words.text],
                     &buttons,
                     on_top.then_some(&mut hits.popup),
                 )
@@ -232,7 +233,17 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                 theme,
                 "Something went wrong",
                 &[info.message.clone(), info.advice.clone()],
-                &[Button::new("Esc", "Close", PopupTarget::Close)],
+                &[Button::close()],
+                on_top.then_some(&mut hits.popup),
+            ),
+            Popup::Ejected(device) => plain(
+                frame,
+                theme,
+                "Ejected",
+                &[format!(
+                    "{device} is cleaned up and ejected. It is safe to unplug."
+                )],
+                &[Button::close()],
                 on_top.then_some(&mut hits.popup),
             ),
             Popup::Waiting(waiting) => {
@@ -244,7 +255,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                     ),
                     Waiting::Eject(device) => (
                         format!(
-                            "{spinner} Ejecting {device}. Hiding this does not stop it; a problem still shows here."
+                            "{spinner} Cleaning up and ejecting {device}. You can hide this; you will be told when it is safe to unplug."
                         ),
                         vec![Button::new("Esc", "Hide", PopupTarget::Close)],
                     ),
@@ -322,8 +333,24 @@ impl Widget for FormBody<'_> {
     }
 }
 
-fn confirm_words(confirm: &Confirm) -> (&'static str, String, &'static str, &'static str) {
-    match confirm {
+/// What a question says: its title, its text and its two answers. The popup and the footer both
+/// read it, so a button and its footer hint always say the same.
+#[derive(Debug, Clone)]
+pub struct Question {
+    /// The popup's title.
+    pub title: &'static str,
+    /// The question.
+    pub text: String,
+    /// The `y` button.
+    pub yes: &'static str,
+    /// The `n` button.
+    pub no: &'static str,
+}
+
+/// The words of `confirm`.
+#[must_use]
+pub fn question(confirm: &Confirm) -> Question {
+    let (title, text, yes, no) = match confirm {
         Confirm::Stop(task) => (
             "Stop?",
             format!("Stop {}? What is finished stays.", task.name()),
@@ -332,7 +359,7 @@ fn confirm_words(confirm: &Confirm) -> (&'static str, String, &'static str, &'st
         ),
         Confirm::Quit => (
             "Quit?",
-            "A function is still running. Quit and stop it?".to_owned(),
+            "Something is still running. Quit and stop it? What is finished stays.".to_owned(),
             "Quit",
             "Keep going",
         ),
@@ -344,23 +371,46 @@ fn confirm_words(confirm: &Confirm) -> (&'static str, String, &'static str, &'st
         ),
         Confirm::Browser => (
             "Sign in",
-            "Sync Spotify opens your browser to sign in".to_owned(),
+            "Sync Spotify opens your browser to sign in.".to_owned(),
             "Continue",
             "Cancel",
         ),
+    };
+    Question {
+        title,
+        text,
+        yes,
+        no,
     }
 }
 
-/// A popup button: the key that does the same, its words, and what a click means.
+/// A popup button: the key that does the same, its words, what a click means, and whether Enter
+/// presses it (drawn highlighted, so Enter does what is shown).
 struct Button {
     key: &'static str,
     label: &'static str,
     target: PopupTarget,
+    default: bool,
 }
 
 impl Button {
     const fn new(key: &'static str, label: &'static str, target: PopupTarget) -> Self {
-        Self { key, label, target }
+        Self {
+            key,
+            label,
+            target,
+            default: false,
+        }
+    }
+
+    /// The Close button of messages, help and the attention list; Enter closes them too.
+    const fn close() -> Self {
+        Self::new("Esc", "Close", PopupTarget::Close).default_if(true)
+    }
+
+    const fn default_if(mut self, default: bool) -> Self {
+        self.default = default;
+        self
     }
 }
 
@@ -374,9 +424,14 @@ fn draw_buttons(
 ) {
     let mut x = row.x;
     for button in buttons {
+        let label = if button.default {
+            theme.focus()
+        } else {
+            theme.body()
+        };
         let text = Line::from(vec![
             Span::styled(format!("[{}] ", button.key), theme.emphasis()),
-            Span::styled(button.label, theme.body()),
+            Span::styled(button.label, label),
         ]);
         let wide = u16::try_from(text.width()).unwrap_or(u16::MAX);
         let rect = Rect::new(x, row.y, wide.min(row.right().saturating_sub(x)), 1);
@@ -532,13 +587,7 @@ impl Widget for ScrollBody<'_> {
             }
         }
         let row = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
-        draw_buttons(
-            buf,
-            row,
-            &[Button::new("Esc", "Close", PopupTarget::Close)],
-            self.theme,
-            &mut drawn,
-        );
+        draw_buttons(buf, row, &[Button::close()], self.theme, &mut drawn);
         if let Some(hits) = self.hits {
             *hits = drawn;
         }

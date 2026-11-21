@@ -1,9 +1,14 @@
 //! Every key and mouse action, once (F1). The footer and the help popup are both read from
 //! [`BINDINGS`], so a key is named and described in one place. A form's own footer hints come
 //! from `sdl_form::Form::hints` (the form knows its own keys); the help lists them under "Forms".
+//! A question's footer is its own two answers ([`super::popups::question`]), so a button and its
+//! hint always say the same. Every footer hint is also a button: a click on it is its key
+//! ([`key_of`]), which gives every key that has a hint a mouse action.
 
+use crossterm::event::KeyCode;
 use sdl_form::Hint;
 
+use super::popups::{extent, question};
 use crate::app::{App, FunctionView, Popup, Waiting};
 
 /// Where a binding applies; also the help popup's block title.
@@ -61,8 +66,8 @@ pub struct Binding {
     pub key: &'static str,
     /// What it does, in plain words (at most 21 columns).
     pub what: &'static str,
-    /// How the footer shows it, when it does.
-    pub foot: Option<Hint>,
+    /// How the footer shows it, when it does: its key and words.
+    pub foot: Option<(&'static str, &'static str)>,
     /// The footer shows it only while this holds.
     pub when: Option<fn(&App) -> bool>,
 }
@@ -79,7 +84,7 @@ const fn bind(scope: Scope, key: &'static str, what: &'static str) -> Binding {
 
 impl Binding {
     const fn foot(mut self, key: &'static str, what: &'static str) -> Self {
-        self.foot = Some(Hint { key, what });
+        self.foot = Some((key, what));
         self
     }
 
@@ -93,9 +98,23 @@ fn selected_runs(app: &App) -> bool {
     app.view(app.selected).is_some_and(FunctionView::is_running)
 }
 
+/// Enter runs the chosen function only when it is not already open or running.
+fn selected_can_run(app: &App) -> bool {
+    app.view(app.selected).is_some_and(|view| !view.is_open())
+}
+
+/// Whether the scrolling popup on top has more than it shows.
+fn scrolls(app: &App) -> bool {
+    app.top()
+        .and_then(|top| extent(app, top, app.size))
+        .is_some_and(|extent| extent.max_scroll() > 0)
+}
+
 /// All keys and mouse actions. The order is the footer's, and the help's.
 pub const BINDINGS: &[Binding] = &[
-    bind(Scope::Main, "Enter", "run it").foot("Enter", "run"),
+    bind(Scope::Main, "Enter", "run it")
+        .foot("Enter", "run")
+        .when(selected_can_run),
     bind(Scope::Main, "↑↓ j k", "choose a function").foot("↑↓", "choose"),
     bind(Scope::Main, "s", "stop it while it runs")
         .foot("s", "stop")
@@ -109,15 +128,18 @@ pub const BINDINGS: &[Binding] = &[
     bind(Scope::Form, "type", "filter a list"),
     bind(Scope::Form, "Enter", "continue, then start"),
     bind(Scope::Form, "Esc", "clear filter / cancel"),
-    bind(Scope::Form, "r", "find devices again"),
-    bind(Scope::Form, "o", "open match in browser"),
-    bind(Scope::Scroll, "↑↓ j k", "scroll").foot("↑↓", "scroll"),
+    bind(Scope::Form, "r", "look for devices"),
+    bind(Scope::Form, "o", "open in browser"),
+    bind(Scope::Scroll, "↑↓ j k", "scroll")
+        .foot("↑↓", "scroll")
+        .when(scrolls),
     bind(Scope::Scroll, "PgUp PgDn", "page up, page down"),
     bind(Scope::Scroll, "Home End", "top, end"),
     bind(Scope::Scroll, "Esc q Enter", "close").foot("Esc", "close"),
     bind(Scope::Notice, "Esc q Enter", "close").foot("Esc", "close"),
-    bind(Scope::Question, "y, Enter", "yes").foot("y", "yes"),
-    bind(Scope::Question, "n, Esc", "no").foot("n", "no"),
+    bind(Scope::Question, "y", "yes"),
+    bind(Scope::Question, "n, Esc", "no"),
+    bind(Scope::Question, "Enter", "the highlighted one"),
     bind(Scope::Wait, "Esc", "cancel the sign-in")
         .foot("Esc", "cancel")
         .when(signing_in),
@@ -125,6 +147,7 @@ pub const BINDINGS: &[Binding] = &[
         .foot("Esc", "hide")
         .when(ejecting),
     bind(Scope::Mouse, "click", "press what is there"),
+    bind(Scope::Mouse, "click a key", "same as the key"),
     bind(Scope::Mouse, "second click", "run the chosen one"),
     bind(Scope::Mouse, "wheel", "scroll the list"),
     bind(Scope::Mouse, "drag", "move a scrollbar"),
@@ -136,7 +159,7 @@ fn scope(app: &App) -> Scope {
         None => Scope::Main,
         Some(Popup::Dialog(_)) => Scope::Form,
         Some(Popup::Help { .. } | Popup::Attention { .. }) => Scope::Scroll,
-        Some(Popup::Error(_)) => Scope::Notice,
+        Some(Popup::Error(_) | Popup::Ejected(_)) => Scope::Notice,
         Some(Popup::Confirm(_)) => Scope::Question,
         Some(Popup::Waiting(_)) => Scope::Wait,
     }
@@ -153,15 +176,56 @@ fn ejecting(app: &App) -> bool {
 /// The footer's hints for what is on screen now: the open form's, or the table's for the scope.
 #[must_use]
 pub fn footer(app: &App) -> Vec<Hint> {
-    if let Some(Popup::Dialog(dialog)) = app.top() {
-        return dialog.hints();
+    match app.top() {
+        Some(Popup::Dialog(dialog)) => return dialog.hints(),
+        Some(Popup::Confirm(confirm)) => {
+            let words = question(confirm);
+            let answer = |key, label: &str| Hint {
+                key,
+                what: label.to_lowercase().into(),
+            };
+            let enter = if confirm.enter_answers_yes() {
+                words.yes
+            } else {
+                words.no
+            };
+            // Enter first: a narrow footer keeps the last two, and `y` and `n` are the ones that
+            // must never go.
+            return vec![
+                answer("Enter", enter),
+                answer("y", words.yes),
+                answer("n", words.no),
+            ];
+        }
+        _ => {}
     }
     let here = scope(app);
     BINDINGS
         .iter()
         .filter(|binding| binding.scope == here && binding.when.is_none_or(|holds| holds(app)))
-        .filter_map(|binding| binding.foot)
+        .filter_map(|binding| binding.foot.map(|(key, what)| Hint::new(key, what)))
         .collect()
+}
+
+/// The key a click on a footer hint presses; `None` for hints that name a kind of key (`↑↓`,
+/// `type`) rather than one key.
+#[must_use]
+pub fn key_of(hint: &Hint) -> Option<KeyCode> {
+    match hint.key {
+        "Enter" => Some(KeyCode::Enter),
+        "Esc" => Some(KeyCode::Esc),
+        "Tab" => Some(KeyCode::Tab),
+        "Space" => Some(KeyCode::Char(' ')),
+        "→" => Some(KeyCode::Right),
+        "←" => Some(KeyCode::Left),
+        key => {
+            let mut chars = key.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) if c.is_ascii_graphic() => Some(KeyCode::Char(c)),
+                _ => None,
+            }
+        }
+    }
 }
 
 /// Columns between footer hints.
@@ -198,7 +262,7 @@ pub fn fit(hints: &[Hint], columns: u16) -> Vec<Hint> {
         if used > room {
             break;
         }
-        shown.push(*hint);
+        shown.push(hint.clone());
     }
     shown.extend_from_slice(back);
     shown
@@ -254,14 +318,17 @@ mod tests {
             }),
             clock,
         );
-        assert_eq!(keys(&app), ["Enter", "↑↓", "s", "a", "?", "q"]);
+        // It runs: Enter would do nothing, so it is not offered; Stop is.
+        assert_eq!(keys(&app), ["↑↓", "s", "a", "?", "q"]);
     }
 
     #[test]
     fn each_popup_footer_says_how_to_answer_or_leave() {
         let mut app = app();
         app.popups.push(Popup::Confirm(Confirm::Quit));
-        assert_eq!(keys(&app), ["y", "n"]);
+        assert_eq!(keys(&app), ["Enter", "y", "n"]);
+        let enter = footer(&app).first().map(|hint| hint.what.to_string());
+        assert_eq!(enter.as_deref(), Some("keep going"));
         app.popups.push(Popup::Waiting(Waiting::Browser));
         assert_eq!(keys(&app), ["Esc"]);
         app.popups
@@ -269,6 +336,22 @@ mod tests {
         assert_eq!(keys(&app), ["Esc"]);
         app.popups.push(Popup::Help { scroll: 0 });
         assert_eq!(keys(&app), ["↑↓", "Esc"]);
+        // An attention list with nothing to scroll offers only the way out.
+        app.popups.push(Popup::Attention {
+            task: sdl_core::TaskId::Convert,
+            scroll: 0,
+        });
+        assert_eq!(keys(&app), ["Esc"]);
+    }
+
+    #[test]
+    fn a_click_on_a_hint_is_its_key() {
+        let key = |key, what| key_of(&Hint::new(key, what));
+        assert_eq!(key("Enter", "start"), Some(KeyCode::Enter));
+        assert_eq!(key("r", "look for devices"), Some(KeyCode::Char('r')));
+        assert_eq!(key("?", "help"), Some(KeyCode::Char('?')));
+        assert_eq!(key("↑↓", "choose"), None);
+        assert_eq!(key("type", "filter"), None);
     }
 
     #[test]

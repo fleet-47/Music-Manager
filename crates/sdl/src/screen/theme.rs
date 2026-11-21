@@ -118,6 +118,13 @@ impl Theme {
         self.fg(PALETTE.mocha.colors.overlay1)
     }
 
+    /// What Enter acts on: the focused field's label, the focused or default button. `lavender`,
+    /// bold (bold alone without colour, so it still stands out).
+    #[must_use]
+    pub fn focus(self) -> Style {
+        self.border_focus().add_modifier(Modifier::BOLD)
+    }
+
     /// The styles a form is drawn in, from the roles here: labels `mauve`, body `text`, secondary
     /// `subtext0`, emphasis `peach`, the focused field `lavender`, flagged parts and what is
     /// missing `yellow` (red is for failures only), the highlighted row on `surface0`.
@@ -128,7 +135,7 @@ impl Theme {
             body: self.body(),
             secondary: self.secondary(),
             emphasis: self.emphasis(),
-            focus: self.border_focus().add_modifier(Modifier::BOLD),
+            focus: self.focus(),
             selected: self.selected(),
             flagged: self.attention(),
             error: self.attention(),

@@ -29,9 +29,13 @@ impl App {
             return Vec::new();
         };
         match top {
-            Popup::Confirm(_) => match key.code {
-                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.answer(true),
+            Popup::Confirm(question) => match key.code {
+                KeyCode::Char('y' | 'Y') => self.answer(true),
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => self.answer(false),
+                KeyCode::Enter => {
+                    let yes = question.enter_answers_yes();
+                    self.answer(yes)
+                }
                 _ => Vec::new(),
             },
             Popup::Waiting(Waiting::Browser) if key.code == KeyCode::Esc => self.answer(false),
@@ -39,7 +43,7 @@ impl App {
                 self.popups.pop();
                 Vec::new()
             }
-            Popup::Error(_) => {
+            Popup::Error(_) | Popup::Ejected(_) => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
                     self.popups.pop();
                 }
@@ -228,6 +232,28 @@ mod tests {
         let size = Size::new(100, 30);
         let current = extent(&app, &top, size).map(|each| each.items.len());
         assert_eq!(current, Some(1));
+    }
+
+    #[test]
+    fn enter_gives_the_safe_answer_where_yes_does_damage() {
+        let mut app = app();
+        running(&mut app, TaskId::Convert);
+        for question in [
+            Confirm::Stop(TaskId::Convert),
+            Confirm::Quit,
+            Confirm::Eject {
+                device: "DISC".into(),
+            },
+        ] {
+            app.popups.push(Popup::Confirm(question));
+            assert_eq!(app.update(key(KeyCode::Enter), clock()), Vec::new());
+            assert!(app.popups.is_empty() && !app.quit);
+        }
+        app.popups.push(Popup::Confirm(Confirm::Browser));
+        assert_eq!(
+            app.update(key(KeyCode::Enter), clock()),
+            vec![Cmd::Send(TaskId::SyncSpotify, Command::Go)]
+        );
     }
 
     #[test]

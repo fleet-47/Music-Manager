@@ -151,10 +151,9 @@ impl Dialog {
         }
         let mut hints = self.form.hints();
         let own = match &self.extra {
-            Extra::SyncDevice(_) if self.looks_again_works() => Some(Hint {
-                key: "r",
-                what: "look again",
-            }),
+            Extra::SyncDevice(_) if self.looks_again_works() => {
+                Some(Hint::new("r", "look for devices"))
+            }
             Extra::Review(state)
                 if state.list.is_some()
                     && matches!(
@@ -162,10 +161,7 @@ impl Dialog {
                         Some(Value::Choice(Some(id))) if review::is_candidate(&id)
                     ) =>
             {
-                Some(Hint {
-                    key: "o",
-                    what: "open in browser",
-                })
+                Some(Hint::new("o", "open in browser"))
             }
             _ => None,
         };

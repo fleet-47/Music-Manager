@@ -232,7 +232,7 @@ fn the_attention_list_wraps_reasons_and_shows_a_close_button() -> TestResult {
         let shown = rows.join("\n");
         needs(
             &shown,
-            &["needs attention", "Song number 0", "[Esc] Close"],
+            &["Attention · Sync Spotify", "Song number 0", "[Esc] Close"],
             (width, height),
         );
         assert!(hits.popup.area_of(&PopupTarget::Item(0)).is_some());
@@ -307,7 +307,7 @@ fn errors_and_waiting_popups_show_what_happened_and_the_way_out() -> TestResult 
         let (rows, hits, _) = draw(&app, Theme::new(true))?;
         needs(
             &rows.join("\n"),
-            &["Ejecting DISC", "[Esc] Hide"],
+            &["ejecting DISC", "[Esc] Hide"],
             (width, height),
         );
         assert!(!hits.popup.is_empty(), "Hide can be clicked while ejecting");
@@ -394,6 +394,30 @@ fn clicking_a_function_row_chooses_it_and_a_second_click_runs_it() -> TestResult
         vec![Cmd::Start(TaskId::DownloadLink)]
     );
     assert!(matches!(app.top(), Some(Popup::Dialog(_))));
+    Ok(())
+}
+
+#[test]
+fn a_click_on_a_footer_hint_presses_its_key() -> TestResult {
+    let mut app = app(100, 30);
+    let (_, hits, _) = draw(&app, Theme::new(true))?;
+    app.hits = hits;
+    let help = app
+        .hits
+        .footer
+        .area_of(&crossterm::event::KeyCode::Char('?'))
+        .ok_or("no help hint")?;
+    assert_eq!(click(&mut app, help.x, help.y), Vec::new());
+    assert!(matches!(app.top(), Some(Popup::Help { .. })));
+    let (_, hits, _) = draw(&app, Theme::new(true))?;
+    app.hits = hits;
+    let close = app
+        .hits
+        .footer
+        .area_of(&crossterm::event::KeyCode::Esc)
+        .ok_or("no close hint")?;
+    let _ = click(&mut app, close.x, close.y);
+    assert!(app.popups.is_empty());
     Ok(())
 }
 

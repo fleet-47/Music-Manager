@@ -72,12 +72,12 @@ pub(super) fn open(settings: &Settings) -> (Form, State, Conversation) {
         ]))
         .field(
             Field::ticks(WHAT, "What")
-                .needs("Tick at least one")
+                .needs("Tick what to copy")
                 .options(what_options(&[])),
         )
         .field(
             Field::ticks(FOLDERS, "Folders on the device")
-                .needs("Tick at least one folder")
+                .needs("Tick the folders to copy")
                 .when_empty("This device has no folders")
                 .hidden(),
         )
@@ -193,12 +193,21 @@ pub(super) fn on_event(
                     })
                     .collect(),
             );
-            // Nothing chosen: the last device synced is chosen when it is there (F10).
-            if chosen_device(form, state).is_none()
-                && let Some(last) = &settings.state.last_device
-                && devices.iter().any(|device| device.id() == last)
-            {
-                form.set(DEVICE, Value::Choice(Some(last.clone())));
+            // Nothing chosen: the last device synced is chosen when it is there (F10). With no
+            // device synced before and exactly one offered, that one is chosen, so there is
+            // nothing to pick; a remembered device that is absent is never swapped for another.
+            if chosen_device(form, state).is_none() {
+                let pick = match (&settings.state.last_device, devices.as_slice()) {
+                    (Some(last), _) => devices
+                        .iter()
+                        .any(|device| device.id() == last.as_str())
+                        .then(|| last.clone()),
+                    (None, [only]) => Some(only.id().to_owned()),
+                    (None, _) => None,
+                };
+                if let Some(id) = pick {
+                    form.set(DEVICE, Value::Choice(Some(id)));
+                }
             }
             let chosen = chosen_device(form, state).map(|device| device.id().to_owned());
             if chosen != state.device {
@@ -236,8 +245,9 @@ pub(super) fn on_event(
             conv.changed();
         }
         EventKind::Plan(plan) => {
-            let device =
-                chosen_device(form, state).map_or_else(|| "the device".to_owned(), Device::label);
+            // The name alone: "(disk image)" belongs in the device list, not in every sentence.
+            let device = chosen_device(form, state)
+                .map_or_else(|| "the device".to_owned(), |device| device.name.clone());
             let mut summary = format!(
                 "{}, {}{} to copy · {} already there",
                 files(plan.files),

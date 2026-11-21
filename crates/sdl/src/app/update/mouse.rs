@@ -1,8 +1,9 @@
 //! Mouse routing. The top of the screen takes the event: a dialog's form, a plain popup, or the
 //! main screen. Each tests the position against the rectangles the last frame recorded
-//! ([`crate::app::Hits`]); a click outside a popup does nothing. Every action here has a key.
+//! ([`crate::app::Hits`]); a click outside a popup does nothing. Every action here has a key, and
+//! a click on a footer hint is that hint's key, so every key with a hint has a mouse action.
 
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tui_scrollbar::{ScrollBar, ScrollBarInteraction, ScrollCommand, ScrollLengths};
 
 use super::popups::Scroll;
@@ -11,6 +12,12 @@ use crate::app::{App, Cmd, MainTarget, Popup, PopupTarget};
 impl App {
     /// A mouse event; only the left button, the wheel and a scrollbar drag mean anything.
     pub(super) fn on_mouse(&mut self, event: MouseEvent) -> Vec<Cmd> {
+        // A footer hint is a button for its key, whatever is on top.
+        if event.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(code) = self.hits.footer.at(event.column, event.row).copied()
+        {
+            return self.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
         let step = match self.popups.last_mut() {
             Some(Popup::Dialog(dialog)) => Some((
                 dialog.task(),

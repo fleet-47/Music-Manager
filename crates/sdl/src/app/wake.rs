@@ -12,17 +12,12 @@ pub const FRAME: Duration = Duration::from_millis(33);
 /// The spinner's step.
 pub const SPINNER: Duration = Duration::from_millis(100);
 
-/// Elapsed time and the estimate are shown to the second.
-pub const CLOCK: Duration = Duration::from_secs(1);
-
 /// How long until the next wake, or `None` when no timer is needed.
 ///
 /// * an effect is playing (`App::animating`): [`FRAME`];
-/// * a spinner is on screen: [`SPINNER`]. That is a running function with no known total while
-///   the running panel shows its detail, or a popup with a spinner (a form that is busy, a
-///   waiting popup);
-/// * elapsed time is on screen (a running function while the running panel shows its detail):
-///   [`CLOCK`];
+/// * a spinner is on screen: [`SPINNER`]. That is a running function while the running panel
+///   shows its detail (it spins beside the name; the same wake reads the time estimate again),
+///   or a popup with a spinner (a form that is busy, a waiting popup);
 /// * otherwise `None`: no timer exists.
 ///
 /// The shortest applies. Progress bars and counts are not timed: they change only when a
@@ -35,7 +30,6 @@ pub fn next_wake(app: &App) -> Option<Duration> {
     [
         app.animating.then_some(FRAME),
         (spinner_in_panel || spinner_in_popup).then_some(SPINNER),
-        detail.then_some(CLOCK),
     ]
     .into_iter()
     .flatten()
@@ -90,10 +84,10 @@ mod tests {
     }
 
     #[test]
-    fn a_running_task_with_a_known_total_wakes_once_a_second() {
+    fn a_running_task_with_a_known_total_still_spins_beside_its_name() {
         let mut app = app(Size::new(100, 30));
         run(&mut app, TaskId::Convert, Some(10));
-        assert_eq!(next_wake(&app), Some(CLOCK));
+        assert_eq!(next_wake(&app), Some(SPINNER));
     }
 
     #[test]

@@ -218,8 +218,9 @@ fn an_empty_dropdown_or_radio_says_why() -> TestResult {
     );
     let drawn = draw(&form)?;
     assert!(drawn.shows("No device found. Plug one in."));
-    assert_eq!(form.missing(), vec!["Choose a device".to_owned()]);
-    assert!(drawn.shows("Choose a device"));
+    // Nothing can be chosen yet, so the missing line points at the field rather than asking.
+    assert_eq!(form.missing(), vec!["No device to choose yet".to_owned()]);
+    assert!(drawn.shows("No device to choose yet"));
     Ok(())
 }
 

@@ -130,10 +130,33 @@ fn field_height(field: &Field, width: u16) -> u16 {
         Kind::Text(_) | Kind::Folder(_) => 1_u16.saturating_add(message),
         Kind::Dropdown(pick) if pick.open => open_rows(pick),
         Kind::Toggle(_) | Kind::Dropdown(_) => 0,
-        Kind::Radio(pick) => u16::try_from(pick.options.len().max(1)).unwrap_or(u16::MAX),
+        Kind::Radio(pick) => radio_rows(pick, width.saturating_sub(2)),
         Kind::Ticks(_) | Kind::List(_) => LIST_ROWS.saturating_add(2),
     };
     1_u16.saturating_add(body)
+}
+
+/// Columns of a radio option's lead (`(•) `); its label wraps beside it.
+const RADIO_LEAD: u16 = 4;
+
+/// Rows a radio group takes at `width`: each option's label wrapped beside its lead, so a long
+/// candidate is read whole, never cut (one row when there are no options).
+fn radio_rows(pick: &Pick, width: u16) -> u16 {
+    if pick.options.is_empty() {
+        return 1;
+    }
+    pick.options
+        .iter()
+        .map(|option| option_rows(option, width))
+        .fold(0, u16::saturating_add)
+}
+
+/// Rows one radio option's label takes wrapped at `width` (its lead included).
+fn option_rows(option: &Choice, width: u16) -> u16 {
+    let label = width.saturating_sub(RADIO_LEAD).max(1);
+    u16::try_from(wrapped(option_line(option, "", &FormStyle::default())).line_count(label))
+        .unwrap_or(u16::MAX)
+        .max(1)
 }
 
 fn open_rows(pick: &Pick) -> u16 {
@@ -355,10 +378,10 @@ fn draw_field(
             hits.push(browse, Target::Browse(field.key));
         }
         Kind::Dropdown(pick) if pick.open => {
-            draw_options(pick, body, field.key, buf, style, hits, true);
+            draw_dropdown(pick, body, field.key, buf, style, hits);
         }
         Kind::Toggle(_) | Kind::Dropdown(_) => {}
-        Kind::Radio(pick) => draw_options(pick, body, field.key, buf, style, hits, false),
+        Kind::Radio(pick) => draw_radio(pick, body, field.key, buf, style, hits),
         Kind::Ticks(rows) => draw_rows(rows, body, field.key, true, buf, style, hits),
         Kind::List(rows) => draw_rows(rows, body, field.key, false, buf, style, hits),
     }
@@ -418,31 +441,24 @@ fn option_line<'a>(option: &'a Choice, lead: &'a str, style: &FormStyle) -> Line
     Line::from(spans)
 }
 
-fn draw_options(
+/// An open dropdown's list: at most [`DROPDOWN_ROWS`] rows, scrolled so the highlight shows.
+fn draw_dropdown(
     pick: &Pick,
     area: Rect,
     key: crate::Key,
     buf: &mut Buffer,
     style: &FormStyle,
     hits: &mut HitMap<Target>,
-    dropdown: bool,
 ) {
     if pick.options.is_empty() {
         Line::styled(pick.empty.as_str(), style.secondary).render(area, buf);
         return;
     }
-    let rows = if dropdown {
-        open_rows(pick)
-    } else {
-        area.height
-    };
-    let first = if dropdown {
-        pick.cursor
-            .saturating_add(1)
-            .saturating_sub(usize::from(rows))
-    } else {
-        0
-    };
+    let rows = open_rows(pick);
+    let first = pick
+        .cursor
+        .saturating_add(1)
+        .saturating_sub(usize::from(rows));
     for (slot, (index, option)) in pick
         .options
         .iter()
@@ -458,23 +474,101 @@ fn draw_options(
         if row.bottom() > area.bottom() {
             break;
         }
-        let on = if dropdown {
-            pick.cursor == index
-        } else {
-            pick.chosen.as_ref() == Some(&option.id)
-        };
-        let lead = match (dropdown, on) {
-            (true, true) => "› ",
-            (true, false) => "  ",
-            (false, true) => "(•) ",
-            (false, false) => "( ) ",
-        };
+        let on = pick.cursor == index;
         if on {
             buf.set_style(row, style.selected);
         }
-        option_line(option, lead, style).render(row, buf);
+        let lead = if on { "› " } else { "  " };
+        fit_line(option_line(option, lead, style), row.width, style).render(row, buf);
         hits.push(row, Target::Row { field: key, index });
     }
+}
+
+/// A radio group: every option shown, its label wrapped beside its lead.
+fn draw_radio(
+    pick: &Pick,
+    area: Rect,
+    key: crate::Key,
+    buf: &mut Buffer,
+    style: &FormStyle,
+    hits: &mut HitMap<Target>,
+) {
+    if pick.options.is_empty() {
+        Line::styled(pick.empty.as_str(), style.secondary).render(area, buf);
+        return;
+    }
+    let mut y = area.y;
+    for (index, option) in pick.options.iter().enumerate() {
+        let rows = option_rows(option, area.width).min(area.bottom().saturating_sub(y));
+        if rows == 0 {
+            break;
+        }
+        let row = Rect::new(area.x, y, area.width, rows);
+        let on = pick.chosen.as_ref() == Some(&option.id);
+        if on {
+            buf.set_style(row, style.selected);
+        }
+        let lead = if on { "(•) " } else { "( ) " };
+        Span::styled(lead, style.emphasis).render(row, buf);
+        let label = Rect::new(
+            row.x.saturating_add(RADIO_LEAD),
+            row.y,
+            row.width.saturating_sub(RADIO_LEAD),
+            rows,
+        );
+        wrapped(option_line(option, "", style)).render(label, buf);
+        hits.push(row, Target::Row { field: key, index });
+        y = y.saturating_add(rows);
+    }
+}
+
+/// A cut row keeps its detail whole while the label keeps at least this many columns beside it.
+const LABEL_MIN: usize = 12;
+
+/// `line` as it fits in `width` columns on one row. When it is too long the label is cut with
+/// "…" and the detail after it (a held song's choice, a list's song count) is kept whole, so
+/// what was chosen is never the part that is lost.
+fn fit_line<'a>(line: Line<'a>, width: u16, style: &FormStyle) -> Line<'a> {
+    let width = usize::from(width);
+    if line.width() <= width {
+        return line;
+    }
+    let mut spans = line.spans;
+    let detail = spans
+        .last()
+        .filter(|span| {
+            span.content.starts_with("  ") && span.width().saturating_add(LABEL_MIN) <= width
+        })
+        .cloned();
+    if detail.is_some() {
+        spans.pop();
+    }
+    let room = width
+        .saturating_sub(detail.as_ref().map_or(0, Span::width))
+        .saturating_sub(1);
+    let mut kept: Vec<Span<'a>> = Vec::new();
+    let mut used = 0_usize;
+    for span in spans {
+        if used.saturating_add(span.width()) <= room {
+            used = used.saturating_add(span.width());
+            kept.push(span);
+            continue;
+        }
+        let mut text = String::new();
+        for c in span.content.chars() {
+            let wide = Span::raw(c.to_string()).width();
+            if used.saturating_add(wide) > room {
+                break;
+            }
+            used = used.saturating_add(wide);
+            text.push(c);
+        }
+        kept.push(Span::styled(text, span.style));
+        break;
+    }
+    kept.push(Span::styled("…", style.secondary));
+    kept.extend(detail);
+    Line::from(kept)
 }
 
 fn draw_rows(
@@ -519,7 +613,7 @@ fn draw_rows(
         } else {
             "Nothing matches"
         };
-        Line::styled(text, style.secondary).render(list, buf);
+        wrapped(Line::styled(text, style.secondary)).render(list, buf);
     }
     for (slot, at) in listed
         .iter()
@@ -546,7 +640,7 @@ fn draw_rows(
             (true, false) => "[ ] ",
             (false, _) => "",
         };
-        option_line(option, lead, style).render(row, buf);
+        fit_line(option_line(option, lead, style), row.width, style).render(row, buf);
         hits.push(row, Target::Row { field: key, index });
     }
     let bar = Rect::new(
@@ -758,6 +852,49 @@ mod tests {
         }
         assert!(hits.area_of(&Target::Primary).is_some());
         assert!(narrow.height > size(&form, 64).height);
+    }
+
+    #[test]
+    fn a_long_radio_option_wraps_beside_its_lead_and_is_clicked_on_any_row() {
+        let long = "Never Gonna Give You Up · Rick Astley · Whenever You Need Somebody · 3:34";
+        let form = Form::new("F").field(Field::radio("choice", "What to do").options(vec![
+            Choice::new("a", long),
+            Choice::new("b", "Leave for later"),
+        ]));
+        let wanted = size(&form, 40);
+        let area = Rect::new(0, 0, wanted.width, wanted.height);
+        let mut buf = Buffer::empty(area);
+        let hits = render(&form, area, &mut buf, &FormStyle::default());
+        let drawn = text_of(&buf);
+        for word in ["Somebody", "3:34", "Leave for later"] {
+            assert!(drawn.contains(word), "{word} cut off: {drawn}");
+        }
+        let first = hits.area_of(&Target::Row {
+            field: "choice",
+            index: 0,
+        });
+        assert!(first.is_some_and(|rect| rect.height > 1));
+    }
+
+    #[test]
+    fn a_cut_row_ends_in_an_ellipsis_and_keeps_its_detail() {
+        let option = Choice::new(
+            "x",
+            "Rick Astley - Never Gonna Give You Up (Official Video)",
+        )
+        .with_detail("→ Never Gonna Give You Up");
+        let style = FormStyle::default();
+        let line = fit_line(option_line(&option, "", &style), 50, &style);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            text.contains('…') && text.ends_with("→ Never Gonna Give You Up"),
+            "{text}"
+        );
+        assert!(line.width() <= 50);
     }
 
     #[test]

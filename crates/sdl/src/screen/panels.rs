@@ -97,7 +97,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
     if let Some(running) = places.running {
         draw_running(buf, running, &rows, app.spin, theme, hits);
     }
-    draw_footer(buf, places.footer, app, theme);
+    draw_footer(buf, places.footer, app, theme, hits);
     places.running
 }
 
@@ -159,7 +159,12 @@ fn draw_row(buf: &mut Buffer, rect: Rect, row: &RowView, app: &App, selected: bo
     if rect.height < 2
         && let Some(run) = running_rows(app).iter().find(|run| run.task == row.task)
     {
-        first.push(Span::styled(format!("  {}", run.count), theme.running()));
+        let count = if run.count.is_empty() {
+            "running"
+        } else {
+            run.count.as_str()
+        };
+        first.push(Span::styled(format!("  {count}"), theme.running()));
     }
     if !row.selection.is_empty() {
         first.push(Span::styled(
@@ -174,7 +179,11 @@ fn draw_row(buf: &mut Buffer, rect: Rect, row: &RowView, app: &App, selected: bo
             theme.attention(),
         ));
     }
-    Line::from(first).render(Rect::new(rect.x, rect.y, rect.width, 1), buf);
+    clipped(
+        Line::from(first),
+        Rect::new(rect.x, rect.y, rect.width, 1),
+        buf,
+    );
     if rect.height >= 2 {
         let line = match &row.last {
             Some(last) => Line::styled(
@@ -183,10 +192,21 @@ fn draw_row(buf: &mut Buffer, rect: Rect, row: &RowView, app: &App, selected: bo
             ),
             None => Line::styled("    not run yet", theme.secondary()),
         };
-        line.render(
+        clipped(
+            line,
             Rect::new(rect.x, rect.y.saturating_add(1), rect.width, 1),
             buf,
         );
+    }
+}
+
+/// Draw `line` in the one-row `area`; when it does not fit, its last cell shows "…", so a cut
+/// line never looks complete.
+fn clipped(line: Line<'_>, area: Rect, buf: &mut Buffer) {
+    let too_long = line.width() > usize::from(area.width);
+    line.render(area, buf);
+    if too_long && let Some(cell) = buf.cell_mut((area.right().saturating_sub(1), area.y)) {
+        cell.set_symbol("…");
     }
 }
 
@@ -234,7 +254,13 @@ fn draw_running(
         let rect = Rect::new(inner.x, y, inner.width, per_task);
         hits.main.push(rect, MainTarget::Running(task.task));
         let line = |n: u16| Rect::new(rect.x, rect.y.saturating_add(n), rect.width, 1);
-        Line::styled(task.name, theme.running().add_modifier(Modifier::BOLD)).render(line(0), buf);
+        // The spinner beside the name moves while the task runs, so a long single song or file
+        // never looks hung even when no count changes.
+        Line::from(vec![
+            Span::styled(format!("{} ", sdl_form::spinner(spin)), theme.running()),
+            Span::styled(task.name, theme.running().add_modifier(Modifier::BOLD)),
+        ])
+        .render(line(0), buf);
         // The headline has its own row; one too long for it ends in "…", so it never looks cut.
         Line::styled(fit(&task.headline, rect.width), theme.secondary()).render(line(1), buf);
         if let Some(percent) = task.percent {
@@ -245,11 +271,7 @@ fn draw_running(
                 .unfilled_style(theme.border())
                 .render(line(2), buf);
         } else {
-            Line::from(vec![
-                Span::styled(format!("{} ", sdl_form::spinner(spin)), theme.running()),
-                Span::styled(task.count.as_str(), theme.emphasis()),
-            ])
-            .render(line(2), buf);
+            Line::styled(task.count.as_str(), theme.emphasis()).render(line(2), buf);
         }
         let mut estimate = vec![Span::styled(task.estimate.as_str(), theme.secondary())];
         if let Some(attention) = &task.attention {
@@ -283,12 +305,24 @@ fn fit(text: &str, width: u16) -> String {
     out
 }
 
-fn draw_footer(buf: &mut Buffer, area: Rect, app: &App, theme: Theme) {
+/// The footer: the keys that work now. Each hint is recorded where it was drawn, so a click on
+/// it presses its key.
+fn draw_footer(buf: &mut Buffer, area: Rect, app: &App, theme: Theme, hits: &mut Hits) {
     let mut spans = Vec::new();
+    let mut x = area.x;
     for hint in keys::fit(&keys::footer(app), area.width) {
+        let words = format!(" {}", hint.what);
+        let wide = Line::raw(format!("{}{words}", hint.key)).width();
+        let wide = u16::try_from(wide).unwrap_or(u16::MAX);
+        if let Some(code) = keys::key_of(&hint) {
+            let rect = Rect::new(x, area.y, wide.min(area.right().saturating_sub(x)), 1);
+            hits.footer.push(rect, code);
+        }
+        let gap = u16::try_from(keys::GAP).unwrap_or(u16::MAX);
+        x = x.saturating_add(wide).saturating_add(gap);
         spans.push(Span::styled(hint.key, theme.emphasis()));
         spans.push(Span::styled(
-            format!(" {}{}", hint.what, " ".repeat(keys::GAP)),
+            format!("{words}{}", " ".repeat(keys::GAP)),
             theme.secondary(),
         ));
     }

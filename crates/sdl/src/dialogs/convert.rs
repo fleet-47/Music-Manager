@@ -33,7 +33,7 @@ pub(super) fn open(settings: &Settings) -> (Form, Conversation) {
     let mut form = Form::new("Convert")
         .field(
             Field::ticks(WHAT, "What")
-                .needs("Tick at least one")
+                .needs("Tick what to convert")
                 .options(what_options(&[])),
         )
         .field(

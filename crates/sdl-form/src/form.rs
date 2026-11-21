@@ -1,6 +1,7 @@
 //! The form: fields in focus order, the keys, paste and mouse that drive them, and what is still
 //! missing.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{
@@ -52,16 +53,35 @@ pub enum Reaction {
 }
 
 /// One entry of the footer's key hints: a key and what it does now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hint {
     /// The key as the footer shows it.
     pub key: &'static str,
-    /// One or two words.
-    pub what: &'static str,
+    /// One or two words; for Enter on a button, that button's label.
+    pub what: Cow<'static, str>,
+}
+
+impl Hint {
+    /// A hint with fixed words.
+    #[must_use]
+    pub const fn new(key: &'static str, what: &'static str) -> Self {
+        Self {
+            key,
+            what: Cow::Borrowed(what),
+        }
+    }
 }
 
 const fn hint(key: &'static str, what: &'static str) -> Hint {
-    Hint { key, what }
+    Hint::new(key, what)
+}
+
+/// `Enter` and what the button labelled `label` does, in the footer's lower case.
+fn press(label: &str) -> Hint {
+    Hint {
+        key: "Enter",
+        what: Cow::Owned(label.to_lowercase()),
+    }
 }
 
 /// A form. Build it with [`Form::new`] and [`Form::field`]; feed it keys; read its values.
@@ -302,21 +322,28 @@ impl Form {
             _ if self.back => hint("Esc", "back"),
             _ => hint("Esc", "cancel"),
         };
+        // Enter in a field presses the primary button, so its hint names that button, and only
+        // while it can be pressed.
+        let submit = self.can_submit().then(|| press(&self.primary));
         let mut hints = match &self.focus {
             Focus::Field(key) => match self.field_ref(key).map(|field| &field.kind) {
-                Some(Kind::Text(_) | Kind::Folder(_)) => vec![hint("Enter", "continue")],
+                Some(Kind::Text(_) | Kind::Folder(_)) => submit.into_iter().collect(),
                 Some(Kind::Dropdown(pick)) if pick.open => {
                     vec![hint("↑↓", "move"), hint("Enter", "choose")]
                 }
                 Some(Kind::Dropdown(_)) => vec![hint("Enter", "open")],
-                Some(Kind::Radio(_)) => vec![hint("↑↓", "choose"), hint("Enter", "continue")],
-                Some(Kind::Ticks(_)) => {
-                    vec![
-                        hint("↑↓", "move"),
-                        hint("Space", "tick"),
-                        hint("type", "filter"),
-                    ]
+                Some(Kind::Radio(_)) => std::iter::once(hint("↑↓", "choose"))
+                    .chain(submit)
+                    .collect(),
+                // An empty list has nothing to move to, tick, open or filter.
+                Some(Kind::Ticks(rows) | Kind::List(rows)) if rows.options.is_empty() => {
+                    submit.into_iter().collect()
                 }
+                Some(Kind::Ticks(_)) => [hint("↑↓", "move"), hint("Space", "tick")]
+                    .into_iter()
+                    .chain(submit)
+                    .chain([hint("type", "filter")])
+                    .collect(),
                 Some(Kind::List(_)) => {
                     vec![
                         hint("↑↓", "move"),
@@ -324,11 +351,14 @@ impl Form {
                         hint("type", "filter"),
                     ]
                 }
-                Some(Kind::Toggle(_)) => vec![hint("Space", "switch"), hint("Enter", "continue")],
+                Some(Kind::Toggle(_)) => std::iter::once(hint("Space", "switch"))
+                    .chain(submit)
+                    .collect(),
                 None => Vec::new(),
             },
             Focus::Browse(_) => vec![hint("Enter", "browse")],
-            Focus::Primary | Focus::Cancel => vec![hint("Enter", "press")],
+            Focus::Primary => submit.into_iter().collect(),
+            Focus::Cancel => vec![press(self.cancel())],
         };
         hints.push(hint("Tab", "next"));
         hints.push(escape);
