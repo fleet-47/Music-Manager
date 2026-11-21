@@ -41,6 +41,7 @@ SD card. Build spec: `.fleet/docs/SPEC-tui.md`.
 - How `sdl` is installed and started (a global command, tools in mise's global config) is decided after the full live run, which is the final gate before a release build (ruled 2026-11-21).
 - Running tasks show a spinner beside their name for the whole run (ruled 2026-11-21, accepting the redraw 10 times a second while a task runs; nothing is drawn while idle).
 - Download link keeps its short refusal of Spotify links; no advice about copying playlists is added (ruled 2026-11-21).
+- Libraries (ruled 2026-11-21): music for Yazid and music downloaded for friends never mix. Each person has a library, a folder under `music_root` (`~/Music/Me/…`, `~/Music/<Friend>/…`), with its own playlists and review entries. Download forms have a "For me" toggle; Sync device and Convert choose a library, remembered per device (spec F12).
 - Build standard is `fleet-47/Gen.v2`: fenix stable, the global `~/.cargo/config.toml`, and the lint flags in the spec. The repo carries no `.cargo/`, `clippy.toml`, `[lints]` table, rustflags or profile overrides.
 - mise config lives in `.mise/config.toml` and is committed. mise supplies yt-dlp, ffmpeg and deno and starts the TUI.
 

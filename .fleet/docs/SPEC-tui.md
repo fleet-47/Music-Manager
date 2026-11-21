@@ -20,7 +20,8 @@ report it; do not substitute another crate or hand-write the capability.
   total shows no bar. When a task ends its result becomes that function's
   last-run line.
 - **Footer**: the keys valid right now. `?` opens help listing every key and mouse action.
-- **Popups** (centred, `tui-popup`; long content scrolls with `tui-scrollview` and
+- **Popups** (centred, `tui-popup`; a popup keeps its position while it is open, even when its
+  content gets shorter; long content scrolls with `tui-scrollview` and
   `tui-scrollbar`): function forms, review, attention list, confirmations, errors, help.
 - **Forms** (one shared form module, modelled on Charm's Huh; every function uses it and has no
   bespoke popup). Fields:
@@ -212,8 +213,9 @@ report it; do not substitute another crate or hand-write the capability.
 ## F8. Review
 - The review list (`~/.config/sdl/review.toml`, `serde` + `toml`) keeps every held song until it
   is resolved: the wanted song, where it came from (Spotify list names, or the link), its
-  candidates and the reason. A song is identified by its Spotify track ID, or for a link item by
-  its item URL. A sync never searches again for a song that is held or was marked "never".
+  candidates and the reason. A song is identified by its Spotify track ID; a YouTube or YouTube
+  Music item by its video ID (so the same video pasted with either address is one song); any other
+  link item by its item URL. A sync never searches again for a song that is held or was marked "never".
 - Steps: choose Review → a filterable list of held songs → Enter on a song shows what was wanted
   (title, artists, album, duration) and a radio group of choices: each candidate (title · artists
   · album · duration, with the parts that differ in `yellow`), **Use the link's own audio** (only
@@ -295,15 +297,43 @@ report it; do not substitute another crate or hand-write the capability.
   changes. Each write is atomic (a temp file in the same folder, then a rename), so a crash never
   leaves a half-written file.
 - `~/.config/sdl/state.toml`: the ticked Spotify lists, the Convert choices, per device its
-  choices, the last device, the "never download" songs, and each function's last-run line with its
+  name and choices, the last device (so the main panel names it after a restart), the "never download" songs, and each function's last-run line with its
   time, its outcome (done / needs attention / failed / stopped) and its attention items.
 - Song downloads run `download_jobs` at a time (`futures` `buffer_unordered`).
 - **Not:** no resume of half-finished files, no history beyond the last run, no queue of pending
   functions.
 
+## F12. Libraries
+- A **library** is a named folder directly under `music_root`: `<music_root>/<Library>/`. It holds
+  its own songs in the F7 layout and its own playlist files; wherever F3 to F11 say "the library"
+  or `<music_root>/<Album artist>/…`, read the chosen library's folder. One library is the owner's
+  own, named by the config key `my_library` (default `Me`). The others are created by name in the
+  app, one per person the owner downloads for. The libraries are the folders directly under
+  `music_root` whose names do not start with a dot; the owner's own always exists.
+- **Download link and Sync Spotify** forms start with a **For me** toggle, on every time the form
+  opens. Switched off, a **Library** dropdown appears: the other libraries (the one last used is
+  preselected) and **New library…**, which shows a text field for its name (made FAT-safe as in F7;
+  an existing name is refused in plain words).
+- **Sync device and Convert** forms start with a **Library** dropdown (the owner's own first),
+  remembered per device and for Convert. "Whole library" and the playlists offered are those of the
+  chosen library.
+- **Review**: every held song belongs to the library it was wanted for, and lands there. The held
+  list shows each song's library when it is not the owner's own. "Never download" applies to that
+  song in that library only.
+- **A song another library already has is copied, not downloaded again**: when the wanted song is
+  present at the same place in another library, that file is copied (`std::fs::copy`, which clones
+  on APFS and so takes no extra space) to a temp file and landed as in F3. It counts as added.
+- The main panel's selection line for a function names the library when it is not the owner's own.
+- On a device, songs go to `<device>/Music/<same relative path>` with no library level: a device
+  holds one person's music. Syncing two libraries to the same device merges them there, and the
+  form's note says so when the device was last synced from a different library.
+- **Not:** no moving or copying of songs between libraries by hand, no deleting or renaming of
+  libraries in the app, no merged view across libraries, no per-library settings, no library level
+  on devices.
+
 ## Config: `~/.config/sdl/config.toml`
-`client_id`, `music_root` (default `~/Music`, `~` expanded), `download_jobs` (default 4, 0 is an
-error), `animations` (default true). Unknown keys are ignored. A missing or malformed file is a
+`client_id`, `music_root` (default `~/Music`, `~` expanded), `my_library` (default `Me`),
+`download_jobs` (default 4, 0 is an error), `animations` (default true). Unknown keys are ignored. A missing or malformed file is a
 plain error naming the path, printed before the screen starts. `config.example.toml` at the repo
 root.
 
