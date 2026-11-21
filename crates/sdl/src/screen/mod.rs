@@ -114,8 +114,10 @@ async fn event_loop(
         Size::new(size.width, size.height),
         now(),
     );
+    app.missing_tools = missing_tools();
     let mut effects = Effects::default();
     let mut input = EventStream::new();
+    let (tools_tx, mut tools) = unbounded_channel::<Msg>();
     let (eject_tx, mut ejected): (_, UnboundedReceiver<Result<(), ErrorInfo>>) =
         unbounded_channel();
     let mut last_frame = Instant::now();
@@ -150,6 +152,7 @@ async fn event_loop(
                 batch
             }
             Some(result) = ejected.recv() => vec![Msg::Ejected(result)],
+            Some(msg) = tools.recv() => vec![msg],
             () = timer(next_wake(&app)) => vec![Msg::Wake],
         };
         for msg in msgs {
@@ -158,7 +161,7 @@ async fn event_loop(
                 if matches!(cmd, Cmd::Quit) {
                     return Ok(());
                 }
-                run_cmd(&mut runner, cmd, &eject_tx).await;
+                run_cmd(&mut runner, cmd, &eject_tx, &tools_tx).await;
             }
         }
         if app.quit {
@@ -191,7 +194,7 @@ fn draw(
     let ended = app.take_ended();
     let mut hits = Hits::default();
     terminal.draw(|frame| {
-        let running = panels::draw(frame, app, theme, &mut hits);
+        panels::draw(frame, app, theme, &mut hits);
         let top = popups::draw(frame, app, theme, &mut hits);
         if app.animations
             && let Some(base) = theme.base()
@@ -199,7 +202,7 @@ fn draw(
             let scene = Scene {
                 popups: app.popups.len(),
                 top,
-                running,
+                running: None,
                 ended: ended
                     .iter()
                     .filter_map(|task| {
@@ -224,6 +227,7 @@ async fn run_cmd(
     runner: &mut Runner,
     cmd: Cmd,
     eject: &tokio::sync::mpsc::UnboundedSender<Result<(), ErrorInfo>>,
+    tools: &tokio::sync::mpsc::UnboundedSender<Msg>,
 ) {
     match cmd {
         Cmd::Start(task) => {
@@ -245,12 +249,73 @@ async fn run_cmd(
                 let _ = eject.send(future.await);
             });
         }
+        Cmd::InstallTools(names) => {
+            let tools = tools.clone();
+            tokio::spawn(async move {
+                let error = install_tools(&names).await.err();
+                // The receiver is gone only when the app is closing.
+                let _ = tools.send(Msg::Tools {
+                    missing: missing_tools(),
+                    error,
+                });
+            });
+        }
         Cmd::Open(url) => {
             // A browser that cannot be opened is not worth an error popup here.
             let _ = open::that_detached(url);
         }
         Cmd::Quit => {}
     }
+}
+
+/// The tools the functions run, as the command name and the name mise installs it under.
+const TOOLS: [(&str, &str); 3] = [
+    ("yt-dlp", "yt-dlp"),
+    ("ffmpeg", "conda:ffmpeg"),
+    ("deno", "deno"),
+];
+
+/// The tools that are not on `PATH`, by command name.
+fn missing_tools() -> Vec<String> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    TOOLS
+        .iter()
+        .filter(|(command, _)| {
+            !std::env::split_paths(&path).any(|folder| folder.join(command).is_file())
+        })
+        .map(|(command, _)| (*command).to_owned())
+        .collect()
+}
+
+/// Run `mise install` for the tools named; the error says what went wrong in plain words.
+async fn install_tools(names: &[String]) -> Result<(), String> {
+    let wanted = TOOLS
+        .iter()
+        .filter(|(command, _)| names.iter().any(|name| name == command))
+        .map(|(_, mise_name)| *mise_name);
+    let output = tokio::process::Command::new("mise")
+        .arg("install")
+        .args(wanted)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => "mise was not found on PATH".to_owned(),
+            _ => error.to_string(),
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&output.stderr);
+    Err(said
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map_or_else(
+            || "mise install failed".to_owned(),
+            |line| line.trim().to_owned(),
+        ))
 }
 
 #[cfg(test)]

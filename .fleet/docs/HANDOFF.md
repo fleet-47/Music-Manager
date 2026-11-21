@@ -7,8 +7,9 @@ Read first, end to end: `.agents/AGENTS.md` (rulings), `.fleet/docs/SPEC-tui.md`
 - `sdl` is rebuilt as a music library manager: eight crates, one Rust TUI. The old mise/spotDL flow is
   gone (jj history, change `nplromuk`).
 - The gate passes: `cargo fmt`, `cargo clippy` with the Gen.v2 flags, and 386 tests run as
-  `mise x -- cargo test` (tests use the real `ffmpeg`). Release binary: `target/release/sdl`. Everything
-  is committed in jj.
+  `mise x -- cargo test` (tests use the real `ffmpeg`). Release binary:
+  `$SHIP_ROOT/outputs/cargo/target/release/sdl` (cargo's output folder moved out of the repo on
+  2026-11-21; the repo's old `target/` is stale). Everything is committed in jj.
 - Proven by agents on this Mac, in temp folders only: Opus download from YouTube Music (stream-copied),
   SoundCloud link matched or held, the review list, playlist files against Disco's reader, all
   conversion presets, device sync both ways on FAT32 disk images, the room refusal, stop and quit

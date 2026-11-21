@@ -27,6 +27,14 @@ pub enum Msg {
     Settings(Box<Settings>),
     /// The eject the app asked for ([`Cmd::Eject`]) ended.
     Ejected(Result<(), ErrorInfo>),
+    /// The install the app asked for ([`Cmd::InstallTools`]) ended: the tools still missing, and
+    /// what went wrong when it failed.
+    Tools {
+        /// Tools still not on `PATH`.
+        missing: Vec<String>,
+        /// Why the install failed, in plain words.
+        error: Option<String>,
+    },
     /// A timer the app asked for ([`crate::app::wake::next_wake`]) fired: spinners advance and the
     /// elapsed time is read again. Carries no state of its own.
     Wake,
@@ -45,6 +53,8 @@ pub enum Cmd {
     Discard(TaskId),
     /// `Runner::eject_device`; its result comes back as [`Msg::Ejected`].
     Eject,
+    /// Install these tools with mise; the result comes back as [`Msg::Tools`].
+    InstallTools(Vec<String>),
     /// Open a link in the browser (`open`): review's `o`.
     Open(String),
     /// Leave the loop. Always the last command.

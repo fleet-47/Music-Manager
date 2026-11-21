@@ -4,6 +4,7 @@ deno = "latest"   # JS runtime yt-dlp needs for YouTube
 yt-dlp = "latest"
 
 [tasks.tui]
-description = "Run the sdl TUI: sync Spotify, download a link, sync the Snowsky card"
+description = "Run the sdl TUI: build a music library from Spotify and links, and sync it to players"
 interactive = true
-run = "target/release/sdl"
+# cargo builds into $SHIP_ROOT/outputs/cargo/target (the fleet cargo config), not into the repo.
+run = "$SHIP_ROOT/outputs/cargo/target/release/sdl"

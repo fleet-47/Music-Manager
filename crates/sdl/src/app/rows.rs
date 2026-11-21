@@ -6,7 +6,7 @@ use sdl_core::{Device, Direction, Format, RunOutcome, State, TaskId};
 use sdl_tasks::estimate_remaining;
 
 use super::{App, FunctionView};
-use crate::fmt::{ago, estimate_text, library_words, percent};
+use crate::fmt::{ago, estimate_text, library_words, percent, stamp};
 use sdl_core::words::{need_attention, thousands, x_of_y};
 
 /// A function's last-run line, with its age.
@@ -86,22 +86,23 @@ pub fn main_rows(app: &App) -> Vec<RowView> {
 pub fn selection_text(task: TaskId, state: &State, devices: &[Device], held: usize) -> String {
     match task {
         TaskId::SyncSpotify => match state.ticked_lists.len() {
-            0 => "no lists chosen yet".to_owned(),
+            // Nothing is remembered: the card says what the function does instead.
+            0 => String::new(),
             1 => "1 list chosen".to_owned(),
             n => format!("{} lists chosen", thousands(n)),
         },
-        TaskId::DownloadLink => "paste a link".to_owned(),
-        // The count itself is the row's yellow `N held songs waiting`.
-        TaskId::Review => match held {
-            0 => "nothing waiting".to_owned(),
-            _ => String::new(),
-        },
+        // Nothing is remembered for these two: a link is pasted each time, and the held count
+        // is the Review card's own yellow line.
+        TaskId::DownloadLink | TaskId::Review => {
+            let _ = held;
+            String::new()
+        }
         TaskId::SyncDevice => state
             .last_device
             .as_ref()
             .and_then(|id| state.devices.get(id).map(|choice| (id, choice)))
             .map_or_else(
-                || "no device chosen yet".to_owned(),
+                String::new,
                 // The format only applies To device.
                 |(id, choice)| {
                     let how = match choice.direction {
@@ -140,6 +141,146 @@ pub fn selection_text(task: TaskId, state: &State, devices: &[Device], held: usi
             }
         }
     }
+}
+
+/// The colour role a card line is drawn in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// What the function will act on.
+    Body,
+    /// What the function does, shown until there is something better to say.
+    Secondary,
+    /// It went well.
+    Done,
+    /// Something needs the owner.
+    Attention,
+    /// Something failed.
+    Failed,
+    /// It was stopped.
+    Skipped,
+}
+
+/// One line of a card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardLine {
+    /// The words.
+    pub text: String,
+    /// Their colour role.
+    pub tone: Tone,
+}
+
+/// One function's card on the home screen. A card says only what helps now: what the function
+/// will act on (or what it does, before anything is remembered), how its last run went where
+/// that is worth knowing, and its progress while it runs, which takes the place of the rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardView {
+    /// The function.
+    pub task: TaskId,
+    /// Its name, the card's title.
+    pub name: &'static str,
+    /// What it will act on, or what it does.
+    pub what: CardLine,
+    /// A second line of explanation, for the card with room for it.
+    pub note: Option<&'static str>,
+    /// How the last run went, where that helps: always with its time for the two syncs, and
+    /// only while fresh for the rest.
+    pub result: Option<CardLine>,
+    /// What Enter does here, as a verb; `None` when there is nothing to do.
+    pub action: Option<&'static str>,
+    /// Its progress while it runs.
+    pub run: Option<RunView>,
+    /// Whether it waits for the owner: held songs, or a last run that left something to look at.
+    pub needs_you: bool,
+}
+
+/// What a function does, in one line.
+fn purpose(task: TaskId) -> &'static str {
+    match task {
+        TaskId::SyncSpotify => "Liked Songs and your playlists",
+        TaskId::DownloadLink => "A song or playlist from a link",
+        TaskId::Review => "Nothing waiting",
+        TaskId::SyncDevice => "Copy music to or from a player",
+        TaskId::Convert => "Make copies in another format",
+    }
+}
+
+/// The last run of `task` as a card line, or `None` where it would only be noise: a sync says
+/// when it last ran, because that decides whether to run it again; a download, a review or a
+/// conversion says how it went only until the app is closed.
+fn result_line(app: &App, task: TaskId) -> Option<CardLine> {
+    let run = app.settings.state.last_run.get(&task)?;
+    let dated = matches!(task, TaskId::SyncSpotify | TaskId::SyncDevice);
+    if !dated && !app.fresh.contains(&task) {
+        return None;
+    }
+    let (glyph, tone) = match run.outcome {
+        RunOutcome::Done => ("✓", Tone::Done),
+        RunOutcome::NeedsAttention => ("!", Tone::Attention),
+        RunOutcome::Failed => ("✗", Tone::Failed),
+        RunOutcome::Stopped => ("–", Tone::Skipped),
+    };
+    let when = stamp(run.at);
+    let text = if dated && !when.is_empty() {
+        format!("{glyph} {} · {when}", run.line)
+    } else {
+        format!("{glyph} {}", run.line)
+    };
+    Some(CardLine { text, tone })
+}
+
+/// The home screen's cards, one per function, in order.
+#[must_use]
+pub fn cards(app: &App) -> Vec<CardView> {
+    let runs = running_rows(app);
+    main_rows(app)
+        .into_iter()
+        .map(|row| {
+            let held = row.held.unwrap_or(0);
+            let what = if held > 0 {
+                let noun = if held == 1 { "song" } else { "songs" };
+                CardLine {
+                    text: format!("{} {noun} waiting", thousands(held)),
+                    tone: Tone::Attention,
+                }
+            } else if row.selection.is_empty() {
+                CardLine {
+                    text: purpose(row.task).to_owned(),
+                    tone: Tone::Secondary,
+                }
+            } else {
+                CardLine {
+                    text: row.selection.clone(),
+                    tone: Tone::Body,
+                }
+            };
+            let result = result_line(app, row.task);
+            let action = match row.task {
+                TaskId::SyncSpotify | TaskId::SyncDevice => Some("sync"),
+                TaskId::DownloadLink => Some("paste a link"),
+                TaskId::Review => (held > 0).then_some("review"),
+                TaskId::Convert => Some("convert"),
+            };
+            let note = match (row.task, held) {
+                (TaskId::Review, 0) => Some("Songs with no sure match wait here for you to pick."),
+                (TaskId::Review, _) => Some("Each needs you to pick its match."),
+                _ => None,
+            };
+            let needs_you = held > 0
+                || result
+                    .as_ref()
+                    .is_some_and(|line| matches!(line.tone, Tone::Attention | Tone::Failed));
+            CardView {
+                task: row.task,
+                name: row.name,
+                what,
+                note,
+                result,
+                action,
+                run: runs.iter().find(|run| run.task == row.task).cloned(),
+                needs_you,
+            }
+        })
+        .collect()
 }
 
 /// The running panel's tasks, in panel order; `elapsed` is read from the clock of `app`.
@@ -217,9 +358,9 @@ mod tests {
         let mut app = app();
         let rows = main_rows(&app);
         assert_eq!(rows.len(), 5);
-        assert_eq!(rows[0].selection, "no lists chosen yet");
+        assert_eq!(rows[0].selection, "");
         assert_eq!(rows[2].held, Some(0));
-        assert_eq!(rows[2].selection, "nothing waiting");
+        assert_eq!(rows[2].selection, "");
         assert_eq!(rows[4].selection, "MP3 High to ~/Music-converted");
         assert!(rows.iter().all(|row| row.last.is_none() && !row.running));
         app.settings.state.last_run.insert(
@@ -353,6 +494,77 @@ mod tests {
         assert_eq!(
             selection_text(TaskId::SyncDevice, &state, &[image], 0),
             "SDLTEST (disk image) · To device · MP3"
+        );
+    }
+
+    #[test]
+    fn a_card_says_what_its_function_does_until_something_is_remembered() {
+        let app = app();
+        let shown = cards(&app);
+        assert_eq!(shown[0].what.text, "Liked Songs and your playlists");
+        assert_eq!(shown[0].what.tone, Tone::Secondary);
+        assert_eq!(shown[1].action, Some("paste a link"));
+        // Nothing is held: Review has nothing to do, and no card shows an empty result.
+        assert_eq!(shown[2].action, None);
+        assert!(
+            shown
+                .iter()
+                .all(|card| card.result.is_none() && card.run.is_none() && !card.needs_you)
+        );
+    }
+
+    #[test]
+    fn a_sync_always_says_when_it_last_ran_and_a_download_only_while_fresh() {
+        let mut app = app();
+        for task in [TaskId::SyncSpotify, TaskId::DownloadLink] {
+            app.settings.state.last_run.insert(
+                task,
+                LastRun {
+                    line: "14 added".into(),
+                    at: 400,
+                    outcome: RunOutcome::Done,
+                    attention: Vec::new(),
+                },
+            );
+        }
+        let shown = cards(&app);
+        let sync = shown[0].result.clone().map(|line| line.text);
+        assert!(
+            sync.as_deref()
+                .is_some_and(|text| text.starts_with("✓ 14 added · ") && text.contains('/')),
+            "{sync:?}"
+        );
+        assert_eq!(shown[1].result, None);
+        app.fresh.push(TaskId::DownloadLink);
+        assert_eq!(
+            cards(&app)[1].result,
+            Some(CardLine {
+                text: "✓ 14 added".into(),
+                tone: Tone::Done
+            })
+        );
+    }
+
+    #[test]
+    fn a_running_function_carries_its_progress_and_a_failed_sync_needs_you() {
+        let mut app = app();
+        feed(&mut app, EventKind::Started);
+        assert!(cards(&app)[0].run.is_some());
+        let mut idle = self::app();
+        idle.settings.state.last_run.insert(
+            TaskId::SyncSpotify,
+            LastRun {
+                line: "409 added, 2 failed".into(),
+                at: 400,
+                outcome: RunOutcome::Failed,
+                attention: Vec::new(),
+            },
+        );
+        let card = &cards(&idle)[0];
+        assert!(card.needs_you);
+        assert_eq!(
+            card.result.as_ref().map(|line| line.tone),
+            Some(Tone::Failed)
         );
     }
 }

@@ -115,7 +115,8 @@ pub const BINDINGS: &[Binding] = &[
     bind(Scope::Main, "Enter", "run it")
         .foot("Enter", "run")
         .when(selected_can_run),
-    bind(Scope::Main, "↑↓ j k", "choose a function").foot("↑↓", "choose"),
+    bind(Scope::Main, "←→↑↓ hjkl", "choose a function").foot("←→↑↓", "choose"),
+    bind(Scope::Main, "i", "install missing tools"),
     bind(Scope::Main, "s", "stop it while it runs")
         .foot("s", "stop")
         .when(selected_runs),
@@ -309,7 +310,7 @@ mod tests {
     #[test]
     fn the_main_footer_offers_stop_only_for_a_running_function() {
         let mut app = app();
-        assert_eq!(keys(&app), ["Enter", "↑↓", "a", "?", "q"]);
+        assert_eq!(keys(&app), ["Enter", "←→↑↓", "a", "?", "q"]);
         let clock = app.clock;
         let _ = app.update(
             Msg::Task(Event {
@@ -319,7 +320,7 @@ mod tests {
             clock,
         );
         // It runs: Enter would do nothing, so it is not offered; Stop is.
-        assert_eq!(keys(&app), ["↑↓", "s", "a", "?", "q"]);
+        assert_eq!(keys(&app), ["←→↑↓", "s", "a", "?", "q"]);
     }
 
     #[test]

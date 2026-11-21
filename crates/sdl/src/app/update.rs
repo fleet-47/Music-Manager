@@ -58,6 +58,18 @@ impl App {
                 });
                 Vec::new()
             }
+            Msg::Tools { missing, error } => {
+                self.tools_note = match (&error, missing.is_empty()) {
+                    (Some(error), _) => Some(format!("mise could not install the tools: {error}")),
+                    (None, true) => None,
+                    (None, false) => Some(
+                        "Installed, but not on PATH yet. Quit, then start sdl with `mise run tui`."
+                            .to_owned(),
+                    ),
+                };
+                self.missing_tools = missing;
+                Vec::new()
+            }
             Msg::Wake => {
                 self.spin = self.spin.wrapping_add(1);
                 if let Some(Popup::Dialog(dialog)) = self.popups.last_mut() {
@@ -75,6 +87,9 @@ impl App {
             .is_some_and(|view| view.apply(kind, now))
         {
             self.ended.push(task);
+            if !self.fresh.contains(&task) {
+                self.fresh.push(task);
+            }
         }
         match kind {
             EventKind::Error(info) => {
@@ -253,6 +268,15 @@ impl App {
             }
             KeyCode::Up | KeyCode::Char('k') => self.select_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.select_by(1),
+            KeyCode::Left | KeyCode::Char('h') => self.select_across(false),
+            KeyCode::Right | KeyCode::Char('l') => self.select_across(true),
+            KeyCode::Char('i') if !self.missing_tools.is_empty() && self.tools_note.is_none() => {
+                self.tools_note = Some(format!(
+                    "Installing {} with mise…",
+                    self.missing_tools.join(", ")
+                ));
+                vec![Cmd::InstallTools(self.missing_tools.clone())]
+            }
             KeyCode::Enter => self.run_selected(),
             _ => Vec::new(),
         }
@@ -267,6 +291,36 @@ impl App {
         let to = at.saturating_add_signed(step).min(last);
         if let Some(task) = TaskId::ALL.get(to) {
             self.selected = *task;
+        }
+        Vec::new()
+    }
+
+    /// Move to the card in the next column of the grid (bring in, check, take out), keeping the
+    /// row where that column has one.
+    fn select_across(&mut self, right: bool) -> Vec<Cmd> {
+        const COLUMNS: [&[TaskId]; 3] = [
+            &[TaskId::SyncSpotify, TaskId::DownloadLink],
+            &[TaskId::Review],
+            &[TaskId::SyncDevice, TaskId::Convert],
+        ];
+        let at = COLUMNS.iter().enumerate().find_map(|(column, tasks)| {
+            tasks
+                .iter()
+                .position(|task| *task == self.selected)
+                .map(|row| (column, row))
+        });
+        if let Some((column, row)) = at {
+            let to = if right {
+                column
+                    .saturating_add(1)
+                    .min(COLUMNS.len().saturating_sub(1))
+            } else {
+                column.saturating_sub(1)
+            };
+            let tasks = COLUMNS.get(to).copied().unwrap_or(&[]);
+            if let Some(task) = tasks.get(row.min(tasks.len().saturating_sub(1))) {
+                self.selected = *task;
+            }
         }
         Vec::new()
     }

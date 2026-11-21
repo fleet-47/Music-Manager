@@ -52,6 +52,18 @@ pub fn ago(now: u64, at: u64) -> String {
     }
 }
 
+/// A moment as the clock and date read here: `14:05 21/11/2026`. Empty when it cannot be told.
+#[must_use]
+pub fn stamp(at: u64) -> String {
+    use chrono::TimeZone as _;
+    i64::try_from(at)
+        .ok()
+        .and_then(|secs| chrono::Local.timestamp_opt(secs, 0).single())
+        .map_or_else(String::new, |when| {
+            when.format("%H:%M %d/%m/%Y").to_string()
+        })
+}
+
 /// The time-estimate line for a running task; `left` is `None` until something is done.
 #[must_use]
 pub fn estimate_text(left: Option<Duration>) -> String {
@@ -109,6 +121,14 @@ mod tests {
         assert_eq!(ago(100, 90), "just now");
         assert_eq!(ago(1_000, 400), "10 min ago");
         assert_eq!(ago(100_000, 1), "1 d ago");
+    }
+
+    #[test]
+    fn a_stamp_is_a_clock_time_and_a_date() {
+        let shown = stamp(1_795_000_000);
+        assert_eq!(shown.len(), "14:05 21/11/2026".len(), "{shown}");
+        assert_eq!(shown.matches('/').count(), 2);
+        assert_eq!(shown.matches(':').count(), 1);
     }
 
     #[test]

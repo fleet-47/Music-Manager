@@ -11,14 +11,25 @@ the calls named here. If a named call does not exist or does not do what this sp
 report it; do not substitute another crate or hand-write the capability.
 
 ## F1. One screen
-- **Main panel**, always visible: one row per function, each with its current selection and its
-  last-run line: Sync Spotify, Download link, Review (with the number of held songs), Sync device
-  and Convert.
-- **Running panel**, on the right, visible only while a task runs: per task its name, headline,
-  count (`412 of 2,117`), progress bar, time estimate and `N need attention`. A spinner moves
-  beside each running task's name, so a long single item never looks hung; a task with no known
-  total shows no bar. When a task ends its result becomes that function's
-  last-run line.
+- **Home screen**: one card per function, and nothing else. In the grid the cards sit in three
+  columns, centred both ways: Sync Spotify above Download link (bring music in), Review in the
+  middle spanning both rows (check), Sync device above Convert (take music out). Each card has its
+  name in the border and says only what helps now:
+  - what it will act on (`3 lists chosen`, `SNOWSKY · To device · MP3`), or, while nothing is
+    remembered, one line saying what the function does;
+  - how its last run went, only where that helps: the two syncs always say so with the time
+    (`✓ 14 added · 14:05 21/11/2026`); Download link, Review and Convert say so only until the app
+    is closed. Nothing is shown for a function that never ran;
+  - on its last line what Enter does (`sync`, `paste a link`, `review`, `convert`); the chosen
+    card shows the key. Review offers nothing while no song waits.
+  The border tells a card's state: heavy and `lavender` for the chosen one, double and `yellow`
+  for one that waits for the owner (held songs, or a last run that left something failed or
+  held), `blue` while it runs. The arrow keys (and `h j k l`) move between cards.
+- **Progress lives in the card.** While a function runs, its card's content gives way to its
+  headline, count (`412 of 2,117`), progress bar, time estimate and `N need attention`, with a
+  spinner beside its name, so a long single item never looks hung; a task with no known total
+  shows no bar. When it ends its result takes the progress's place. There is no separate running
+  panel.
 - **Footer**: the keys valid right now. `?` opens help listing every key and mouse action.
 - **Popups** (centred, `tui-popup`; a popup keeps its position while it is open, even when its
   content gets shorter; long content scrolls with `tui-scrollview` and
@@ -62,9 +73,10 @@ report it; do not substitute another crate or hand-write the capability.
   `surface2`, the focused field or popup `lavender`; selected row background `surface0`; running
   `blue`, done `green`, attention / held `yellow`, failed `red` (failures only),
   skipped `overlay1`. A non-empty `NO_COLOR` disables colours, background and effects.
-- **Size**: layouts use `Constraint::Min/Fill/Length` and `Flex`; under 60 columns the running panel
-  moves below the main panel; under 12 rows only the function rows, running counts and a one-line
-  footer show.
+- **Size**: the grid needs 72 columns and 14 rows besides the footer; a card is at most 36 columns
+  wide, so a wide terminal gets air around the grid. A narrower terminal stacks the cards in one
+  centred column (two lines each); one too short for that shows one line per function with its
+  count, and a one-line footer.
 - **Not:** no tabs, no per-song table, no log pane, no theme setting, no command mode, no
   mouse-only action, no effect that blocks or delays input.
 
@@ -331,6 +343,16 @@ report it; do not substitute another crate or hand-write the capability.
   libraries in the app, no merged view across libraries, no per-library settings, no library level
   on devices.
 
+## F13. Tools check
+- At start the app looks on `PATH` for the three tools its functions run: `yt-dlp`, `ffmpeg` and
+  `deno`. When any is missing, the first row of the home screen names them and offers `i`, which
+  runs `mise install` for the missing ones (`yt-dlp`, `conda:ffmpeg`, `deno`) and checks again.
+- The row then says how it ended: nothing when all are found; that they were installed but are
+  not on `PATH` yet, with how to start the app so they are (`mise run tui`); or what mise said when
+  it failed.
+- **Not:** no download or update of tools by the app itself, no change to any mise config, no
+  check while a function runs.
+
 ## Config: `~/.config/sdl/config.toml`
 `client_id`, `music_root` (default `~/Music`, `~` expanded), `my_library` (default `Me`),
 `download_jobs` (default 4, 0 is an error), `animations` (default true). Unknown keys are ignored. A missing or malformed file is a
@@ -368,4 +390,5 @@ binary.
 
 ## mise
 `.mise/config.toml` holds the tools (yt-dlp, ffmpeg, deno) and one task, `tui`, that runs
-`target/release/sdl` with them on `PATH`.
+the release binary with them on `PATH`. cargo builds into `$SHIP_ROOT/outputs/cargo/target` (the
+fleet cargo config), so the task runs `$SHIP_ROOT/outputs/cargo/target/release/sdl`.

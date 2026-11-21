@@ -23,11 +23,25 @@ pub use msg::{Cmd, Msg};
 pub use popup::{Confirm, Popup, Waiting};
 pub use view::{FunctionView, Phase};
 
-/// Fewer rows than this: only the function rows, running counts and a one-line footer show (F1).
-pub const MIN_DETAIL_ROWS: u16 = 12;
+/// Fewer columns than this: the cards stack in one column instead of the grid (F1).
+pub const GRID_MIN_COLS: u16 = 72;
 
-/// Fewer columns than this: the running panel moves below the main panel (F1).
-pub const MIN_SIDE_BY_SIDE_COLS: u16 = 60;
+/// Rows the card grid needs: two cards of seven rows.
+pub const GRID_ROWS: u16 = 14;
+
+/// Rows the stacked cards need: five cards of four rows.
+pub const STACK_ROWS: u16 = 20;
+
+/// How the home screen is laid out for the terminal's size (F1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Home {
+    /// Cards in three columns: bring music in, check, take music out.
+    Grid,
+    /// Cards in one column.
+    Stack,
+    /// One line per function: the terminal is too short for cards.
+    List,
+}
 
 /// The time, read once per message by the loop so the app itself never reads a clock.
 #[derive(Debug, Clone, Copy)]
@@ -52,10 +66,9 @@ pub struct Settings {
 /// What a click on the main screen means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainTarget {
-    /// A function row: a click selects it; a second click runs it.
+    /// A function's card (or its row on a short screen): a click selects it; a second click
+    /// runs it.
     Row(TaskId),
-    /// A task in the running panel: a click selects that function.
-    Running(TaskId),
 }
 
 /// What a click in a plain popup (confirmation, error, help, attention list) means.
@@ -131,6 +144,14 @@ pub struct App {
     pub devices: Vec<sdl_core::Device>,
     /// Set when the app should leave the loop.
     pub quit: bool,
+    /// Functions whose run ended since the app started. A download's or a conversion's result
+    /// is worth showing only while it is fresh, so their cards show it for these alone.
+    pub fresh: Vec<TaskId>,
+    /// The tools the functions need that were not found on `PATH` at start (yt-dlp, ffmpeg,
+    /// deno). The home screen says so and offers to install them.
+    pub missing_tools: Vec<String>,
+    /// What the home screen says about the tools instead: installing, or how it ended.
+    pub tools_note: Option<String>,
 }
 
 impl App {
@@ -151,6 +172,9 @@ impl App {
             spin: 0,
             devices: Vec::new(),
             quit: false,
+            fresh: Vec::new(),
+            missing_tools: Vec::new(),
+            tools_note: None,
         }
     }
 
@@ -170,17 +194,50 @@ impl App {
         self.views.iter().filter(|view| view.is_running())
     }
 
-    /// Whether the running panel is on screen: some function runs.
+    /// Whether some function runs (its card shows progress).
     #[must_use]
     pub fn shows_running_panel(&self) -> bool {
         self.running().next().is_some()
     }
 
-    /// Whether the terminal is tall enough to show the running panel's detail (bar, spinner,
-    /// time estimate); under [`MIN_DETAIL_ROWS`] only counts show.
+    /// Whether cards are on screen, so a running function shows its spinner, bar and time
+    /// estimate; the one-line list shows counts only.
     #[must_use]
     pub fn shows_detail(&self) -> bool {
-        self.size.height >= MIN_DETAIL_ROWS
+        self.home() != Home::List
+    }
+
+    /// The home screen's layout for the terminal's size: the grid when it fits, else the stack,
+    /// else one line per function. The footer and the tools line take their rows first.
+    #[must_use]
+    pub fn home(&self) -> Home {
+        let rows = self
+            .size
+            .height
+            .saturating_sub(1)
+            .saturating_sub(u16::from(self.tools_banner().is_some()));
+        if self.size.width >= GRID_MIN_COLS && rows >= GRID_ROWS {
+            Home::Grid
+        } else if rows >= STACK_ROWS {
+            Home::Stack
+        } else {
+            Home::List
+        }
+    }
+
+    /// The line the home screen shows about missing tools, when there is something to say.
+    #[must_use]
+    pub fn tools_banner(&self) -> Option<String> {
+        if let Some(note) = &self.tools_note {
+            return Some(note.clone());
+        }
+        if self.missing_tools.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{} not found on PATH. Press i to install with mise.",
+            self.missing_tools.join(", ")
+        ))
     }
 
     /// The popup on top.

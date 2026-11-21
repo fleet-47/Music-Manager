@@ -95,7 +95,7 @@ fn draw(app: &App, theme: Theme) -> Result<Drawn, Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(TestBackend::new(app.size.width, app.size.height))?;
     let mut hits = Hits::default();
     terminal.draw(|frame| {
-        let _ = panels::draw(frame, app, theme, &mut hits);
+        panels::draw(frame, app, theme, &mut hits);
         let _ = popups::draw(frame, app, theme, &mut hits);
     })?;
     let buffer = terminal.backend().buffer();
@@ -168,17 +168,18 @@ fn running_tasks_show_their_count_where_the_size_allows() -> TestResult {
         let shown = text(&app)?;
         needs(&shown, &["412 of 2,117"], (width, height));
         if height >= 12 {
-            needs(&shown, &["Running", "3 need attention"], (width, height));
+            // Cards: the running function's card shows what needs attention too.
+            needs(&shown, &["3 need attention"], (width, height));
         } else {
-            // Under 12 rows: only the function rows, the counts and one footer line.
-            assert!(!shown.contains("Running"), "{shown}");
+            // Under 12 rows: one line per function, with its count, and one footer line.
+            assert!(!shown.contains("need attention"), "{shown}");
         }
         Ok(())
     })
 }
 
 #[test]
-fn what_does_not_fit_in_the_running_panel_is_counted_not_dropped() -> TestResult {
+fn every_running_function_shows_its_progress_in_its_own_card() -> TestResult {
     let mut app = app(59, 24);
     run_three(&mut app);
     for task in [TaskId::Review, TaskId::SyncDevice] {
@@ -188,7 +189,19 @@ fn what_does_not_fit_in_the_running_panel_is_counted_not_dropped() -> TestResult
         feed(&mut app, task, EventKind::Started);
     }
     let shown = text(&app)?;
-    needs(&shown, &["412 of 2,117", "more running"], (59, 24));
+    // Five run at once and nothing is dropped: each card is there, with the count that is known.
+    needs(
+        &shown,
+        &[
+            "412 of 2,117",
+            "Sync Spotify",
+            "Download link",
+            "Review",
+            "Sync device",
+            "Convert",
+        ],
+        (59, 24),
+    );
     Ok(())
 }
 
@@ -383,7 +396,7 @@ fn draw_remembering(app: &mut App) -> Result<ratatui::layout::Rect, Box<dyn std:
     let mut hits = Hits::default();
     let mut rect = None;
     terminal.draw(|frame| {
-        let _ = panels::draw(frame, app, Theme::new(true), &mut hits);
+        panels::draw(frame, app, Theme::new(true), &mut hits);
         rect = popups::draw(frame, app, Theme::new(true), &mut hits);
     })?;
     app.hits = hits;
@@ -486,7 +499,7 @@ fn a_click_on_a_footer_hint_presses_its_key() -> TestResult {
 }
 
 #[test]
-fn clicking_a_running_task_chooses_its_function() -> TestResult {
+fn clicking_the_card_of_a_running_function_chooses_it() -> TestResult {
     let mut app = app(100, 30);
     run_three(&mut app);
     let (_, hits, _) = draw(&app, Theme::new(true))?;
@@ -494,8 +507,8 @@ fn clicking_a_running_task_chooses_its_function() -> TestResult {
     let area = app
         .hits
         .main
-        .area_of(&MainTarget::Running(TaskId::Convert))
-        .ok_or("no running task")?;
+        .area_of(&MainTarget::Row(TaskId::Convert))
+        .ok_or("no card")?;
     let _ = click(&mut app, area.x, area.y);
     assert_eq!(app.selected, TaskId::Convert);
     Ok(())

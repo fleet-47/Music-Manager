@@ -85,15 +85,14 @@ impl App {
         }
     }
 
-    /// A click on a function row chooses it; a second click on the chosen one runs it. A click
-    /// on a running task chooses its function.
+    /// A click on a function's card chooses it; a second click on the chosen one runs it.
     fn on_main_mouse(&mut self, event: MouseEvent) -> Vec<Cmd> {
         if event.kind != MouseEventKind::Down(MouseButton::Left) {
             return Vec::new();
         }
         match self.hits.main.at(event.column, event.row).copied() {
             Some(MainTarget::Row(task)) if task == self.selected => self.run_selected(),
-            Some(MainTarget::Row(task) | MainTarget::Running(task)) => {
+            Some(MainTarget::Row(task)) => {
                 self.selected = task;
                 Vec::new()
             }

@@ -42,6 +42,9 @@ SD card. Build spec: `.fleet/docs/SPEC-tui.md`.
 - Running tasks show a spinner beside their name for the whole run (ruled 2026-11-21, accepting the redraw 10 times a second while a task runs; nothing is drawn while idle).
 - Download link keeps its short refusal of Spotify links; no advice about copying playlists is added (ruled 2026-11-21).
 - Libraries (ruled 2026-11-21): music for Yazid and music downloaded for friends never mix. Each person has a library, a folder under `music_root` (`~/Music/Me/…`, `~/Music/<Friend>/…`), with its own playlists and review entries. Download forms have a "For me" toggle; Sync device and Convert choose a library, remembered per device (spec F12).
+- Home screen (ruled 2026-11-21, replaces the main panel and running panel of 2026-11-19): large cards, one per function, with no headings; a card shows only what helps now, and its content gives way to its progress while it runs. No text that carries no information (no "not run yet"); a sync says when it last ran, a download only while fresh (spec F1).
+- Tools check (ruled 2026-11-21): the app checks for yt-dlp, ffmpeg and deno at start and offers to install missing ones with mise (spec F13).
+- Cargo builds into `$SHIP_ROOT/outputs/cargo/target` (the fleet cargo config in `~/.config/cargo`, 2026-11-21), not into the repo; `cargo install` puts binaries in `$SHIP_ROOT/outputs/cargo/bin`.
 - Build standard is `fleet-47/Gen.v2`: fenix stable, the global `~/.cargo/config.toml`, and the lint flags in the spec. The repo carries no `.cargo/`, `clippy.toml`, `[lints]` table, rustflags or profile overrides.
 - mise config lives in `.mise/config.toml` and is committed. mise supplies yt-dlp, ffmpeg and deno and starts the TUI.
 
@@ -53,7 +56,7 @@ SD card. Build spec: `.fleet/docs/SPEC-tui.md`.
 
 ## Run
 - Build: `cargo build --release --locked` with the fenix stable toolchain.
-- Start: `mise run tui` (runs `target/release/sdl`).
+- Start: `mise run tui` (runs `$SHIP_ROOT/outputs/cargo/target/release/sdl`).
 
 ## Facts
 - Audio is sourced from YouTube Music, not Spotify. Lossy quality is accepted; files are Opus as served, not re-encoded.
