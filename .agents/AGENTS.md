@@ -39,6 +39,8 @@ SD card. Build spec: `.fleet/docs/SPEC-tui.md`.
 - A Spotify rate limit is recorded as "stopped" with the wait shown (ruled 2026-11-21).
 - ffmpeg stays an outside tool and is not compiled in (confirmed 2026-11-21).
 - How `sdl` is installed and started (a global command, tools in mise's global config) is decided after the full live run, which is the final gate before a release build (ruled 2026-11-21).
+- Running tasks show a spinner beside their name for the whole run (ruled 2026-11-21, accepting the redraw 10 times a second while a task runs; nothing is drawn while idle).
+- Download link keeps its short refusal of Spotify links; no advice about copying playlists is added (ruled 2026-11-21).
 - Build standard is `fleet-47/Gen.v2`: fenix stable, the global `~/.cargo/config.toml`, and the lint flags in the spec. The repo carries no `.cargo/`, `clippy.toml`, `[lints]` table, rustflags or profile overrides.
 - mise config lives in `.mise/config.toml` and is committed. mise supplies yt-dlp, ffmpeg and deno and starts the TUI.
 

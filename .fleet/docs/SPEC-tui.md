@@ -15,8 +15,9 @@ report it; do not substitute another crate or hand-write the capability.
   last-run line: Sync Spotify, Download link, Review (with the number of held songs), Sync device
   and Convert.
 - **Running panel**, on the right, visible only while a task runs: per task its name, headline,
-  count (`412 of 2,117`), progress bar, time estimate and `N need attention`. A task with no known
-  total shows a spinner instead of a bar. When a task ends its result becomes that function's
+  count (`412 of 2,117`), progress bar, time estimate and `N need attention`. A spinner moves
+  beside each running task's name, so a long single item never looks hung; a task with no known
+  total shows no bar. When a task ends its result becomes that function's
   last-run line.
 - **Footer**: the keys valid right now. `?` opens help listing every key and mouse action.
 - **Popups** (centred, `tui-popup`; long content scrolls with `tui-scrollview` and
@@ -70,8 +71,8 @@ report it; do not substitute another crate or hand-write the capability.
 - The screen is drawn only after something changed: a key, mouse or paste event, a task event, or
   an animation frame. All queued task events are applied before one draw.
 - Timers exist only while needed: an animation timer (about 30 frames a second) while a
-  `tachyonfx` effect is running; a spinner timer (100 ms) while a spinner is on screen; a one-second
-  timer while a task shows elapsed time. With nothing running and no effect playing the loop waits
+  `tachyonfx` effect is running; a spinner timer (100 ms) while a task runs or a form is
+  busy, which also advances the elapsed time. With nothing running and no effect playing the loop waits
   on input alone and no timer exists. One pure function decides the next wake from the app state
   and is unit-tested (idle → none).
 - Progress bars and counts change only when a progress event arrives.
