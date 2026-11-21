@@ -305,8 +305,12 @@ fn errors_and_waiting_popups_show_what_happened_and_the_way_out() -> TestResult 
         app.popups
             .push(Popup::Waiting(Waiting::Eject("DISC".into())));
         let (rows, hits, _) = draw(&app, Theme::new(true))?;
-        needs(&rows.join("\n"), &["Ejecting DISC"], (width, height));
-        assert!(hits.popup.is_empty(), "nothing to click while ejecting");
+        needs(
+            &rows.join("\n"),
+            &["Ejecting DISC", "[Esc] Hide"],
+            (width, height),
+        );
+        assert!(!hits.popup.is_empty(), "Hide can be clicked while ejecting");
         Ok(())
     })
 }

@@ -6,13 +6,13 @@
 
 use futures::StreamExt;
 use futures::stream;
-use sdl_core::{Attention, EventKind, HeldSong};
+use sdl_core::{Attention, EventKind, HeldSong, Place};
 
 use crate::conversation::{Answered, Answers, Opened, Resolution, ReviewChoice, Step};
-use crate::fmt::thousands;
 use crate::progress::{Outcome, drive, summary_line};
 use crate::tasks::intake::{Intake, Route};
 use crate::{Flow, TaskContext, TaskError};
+use sdl_core::words::thousands;
 
 /// The Review task.
 pub(crate) struct Review<'a> {
@@ -71,10 +71,16 @@ async fn settle(
             reason.clone(),
         )),
     };
-    if matches!(
-        outcome,
-        Outcome::Added | Outcome::AddedWithoutGenre | Outcome::Skipped
-    ) {
+    // A skip leaves the list only when the song really is in the library: a second held song with
+    // the same place is skipped in this run, but stays held if the first one failed.
+    let landed = match outcome {
+        Outcome::Added | Outcome::AddedWithoutGenre => true,
+        Outcome::Skipped => Place::of(&context.config.music_root, &held.song)
+            .present()?
+            .is_some(),
+        Outcome::Held(_) | Outcome::Failed(_) => false,
+    };
+    if landed {
         context.update_review(|review| {
             review.resolve(held.song.key());
         })?;

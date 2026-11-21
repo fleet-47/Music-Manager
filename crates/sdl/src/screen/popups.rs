@@ -242,7 +242,12 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                         format!("{spinner} Waiting for you to allow access in the browser"),
                         vec![Button::new("Esc", "Cancel", PopupTarget::No)],
                     ),
-                    Waiting::Eject(device) => (format!("{spinner} Ejecting {device}"), Vec::new()),
+                    Waiting::Eject(device) => (
+                        format!(
+                            "{spinner} Ejecting {device}. Hiding this does not stop it; a problem still shows here."
+                        ),
+                        vec![Button::new("Esc", "Hide", PopupTarget::Close)],
+                    ),
                 };
                 plain(
                     frame,

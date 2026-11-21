@@ -12,7 +12,7 @@ use sdl_devices::{self as devices, DevicePlan, DeviceWatch};
 use sdl_library::playlists;
 
 use crate::conversation::{Answered, Answers, Offer, Opened, Step};
-use crate::progress::{on_blocking_pool, stopped_line, written_line};
+use crate::progress::{stopped_line, written_line};
 use crate::{Flow, TaskContext, TaskError};
 
 /// A plan and the device it is for.
@@ -115,14 +115,9 @@ impl Step for SyncDevice<'_> {
         let Some(Planned { device, plan }) = self.planned.take() else {
             return Ok(Flow::Cancelled);
         };
-        let (events, stop) = (context.events.clone(), context.stop.clone());
-        let (result, written) = on_blocking_pool(move || async move {
-            let result = devices::run(&plan, &events, &stop).await;
-            (result, plan.written())
-        })
-        .await?;
+        let result = devices::run(&plan, &context.events, &context.stop).await;
         // Whatever way the run ended, the files it wrote are the ones clean-up may touch.
-        context.set_device(Some((device, written)));
+        context.set_device(Some((device, plan.written())));
         let counts = result?;
         if context.stop.is_requested() {
             return Ok(Flow::Stopped {

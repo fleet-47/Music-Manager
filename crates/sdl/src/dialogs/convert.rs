@@ -14,7 +14,7 @@ use super::choices::{
 };
 use super::conversation::Conversation;
 use crate::app::Settings;
-use crate::fmt::{files, thousands};
+use sdl_core::words::{files, thousands};
 
 /// Tick list: Whole library, then each playlist.
 pub(super) const WHAT: &str = "what";

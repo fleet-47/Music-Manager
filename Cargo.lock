@@ -3931,7 +3931,6 @@ dependencies = [
  "musicbrainz_rs",
  "reqwest 0.13.5",
  "sdl-core",
- "serde",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

@@ -65,7 +65,7 @@ fn ensure_free(dest: &Path) -> Result<(), LibraryError> {
 /// MP3 `-c:a libmp3lame -q:a 2|4|6`, M4A `-c:a aac -b:a 192k|160k|128k`, Opus
 /// `-c:a libopus -b:a 160k`. The muxer is named with `-f` because the temp file ends in `.part`.
 #[must_use]
-pub fn ffmpeg_args(src: &Path, out: &Path, preset: Preset) -> Vec<OsString> {
+pub(crate) fn ffmpeg_args(src: &Path, out: &Path, preset: Preset) -> Vec<OsString> {
     let (codec, quality, muxer): (&str, [&str; 2], &str) = match (preset.format, preset.quality) {
         (Format::Mp3, Quality::High) => ("libmp3lame", ["-q:a", "2"], "mp3"),
         (Format::Mp3, Quality::Medium) => ("libmp3lame", ["-q:a", "4"], "mp3"),

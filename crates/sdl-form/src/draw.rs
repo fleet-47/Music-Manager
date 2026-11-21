@@ -47,7 +47,7 @@ pub fn size(form: &Form, max_width: u16) -> Size {
     let height = if form.explorer().is_some() {
         BROWSER_ROWS.saturating_add(3)
     } else {
-        body_height(form, width).saturating_add(foot_height(form))
+        body_height(form, width).saturating_add(foot_height(form, width))
     };
     Size::new(width, height)
 }
@@ -62,6 +62,39 @@ fn notes<'a>(form: &'a Form, style: &FormStyle) -> Paragraph<'a> {
     Paragraph::new(Lines::from(lines)).wrap(Wrap { trim: true })
 }
 
+/// `text` wrapped at the width it is drawn at (F1: a field's message, the summary and what is
+/// missing wrap and are never cut off).
+fn wrapped<'a>(text: impl Into<Line<'a>>) -> Paragraph<'a> {
+    Paragraph::new(text.into()).wrap(Wrap { trim: true })
+}
+
+/// Rows `text` takes wrapped at `width` (at least one).
+fn wrapped_rows(text: &str, width: u16) -> u16 {
+    u16::try_from(wrapped(text).line_count(width.max(1)))
+        .unwrap_or(u16::MAX)
+        .max(1)
+}
+
+/// The message under a text or folder field, if its value is not acceptable.
+fn complaint(field: &Field) -> Option<String> {
+    match &field.kind {
+        Kind::Text(text) | Kind::Folder(Folder { text, .. }) => text.complaint(),
+        _ => None,
+    }
+}
+
+/// The summary or busy line as drawn: the spinner frame first while busy.
+fn status_line<'a>(form: &'a Form, style: &FormStyle) -> Line<'a> {
+    match (form.busy(), form.summary()) {
+        (Some(busy), _) => Line::from(vec![
+            Span::styled(format!("{} ", crate::spinner(form.spin())), style.emphasis),
+            Span::styled(busy, style.secondary),
+        ]),
+        (None, Some(summary)) => Line::styled(summary, style.body),
+        (None, None) => Line::default(),
+    }
+}
+
 /// Rows of the scrolling part: the notes wrapped at `width`, then the visible fields.
 fn body_height(form: &Form, width: u16) -> u16 {
     let notes = if form.notes().is_empty() {
@@ -72,25 +105,29 @@ fn body_height(form: &Form, width: u16) -> u16 {
     form.fields()
         .iter()
         .filter(|field| field.visible)
-        .map(field_height)
+        .map(|field| field_height(field, width))
         .fold(notes, u16::saturating_add)
 }
 
-/// Rows of the part that never scrolls: the summary row (always kept, so the form does not jump
-/// when a summary arrives), what is missing, and the buttons.
-fn foot_height(form: &Form) -> u16 {
-    u16::try_from(form.missing().len())
-        .unwrap_or(u16::MAX)
-        .saturating_add(2)
+/// Rows of the part that never scrolls at `width`: the summary (at least one row, kept so the
+/// form does not jump when a summary arrives), what is missing, each wrapped, and the buttons.
+fn foot_height(form: &Form, width: u16) -> u16 {
+    let status =
+        u16::try_from(wrapped(status_line(form, &FormStyle::default())).line_count(width.max(1)))
+            .unwrap_or(u16::MAX)
+            .max(1);
+    form.missing()
+        .iter()
+        .map(|missing| wrapped_rows(&format!("· {missing}"), width))
+        .fold(status, u16::saturating_add)
+        .saturating_add(1)
 }
 
-/// Rows a field takes: its label row, then its body.
-fn field_height(field: &Field) -> u16 {
+/// Rows a field takes at `width`: its label row, then its body (a text's message wrapped).
+fn field_height(field: &Field, width: u16) -> u16 {
+    let message = complaint(field).map_or(0, |text| wrapped_rows(&text, width.saturating_sub(2)));
     let body = match &field.kind {
-        Kind::Text(text) => 1_u16.saturating_add(u16::from(text.complaint().is_some())),
-        Kind::Folder(Folder { text, .. }) => {
-            1_u16.saturating_add(u16::from(text.complaint().is_some()))
-        }
+        Kind::Text(_) | Kind::Folder(_) => 1_u16.saturating_add(message),
         Kind::Dropdown(pick) if pick.open => open_rows(pick),
         Kind::Toggle(_) | Kind::Dropdown(_) => 0,
         Kind::Radio(pick) => u16::try_from(pick.options.len().max(1)).unwrap_or(u16::MAX),
@@ -121,7 +158,7 @@ pub fn render(form: &Form, area: Rect, buf: &mut Buffer, style: &FormStyle) -> H
         draw_browser(browser, area, buf, style, &mut hits);
         return hits;
     }
-    let foot_rows = foot_height(form).min(area.height);
+    let foot_rows = foot_height(form, area.width).min(area.height);
     let room = Rect::new(
         area.x,
         area.y,
@@ -197,7 +234,7 @@ fn draw_body(
         y = y.saturating_add(rows);
     }
     for field in form.fields().iter().filter(|field| field.visible) {
-        let height = field_height(field).min(bottom.saturating_sub(y));
+        let height = field_height(field, area.width).min(bottom.saturating_sub(y));
         let whole = Rect::new(area.x, y, area.width, height);
         hits.push(whole, Target::Field(field.key));
         let focused = form.focus() == &Focus::Field(field.key);
@@ -214,36 +251,29 @@ fn draw_foot(
     style: &FormStyle,
     hits: &mut HitMap<Target>,
 ) {
+    // The buttons keep the last row; the wrapped lines above take what is left.
+    let buttons = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     let mut y = area.y;
-    let bottom = area.bottom();
-    let mut row = || -> Option<Rect> {
-        (y < bottom).then(|| {
-            let rect = Rect::new(area.x, y, area.width, 1);
-            y = y.saturating_add(1);
-            rect
-        })
-    };
-    if let Some(rect) = row() {
-        let line = match (form.busy(), form.summary()) {
-            (Some(busy), _) => {
-                let frame = crate::spinner(form.spin());
-                Line::from(vec![
-                    Span::styled(format!("{frame} "), style.emphasis),
-                    Span::styled(busy, style.secondary),
-                ])
-            }
-            (None, Some(summary)) => Line::styled(summary, style.body),
-            (None, None) => Line::default(),
-        };
-        line.render(rect, buf);
-    }
-    for missing in form.missing() {
-        if let Some(rect) = row() {
-            Line::styled(format!("· {missing}"), style.error).render(rect, buf);
+    let bottom = buttons.y;
+    let mut put = |paragraph: Paragraph<'_>, buf: &mut Buffer| {
+        let rows = u16::try_from(paragraph.line_count(area.width.max(1)))
+            .unwrap_or(u16::MAX)
+            .max(1)
+            .min(bottom.saturating_sub(y));
+        if rows > 0 {
+            paragraph.render(Rect::new(area.x, y, area.width, rows), buf);
+            y = y.saturating_add(rows);
         }
+    };
+    put(wrapped(status_line(form, style)), buf);
+    for missing in form.missing() {
+        put(
+            wrapped(Line::styled(format!("· {missing}"), style.error)),
+            buf,
+        );
     }
-    if let Some(rect) = row() {
-        draw_buttons(form, rect, buf, style, hits);
+    if !area.is_empty() {
+        draw_buttons(form, buttons, buf, style, hits);
     }
 }
 
@@ -291,6 +321,17 @@ fn draw_field(
         area.width.saturating_sub(2),
         area.height.saturating_sub(1),
     );
+    if let Some(message) = complaint(field) {
+        let below = Rect::new(
+            body.x,
+            body.y.saturating_add(1),
+            body.width,
+            body.height.saturating_sub(1),
+        );
+        if !below.is_empty() {
+            wrapped(Line::styled(message, style.error)).render(below, buf);
+        }
+    }
     match &field.kind {
         Kind::Text(text) => draw_text(text, body, focused, buf, style),
         Kind::Folder(folder) => {
@@ -349,12 +390,6 @@ fn draw_text(text: &Text, area: Rect, focused: bool, buf: &mut Buffer, style: &F
             .filter(|_| column < row.right())
         {
             cell.set_style(Style::new().reversed());
-        }
-    }
-    if let Some(complaint) = text.complaint() {
-        let below = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
-        if below.bottom() <= area.bottom() {
-            Line::styled(complaint, style.error).render(below, buf);
         }
     }
 }
@@ -697,6 +732,32 @@ mod tests {
         let field = hits.area_of(&Target::Field("c"));
         assert!(field.is_some_and(|rect| area.contains(Position::new(rect.x, rect.y))));
         assert!(hits.area_of(&Target::Primary).is_some());
+    }
+
+    #[test]
+    fn the_summary_what_is_missing_and_a_message_wrap_and_are_never_cut_off() {
+        let mut form =
+            Form::new("F")
+                .field(Field::text("link", "Link").validate(|_| {
+                    Err("That does not look like a link at all, start again".into())
+                }));
+        form.set("link", crate::Value::Text("x".into()));
+        form.set_summary(Some(
+            "12 files, about 1.2 GB to copy · 3 already there".into(),
+        ));
+        form.set_blocked(Some(
+            "Not enough room on SNOWSKY: 1.2 GB to copy, 0.4 GB free".into(),
+        ));
+        let narrow = size(&form, 24);
+        let area = Rect::new(0, 0, narrow.width, narrow.height);
+        let mut buf = Buffer::empty(area);
+        let hits = render(&form, area, &mut buf, &FormStyle::default());
+        let drawn = text_of(&buf);
+        for word in ["again", "there", "free"] {
+            assert!(drawn.contains(word), "{word} cut off: {drawn}");
+        }
+        assert!(hits.area_of(&Target::Primary).is_some());
+        assert!(narrow.height > size(&form, 64).height);
     }
 
     #[test]

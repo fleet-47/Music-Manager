@@ -443,8 +443,10 @@ impl Field {
             Kind::Folder(folder) => folder.text.complaint(),
             _ => None,
         };
+        // The message itself is under the field; this line only points at it, so the owner does
+        // not read the same words twice.
         if complaint.is_some() {
-            return complaint;
+            return Some(format!("Fix the {} above", self.label.to_lowercase()));
         }
         let needs = self.needs.as_ref()?;
         let unmet = match &self.kind {
@@ -523,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn a_value_that_is_not_acceptable_is_reported_in_the_checks_words() {
+    fn a_value_that_is_not_acceptable_is_said_under_the_field_and_pointed_at() {
         fn check(text: &str) -> Result<(), String> {
             text.starts_with("http")
                 .then_some(())
@@ -532,7 +534,15 @@ mod tests {
         let mut field = Field::text("link", "Link").validate(check);
         assert_eq!(field.missing(), None);
         field.set(Value::Text("nope".into()));
-        assert_eq!(field.missing().as_deref(), Some("That is not a link"));
+        assert_eq!(
+            match &field.kind {
+                Kind::Text(text) => text.complaint(),
+                _ => None,
+            }
+            .as_deref(),
+            Some("That is not a link")
+        );
+        assert_eq!(field.missing().as_deref(), Some("Fix the link above"));
     }
 
     #[test]

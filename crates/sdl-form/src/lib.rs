@@ -35,7 +35,7 @@ pub use hits::{HitMap, Target};
 pub const LIST_ROWS: u16 = 6;
 
 /// Rows an open dropdown shows at most.
-pub const DROPDOWN_ROWS: u16 = 8;
+pub(crate) const DROPDOWN_ROWS: u16 = 8;
 
 /// One frame of the spinner, for a step counter that only ever goes up: the app's spinner step
 /// and a form's ([`Form::tick`]) both go through here, so every spinner on screen looks the same.

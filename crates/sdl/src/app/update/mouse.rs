@@ -6,7 +6,7 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use tui_scrollbar::{ScrollBar, ScrollBarInteraction, ScrollCommand, ScrollLengths};
 
 use super::popups::Scroll;
-use crate::app::{App, Cmd, MainTarget, Popup, PopupTarget, Waiting};
+use crate::app::{App, Cmd, MainTarget, Popup, PopupTarget};
 
 impl App {
     /// A mouse event; only the left button, the wheel and a scrollbar drag mean anything.
@@ -16,7 +16,6 @@ impl App {
                 dialog.task(),
                 dialog.mouse(event, &self.hits.form, &self.settings),
             )),
-            Some(Popup::Waiting(Waiting::Eject(_))) => return Vec::new(),
             Some(_) => return self.on_popup_mouse(event),
             None => return self.on_main_mouse(event),
         };

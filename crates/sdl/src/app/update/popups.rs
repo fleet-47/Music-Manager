@@ -35,6 +35,10 @@ impl App {
                 _ => Vec::new(),
             },
             Popup::Waiting(Waiting::Browser) if key.code == KeyCode::Esc => self.answer(false),
+            Popup::Waiting(Waiting::Eject(_)) if key.code == KeyCode::Esc => {
+                self.popups.pop();
+                Vec::new()
+            }
             Popup::Error(_) => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
                     self.popups.pop();

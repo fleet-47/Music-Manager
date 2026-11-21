@@ -95,11 +95,7 @@ async fn sdl_devices_on_a_real_fat32_volume() -> TestResult {
     let name = format!("SDLDEV{}", std::process::id());
     let mut volumes = watch()?;
     let image = Image::new(&dir, &name)?;
-    assert!(
-        image.is_a_disk_image()?,
-        "not a disk image: {}",
-        image.mount.display()
-    );
+    assert!(image.is_a_disk_image()?, "{}", image.mount.display());
     let seen = tokio::time::timeout(Duration::from_secs(10), volumes.changed()).await?;
     assert_eq!(seen, Some(()));
 
@@ -164,6 +160,7 @@ async fn sdl_devices_on_a_real_fat32_volume() -> TestResult {
         .collect();
     assert_eq!(songs.len(), last.added, "{on_device:?}");
     let mut wrote = forced.written();
+    wrote.retain(|path| path.is_file());
     wrote.sort();
     let mut seen = songs.clone();
     seen.sort();

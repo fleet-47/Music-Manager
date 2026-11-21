@@ -26,6 +26,8 @@ pub struct PlaylistInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkItem {
     /// The item's own URL, as the listing gave it (a `music.youtube.com` link keeps that host).
+    /// Empty for an entry the site reports as unavailable (private or removed): the listing gives
+    /// it no address, so it cannot be read or downloaded.
     pub url: String,
     /// Title in the flat listing (may be empty).
     pub title: String,
@@ -111,7 +113,8 @@ fn args(flags: &[&str], url: &str) -> Vec<OsString> {
 
 /// List a link: `yt-dlp --dump-single-json --flat-playlist -- <url>` gives the items and, for a
 /// playlist, its name and order. A link that is a single video is a listing of one item and no
-/// playlist. A playlist entry the listing gives no URL for (an unavailable video) is left out.
+/// playlist. A playlist entry the listing gives no URL for (an unavailable video, or an entry
+/// `yt-dlp` could not read at all) is kept in its place with an empty `url`, so it can be reported.
 ///
 /// # Errors
 /// [`YoutubeError::YtDlpNotFound`], [`YoutubeError::YtDlp`] (with `yt-dlp`'s own reason) or
@@ -162,13 +165,15 @@ fn parse_listing(bytes: &[u8]) -> Result<LinkListing, YoutubeError> {
         .entries
         .unwrap_or_default()
         .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            Some(LinkItem {
-                url: text(entry.url).or_else(|| text(entry.webpage_url))?,
+        .map(|entry| {
+            let entry = entry.unwrap_or_default();
+            LinkItem {
+                url: text(entry.url)
+                    .or_else(|| text(entry.webpage_url))
+                    .unwrap_or_default(),
                 title: entry.title.unwrap_or_default(),
                 id: entry.id.unwrap_or_default(),
-            })
+            }
         })
         .collect();
     Ok(LinkListing {
@@ -259,8 +264,15 @@ mod tests {
             urls,
             [
                 "https://music.youtube.com/watch?v=b",
+                "",
+                "",
                 "https://music.youtube.com/watch?v=a"
-            ]
+            ],
+            "unavailable entries keep their place with no address"
+        );
+        assert_eq!(
+            listing.items.get(2).map(|i| i.title.as_str()),
+            Some("[Private video]")
         );
         Ok(())
     }

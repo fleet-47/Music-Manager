@@ -8,14 +8,19 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, LineGauge, Paragraph, Widget};
 use sdl_core::RunOutcome;
+use sdl_core::words::thousands;
 
 use super::keys;
 use super::theme::Theme;
 use crate::app::rows::{RowView, RunView, main_rows, running_rows};
 use crate::app::{App, Hits, MIN_DETAIL_ROWS, MIN_SIDE_BY_SIDE_COLS, MainTarget};
 
-/// Rows the running panel asks for per task: name and headline, bar, estimate and attention.
-const RUN_TASK_ROWS: u16 = 4;
+/// Rows the running panel asks for per task: name, headline, bar, estimate and attention.
+const RUN_TASK_ROWS: u16 = 5;
+
+/// Rows per task when the panel is too short for [`RUN_TASK_ROWS`]: the attention count then
+/// shares the estimate's row.
+const RUN_TASK_ROWS_SHORT: u16 = 4;
 
 /// Rows the main panel needs to show every function: two lines each, and the border.
 const MAIN_ROWS: u16 = 12;
@@ -156,12 +161,18 @@ fn draw_row(buf: &mut Buffer, rect: Rect, row: &RowView, app: &App, selected: bo
     {
         first.push(Span::styled(format!("  {}", run.count), theme.running()));
     }
-    first.push(Span::styled(
-        format!("  {}", row.selection),
-        theme.secondary(),
-    ));
+    if !row.selection.is_empty() {
+        first.push(Span::styled(
+            format!("  {}", row.selection),
+            theme.secondary(),
+        ));
+    }
     if let Some(held) = row.held.filter(|held| *held > 0) {
-        first.push(Span::styled(format!("  {held} held"), theme.attention()));
+        let noun = if held == 1 { "song" } else { "songs" };
+        first.push(Span::styled(
+            format!("  {} held {noun} waiting", thousands(held)),
+            theme.attention(),
+        ));
     }
     Line::from(first).render(Rect::new(rect.x, rect.y, rect.width, 1), buf);
     if rect.height >= 2 {
@@ -193,19 +204,23 @@ fn draw_running(
         .title(Line::styled(" Running ", theme.heading()));
     let inner = block.inner(area);
     block.render(area, buf);
+    let per_task =
+        if usize::from(inner.height) >= tasks.len().saturating_mul(usize::from(RUN_TASK_ROWS)) {
+            RUN_TASK_ROWS
+        } else {
+            RUN_TASK_ROWS_SHORT
+        };
     // What does not fit is counted, never silently dropped.
-    let fits = usize::from(inner.height / RUN_TASK_ROWS);
+    let fits = usize::from(inner.height.checked_div(per_task).unwrap_or(0));
     let shown = if tasks.len() > fits {
         fits.saturating_sub(1)
     } else {
         tasks.len()
     };
     if shown < tasks.len() {
-        let y = inner.y.saturating_add(
-            u16::try_from(shown)
-                .unwrap_or(0)
-                .saturating_mul(RUN_TASK_ROWS),
-        );
+        let y = inner
+            .y
+            .saturating_add(u16::try_from(shown).unwrap_or(0).saturating_mul(per_task));
         let more = tasks.len().saturating_sub(shown);
         Line::styled(format!("+{more} more running"), theme.secondary())
             .render(Rect::new(inner.x, y, inner.width, 1), buf);
@@ -214,35 +229,58 @@ fn draw_running(
         let y = inner.y.saturating_add(
             u16::try_from(index)
                 .unwrap_or(u16::MAX)
-                .saturating_mul(RUN_TASK_ROWS),
+                .saturating_mul(per_task),
         );
-        let rect = Rect::new(inner.x, y, inner.width, RUN_TASK_ROWS);
+        let rect = Rect::new(inner.x, y, inner.width, per_task);
         hits.main.push(rect, MainTarget::Running(task.task));
         let line = |n: u16| Rect::new(rect.x, rect.y.saturating_add(n), rect.width, 1);
-        Line::from(vec![
-            Span::styled(task.name, theme.running().add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {}", task.headline), theme.secondary()),
-        ])
-        .render(line(0), buf);
+        Line::styled(task.name, theme.running().add_modifier(Modifier::BOLD)).render(line(0), buf);
+        // The headline has its own row; one too long for it ends in "…", so it never looks cut.
+        Line::styled(fit(&task.headline, rect.width), theme.secondary()).render(line(1), buf);
         if let Some(percent) = task.percent {
             LineGauge::default()
                 .ratio(f64::from(percent) / 100.0)
                 .label(Line::styled(task.count.as_str(), theme.emphasis()))
                 .filled_style(theme.bar())
                 .unfilled_style(theme.border())
-                .render(line(1), buf);
+                .render(line(2), buf);
         } else {
             Line::from(vec![
                 Span::styled(format!("{} ", sdl_form::spinner(spin)), theme.running()),
                 Span::styled(task.count.as_str(), theme.emphasis()),
             ])
-            .render(line(1), buf);
+            .render(line(2), buf);
         }
-        Line::styled(task.estimate.as_str(), theme.secondary()).render(line(2), buf);
+        let mut estimate = vec![Span::styled(task.estimate.as_str(), theme.secondary())];
         if let Some(attention) = &task.attention {
-            Line::styled(attention.as_str(), theme.attention()).render(line(3), buf);
+            let attention = Span::styled(attention.as_str(), theme.attention());
+            if per_task == RUN_TASK_ROWS {
+                Line::from(attention).render(line(4), buf);
+            } else {
+                estimate.push(Span::styled(" · ", theme.secondary()));
+                estimate.push(attention);
+            }
+        }
+        Line::from(estimate).render(line(3), buf);
+    }
+}
+
+/// `text` as it fits in `width` columns: whole, or cut with "…" at the end.
+fn fit(text: &str, width: u16) -> String {
+    let width = usize::from(width);
+    if Line::raw(text).width() <= width {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        out.push(c);
+        if Line::raw(out.as_str()).width().saturating_add(1) > width {
+            out.pop();
+            break;
         }
     }
+    out.push('…');
+    out
 }
 
 fn draw_footer(buf: &mut Buffer, area: Rect, app: &App, theme: Theme) {
@@ -280,6 +318,16 @@ mod tests {
         assert_eq!(below.x, narrow.main.x);
         assert!(below.y >= narrow.main.bottom());
         Ok(())
+    }
+
+    #[test]
+    fn a_long_headline_ends_in_an_ellipsis() {
+        assert_eq!(fit("Reading the link", 30), "Reading the link");
+        assert_eq!(fit("Getting Judy Is a Punk by Ramones", 12), "Getting Jud…");
+        assert_eq!(
+            Line::raw(fit("Getting Judy Is a Punk", 12).as_str()).width(),
+            12
+        );
     }
 
     #[test]

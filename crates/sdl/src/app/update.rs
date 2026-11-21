@@ -208,10 +208,6 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return Vec::new();
         }
-        // Ejecting ends by itself; leaving now could cut the clean-up short.
-        if matches!(self.top(), Some(Popup::Waiting(Waiting::Eject(_)))) {
-            return Vec::new();
-        }
         let control_c =
             key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
         if control_c {
@@ -601,12 +597,23 @@ mod tests {
             vec![Cmd::Eject]
         );
         assert!(matches!(app.top(), Some(Popup::Waiting(Waiting::Eject(_)))));
-        // No key leaves while it ejects, not even Ctrl-C.
-        assert_eq!(app.update(key(KeyCode::Esc), clock()), Vec::new());
+        // Other keys do nothing; Esc hides the popup and the eject goes on.
         assert_eq!(app.update(key(KeyCode::Char('q')), clock()), Vec::new());
         assert!(matches!(app.top(), Some(Popup::Waiting(Waiting::Eject(_)))));
         let _ = app.update(Msg::Ejected(Ok(())), clock());
         assert!(app.popups.is_empty());
+        app.popups.push(Popup::Waiting(Waiting::Eject("X".into())));
+        assert_eq!(app.update(key(KeyCode::Esc), clock()), Vec::new());
+        assert!(app.popups.is_empty(), "Esc hides it");
+        let failed = ErrorInfo {
+            message: "m".into(),
+            advice: "a".into(),
+        };
+        let _ = app.update(Msg::Ejected(Err(failed)), clock());
+        assert!(
+            matches!(app.top(), Some(Popup::Error(_))),
+            "a hidden eject still says it failed"
+        );
     }
 
     #[test]

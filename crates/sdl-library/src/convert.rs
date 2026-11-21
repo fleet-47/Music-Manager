@@ -99,6 +99,14 @@ fn plan_now(music_root: &Path, choice: &ConvertChoice) -> Result<ConvertPlan, Li
         let target = destination.join(relative.with_extension(preset.format.extension()));
         plan.jobs.push((source, target));
     }
+    // Nothing to write: no file, and no playlist to write either.
+    if plan.jobs.is_empty() && plan.playlists.is_empty() {
+        plan.summary.refusal = Some(if plan.summary.already > 0 {
+            "Nothing to convert: every chosen song is already in the destination.".to_owned()
+        } else {
+            "Nothing to convert: what is ticked holds no songs. Tick something else.".to_owned()
+        });
+    }
     Ok(plan)
 }
 
@@ -200,14 +208,13 @@ pub async fn run(
     };
     events.send(EventKind::Counts(counts));
     let preset = plan.preset;
-    let mut finished = stream::iter(&plan.jobs)
-        .map(|(source, target)| async move {
-            if stop.is_requested() {
-                return None;
-            }
-            Some((source, convert_file(source, target, preset).await))
-        })
-        .buffer_unordered(parallelism().get());
+    // A plain loop, not a closure over `&plan.jobs`: such a closure makes the future unprovable as
+    // `Send` for every lifetime (rustc), and the task layer spawns it.
+    let mut files = Vec::with_capacity(plan.jobs.len());
+    for (source, target) in &plan.jobs {
+        files.push(convert_one(source, target, preset, stop));
+    }
+    let mut finished = stream::iter(files).buffer_unordered(parallelism().get());
     while let Some(item) = finished.next().await {
         // A file not started because of the stop is not counted; files in hand finish first.
         let Some((source, result)) = item else {
@@ -240,6 +247,19 @@ pub async fn run(
         }
     }
     Ok(counts)
+}
+
+/// One planned file, unless a stop was asked for before it started (`None`).
+async fn convert_one<'a>(
+    source: &'a Path,
+    target: &'a Path,
+    preset: Preset,
+    stop: &StopFlag,
+) -> Option<(&'a Path, Result<(), LibraryError>)> {
+    if stop.is_requested() {
+        return None;
+    }
+    Some((source, convert_file(source, target, preset).await))
 }
 
 /// Whether a failed file means every further file would fail too.

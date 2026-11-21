@@ -1,40 +1,6 @@
-//! Plain-text helpers for numbers, ages and time estimates.
+//! Plain-text helpers for sizes, ages and time estimates (counts are `sdl_core::words`).
 
 use std::time::Duration;
-
-/// `2117` as `2,117`.
-#[must_use]
-pub fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len().saturating_add(digits.len() / 3));
-    for (i, c) in digits.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out.chars().rev().collect()
-}
-
-/// `412 of 2,117`.
-#[must_use]
-pub fn x_of_y(done: usize, total: usize) -> String {
-    format!("{} of {}", thousands(done), thousands(total))
-}
-
-/// `1 file`, `2 files`, `2,117 files`.
-#[must_use]
-pub fn files(n: usize) -> String {
-    let noun = if n == 1 { "file" } else { "files" };
-    format!("{} {noun}", thousands(n))
-}
-
-/// `1 needs attention`, `3 need attention`.
-#[must_use]
-pub fn need_attention(n: usize) -> String {
-    let verb = if n == 1 { "needs" } else { "need" };
-    format!("{} {verb} attention", thousands(n))
-}
 
 /// A size in decimal units with one decimal: `0 B`, `950 B`, `4.2 GB`.
 #[must_use]
@@ -112,20 +78,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thousands_groups_digits() {
-        assert_eq!(thousands(0), "0");
-        assert_eq!(thousands(999), "999");
-        assert_eq!(thousands(2_117), "2,117");
-        assert_eq!(thousands(1_234_567), "1,234,567");
-        assert_eq!(x_of_y(412, 2_117), "412 of 2,117");
-    }
-
-    #[test]
     fn counts_and_sizes_in_words() {
-        assert_eq!(files(1), "1 file");
-        assert_eq!(files(2_117), "2,117 files");
-        assert_eq!(need_attention(1), "1 needs attention");
-        assert_eq!(need_attention(1_200), "1,200 need attention");
         assert_eq!(bytes(0), "0 B");
         assert_eq!(bytes(999), "999 B");
         assert_eq!(bytes(1_000), "1.0 KB");

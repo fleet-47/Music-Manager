@@ -18,7 +18,8 @@ use sdl_core::TaskId;
 use sdl_tasks::Command;
 
 use crate::app::{Cmd, Settings};
-use crate::fmt::{bytes, files, thousands};
+use crate::fmt::bytes;
+use sdl_core::words::{files, thousands};
 
 /// Radio group of mounted external or removable volumes. Option ids are `Device::id`.
 pub(super) const DEVICE: &str = "device";

@@ -20,7 +20,7 @@ mod run;
 mod volumes;
 
 pub use eject::clean_up_and_eject;
-pub use plan::{DevicePlan, place_incoming, plan};
+pub use plan::{DevicePlan, plan};
 pub use run::run;
 pub use volumes::{DeviceWatch, folders, list, watch};
 

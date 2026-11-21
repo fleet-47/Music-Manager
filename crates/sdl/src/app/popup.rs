@@ -28,7 +28,8 @@ pub enum Confirm {
 pub enum Waiting {
     /// "Waiting for you to allow access in the browser", with Cancel (sends `Cancel`).
     Browser,
-    /// "Ejecting <device>", until the runner's eject future ends. No way out: it ends by itself.
+    /// "Ejecting <device>", until the runner's eject future ends. Esc (or Hide) only hides it:
+    /// the eject goes on, and a failure still shows when it comes.
     Eject(String),
 }
 

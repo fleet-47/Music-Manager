@@ -135,6 +135,25 @@ impl TaskContext {
             .clone()
     }
 
+    /// Whether the song with `key` is in the review list (read without copying the list).
+    #[must_use]
+    pub fn is_held(&self, key: &str) -> bool {
+        self.review
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(key)
+    }
+
+    /// Whether the song with `key` was marked "never download".
+    #[must_use]
+    pub fn is_never(&self, key: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .never
+            .contains(key)
+    }
+
     /// Change the state and save it, holding the lock so concurrent tasks cannot save out of
     /// order. The change stays in memory even when the save fails.
     ///
@@ -380,7 +399,7 @@ impl Runner {
 
     /// A runner over the given state and review (and where each is saved).
     #[must_use]
-    pub fn with_files(
+    pub(crate) fn with_files(
         config: Config,
         state: (State, PathBuf),
         review: (ReviewList, PathBuf),

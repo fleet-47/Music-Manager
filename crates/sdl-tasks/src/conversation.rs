@@ -150,6 +150,16 @@ impl Inbox {
         }
     }
 
+    /// Whether a `Cancel` is already queued behind the command just read (the owner stopped the
+    /// task as it was starting). Nothing reads commands once the run has started, so a `Cancel`
+    /// sent with `Go` would otherwise be lost and a run the owner stopped would carry on.
+    fn cancel_queued(&mut self) -> bool {
+        while let Ok(command) = self.commands.try_recv() {
+            self.waiting.push_back(command);
+        }
+        self.waiting.contains(&Command::Cancel)
+    }
+
     /// Run `work` unless the owner cancels (or the UI goes) first: then `None`, and `work` is
     /// dropped, which frees what it holds (the sign-in listener's port, for one). A finished
     /// `work` wins over a cancel that arrives with it; the cancel is read next.
@@ -230,11 +240,15 @@ pub(crate) async fn drive(
                 match answered? {
                     Answered::Ignored => {}
                     Answered::Waiting { can_start } => ready = can_start,
+                    Answered::Run if inbox.cancel_queued() => return Ok(Flow::Cancelled),
                     Answered::Run => return run(step, events).await,
                 }
             }
             Some(Command::Go) => {
                 if ready {
+                    if inbox.cancel_queued() {
+                        return Ok(Flow::Cancelled);
+                    }
                     return run(step, events).await;
                 }
             }
@@ -435,6 +449,25 @@ mod tests {
         .await?;
         assert!(!cancelled);
         assert_eq!(step.log, ["open", "consent", "answer", "go"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_cancel_sent_with_go_wins_over_it() -> TestResult {
+        let mut step = Fake {
+            can_start: true,
+            ..Fake::default()
+        };
+        let (cancelled, started) =
+            drive_with(&mut step, vec![convert(), Command::Go, Command::Cancel]).await?;
+        assert!(cancelled && !started, "nothing ran");
+        assert_eq!(step.log, ["open", "answer"]);
+        let mut direct = Fake {
+            run_at_once: true,
+            ..Fake::default()
+        };
+        assert!(run(&mut direct, vec![convert(), Command::Cancel]).await?);
+        assert_eq!(direct.log, ["open", "answer"]);
         Ok(())
     }
 

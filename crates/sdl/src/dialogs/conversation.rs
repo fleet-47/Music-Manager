@@ -50,6 +50,11 @@ impl Conversation {
         self.starting || self.wait.is_some() || self.asked > self.answered
     }
 
+    /// Whether `Go` (or the answer that starts the run) was sent and `Started` has not come yet.
+    pub(super) fn is_starting(&self) -> bool {
+        self.starting
+    }
+
     /// Whether the summary shown matches the form, so the button reads `Start`.
     pub(super) fn is_planned(&self) -> bool {
         self.summary.is_some()

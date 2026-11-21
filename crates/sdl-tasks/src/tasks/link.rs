@@ -9,7 +9,7 @@ use std::sync::{Mutex, PoisonError};
 
 use futures::StreamExt;
 use futures::stream;
-use sdl_core::{EventKind, WantedSong};
+use sdl_core::{Attention, EventKind, WantedSong};
 use sdl_library::playlists;
 use sdl_youtube::{LinkItem, list_link, read_item};
 
@@ -39,6 +39,19 @@ async fn read_and_take(
     intake: &Intake<'_>,
     read: &Mutex<Vec<(usize, WantedSong)>>,
 ) -> Result<Outcome, TaskError> {
+    if item.url.is_empty() {
+        let title = if item.title.is_empty() {
+            format!("Item {} of the playlist", at.saturating_add(1))
+        } else {
+            item.title.clone()
+        };
+        return Ok(Outcome::Failed(Attention::failed(
+            title,
+            String::new(),
+            "The site reports this entry as unavailable (private or removed). There is nothing to download."
+                .to_owned(),
+        )));
+    }
     let song = match read_item(item).await {
         Ok(song) => song,
         Err(error) => {

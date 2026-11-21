@@ -59,7 +59,7 @@ struct RawConfig {
 
 /// Expand a leading `~` component of `path` to `home`. `~user` and a `~` elsewhere are left alone.
 #[must_use]
-pub fn expand_home(path: &Path, home: &Path) -> PathBuf {
+pub(crate) fn expand_home(path: &Path, home: &Path) -> PathBuf {
     match path.strip_prefix("~") {
         Ok(rest) => home.join(rest),
         Err(_) => path.to_path_buf(),
@@ -70,7 +70,7 @@ pub fn expand_home(path: &Path, home: &Path) -> PathBuf {
 ///
 /// # Errors
 /// [`ConfigError::NoHome`] when the home directory is unknown.
-pub fn config_dir() -> Result<PathBuf, ConfigError> {
+pub(crate) fn config_dir() -> Result<PathBuf, ConfigError> {
     let base = BaseDirs::new().ok_or(ConfigError::NoHome)?;
     Ok(base.home_dir().join(".config").join("sdl"))
 }

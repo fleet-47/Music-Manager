@@ -365,7 +365,7 @@ fn download_link_starts_with_a_pasted_link() {
             .form()
             .missing()
             .iter()
-            .any(|line| line.contains("https://"))
+            .any(|line| line == "Fix the link above")
     );
     // Clear the field (Ctrl-U) and paste a link, with a stray space and a line break.
     let _ = rig.press(KeyEvent {

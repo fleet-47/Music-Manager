@@ -19,7 +19,7 @@ pub enum Scope {
     Notice,
     /// A yes-or-no question.
     Question,
-    /// A popup that waits for the browser.
+    /// A popup that waits: for the browser, or for an eject.
     Wait,
     /// The mouse.
     Mouse,
@@ -35,7 +35,7 @@ impl Scope {
             Self::Scroll => "Long lists",
             Self::Notice => "Messages",
             Self::Question => "Questions",
-            Self::Wait => "Waiting for the browser",
+            Self::Wait => "Waiting",
             Self::Mouse => "Mouse",
         }
     }
@@ -118,7 +118,12 @@ pub const BINDINGS: &[Binding] = &[
     bind(Scope::Notice, "Esc q Enter", "close").foot("Esc", "close"),
     bind(Scope::Question, "y, Enter", "yes").foot("y", "yes"),
     bind(Scope::Question, "n, Esc", "no").foot("n", "no"),
-    bind(Scope::Wait, "Esc", "cancel").foot("Esc", "cancel"),
+    bind(Scope::Wait, "Esc", "cancel the sign-in")
+        .foot("Esc", "cancel")
+        .when(signing_in),
+    bind(Scope::Wait, "Esc", "hide; eject goes on")
+        .foot("Esc", "hide")
+        .when(ejecting),
     bind(Scope::Mouse, "click", "press what is there"),
     bind(Scope::Mouse, "second click", "run the chosen one"),
     bind(Scope::Mouse, "wheel", "scroll the list"),
@@ -137,24 +142,26 @@ fn scope(app: &App) -> Scope {
     }
 }
 
+fn signing_in(app: &App) -> bool {
+    matches!(app.top(), Some(Popup::Waiting(Waiting::Browser)))
+}
+
+fn ejecting(app: &App) -> bool {
+    matches!(app.top(), Some(Popup::Waiting(Waiting::Eject(_))))
+}
+
 /// The footer's hints for what is on screen now: the open form's, or the table's for the scope.
-/// Ejecting has none: it ends by itself and no key does anything.
 #[must_use]
 pub fn footer(app: &App) -> Vec<Hint> {
-    match app.top() {
-        Some(Popup::Dialog(dialog)) => dialog.hints(),
-        Some(Popup::Waiting(Waiting::Eject(_))) => Vec::new(),
-        _ => {
-            let here = scope(app);
-            BINDINGS
-                .iter()
-                .filter(|binding| {
-                    binding.scope == here && binding.when.is_none_or(|holds| holds(app))
-                })
-                .filter_map(|binding| binding.foot)
-                .collect()
-        }
+    if let Some(Popup::Dialog(dialog)) = app.top() {
+        return dialog.hints();
     }
+    let here = scope(app);
+    BINDINGS
+        .iter()
+        .filter(|binding| binding.scope == here && binding.when.is_none_or(|holds| holds(app)))
+        .filter_map(|binding| binding.foot)
+        .collect()
 }
 
 /// Columns between footer hints.
@@ -259,7 +266,7 @@ mod tests {
         assert_eq!(keys(&app), ["Esc"]);
         app.popups
             .push(Popup::Waiting(Waiting::Eject("DISC".into())));
-        assert_eq!(keys(&app), Vec::<&str>::new());
+        assert_eq!(keys(&app), ["Esc"]);
         app.popups.push(Popup::Help { scroll: 0 });
         assert_eq!(keys(&app), ["↑↓", "Esc"]);
     }

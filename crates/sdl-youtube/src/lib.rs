@@ -8,13 +8,13 @@
 //!
 //! `ytdlp` is the one place the `yt-dlp` binary is run.
 
-pub mod download;
-pub mod link;
-pub mod matching;
+mod download;
+mod link;
+mod matching;
 mod ytdlp;
 
 pub use download::{Downloaded, download_opus, download_own_audio};
-pub use link::{LinkItem, LinkListing, PlaylistInfo, is_music_link, list_link, read_item};
+pub use link::{LinkItem, LinkListing, PlaylistInfo, list_link, read_item};
 pub use matching::Matcher;
 
 /// Errors from the `YouTube` crate. Messages are plain words fit for the error popup.

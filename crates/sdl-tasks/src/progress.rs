@@ -12,7 +12,7 @@ use sdl_core::{Attention, Counts, EventKind, EventSender};
 use tempfile::{TempDir, TempPath};
 
 use crate::TaskError;
-use crate::fmt::{need_attention, thousands, x_of_y};
+use sdl_core::words::{need_attention, thousands, x_of_y};
 
 /// How one item ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,26 +137,6 @@ pub async fn place(file: &Path, dest: &Path) -> std::io::Result<Outcome> {
         }
         Err(failure) => Err(failure.error),
     }
-}
-
-/// Run the future `make` builds to its end on a thread of the blocking pool, for a library call
-/// that must not be stopped by an abort (Convert and Sync device finish the file in hand). The
-/// libraries' stream-based runs cannot be proven `Send` for every lifetime (rustc), so they are run
-/// where `Send` is not asked for; they still use the runtime's I/O and timers.
-///
-/// # Errors
-/// The thread could not be joined.
-pub(crate) async fn on_blocking_pool<T, F>(
-    make: impl FnOnce() -> F + Send + 'static,
-) -> Result<T, TaskError>
-where
-    T: Send + 'static,
-    F: Future<Output = T>,
-{
-    let handle = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || handle.block_on(make()))
-        .await
-        .map_err(|error| TaskError::Library(sdl_library::LibraryError::Task(error.to_string())))
 }
 
 /// Time left: `elapsed / done * remaining`. `None` until something is done, and on overflow.

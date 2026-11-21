@@ -25,7 +25,7 @@ use sdl_tasks::{Answers, Resolution, ReviewChoice};
 use super::choices::{chosen_of, text_of};
 use super::link;
 use crate::app::Settings;
-use crate::fmt::thousands;
+use sdl_core::words::thousands;
 
 /// The list of held songs. Row ids are `WantedSong::key`.
 pub(super) const SONGS: &str = "songs";
@@ -280,7 +280,7 @@ fn detail_form(held: &HeldSong, previous: Option<&Resolution>) -> Form {
         )
         .field(
             Field::text(PASTED, "Link")
-                .placeholder("Paste a YouTube or YouTube Music link")
+                .placeholder("Paste a YouTube, YouTube Music or SoundCloud link")
                 .validate(link::check)
                 .needs("Paste a link")
                 .hidden(),
@@ -344,9 +344,14 @@ fn candidate_parts(held: &HeldSong, candidate: &Candidate) -> Vec<Part> {
             .artists
             .iter()
             .all(|a| candidate.artists.iter().any(|b| same(a, b)));
+    let artists = if candidate.artists.is_empty() {
+        "no artist".to_owned()
+    } else {
+        candidate.artists.join(", ")
+    };
     let mut parts = vec![
         part(candidate.title.clone(), same(&song.title, &candidate.title)),
-        part(candidate.artists.join(", "), artists_same),
+        part(artists, artists_same),
     ];
     if let Some(album) = &candidate.album {
         let matches = song

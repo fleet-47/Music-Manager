@@ -2,11 +2,12 @@
 
 use std::time::Duration;
 
-use sdl_core::{Format, RunOutcome, State, TaskId};
+use sdl_core::{Direction, Format, RunOutcome, State, TaskId};
 use sdl_tasks::estimate_remaining;
 
 use super::{App, FunctionView};
-use crate::fmt::{ago, estimate_text, need_attention, percent, thousands, x_of_y};
+use crate::fmt::{ago, estimate_text, percent};
+use sdl_core::words::{need_attention, thousands, x_of_y};
 
 /// A function's last-run line, with its age.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,9 +86,10 @@ pub fn selection_text(task: TaskId, state: &State, held: usize) -> String {
             n => format!("{} lists chosen", thousands(n)),
         },
         TaskId::DownloadLink => "paste a link".to_owned(),
+        // The count itself is the row's yellow `N held songs waiting`.
         TaskId::Review => match held {
             0 => "nothing waiting".to_owned(),
-            n => format!("{} waiting", thousands(n)),
+            _ => String::new(),
         },
         TaskId::SyncDevice => state
             .last_device
@@ -95,12 +97,14 @@ pub fn selection_text(task: TaskId, state: &State, held: usize) -> String {
             .and_then(|id| state.devices.get(id))
             .map_or_else(
                 || "no device synced yet".to_owned(),
-                |choice| {
-                    format!(
+                // The format only applies To device.
+                |choice| match choice.direction {
+                    Direction::ToDevice => format!(
                         "{} · {}",
                         choice.direction.label(),
                         Format::device_label(choice.format)
-                    )
+                    ),
+                    Direction::FromDevice => choice.direction.label().to_owned(),
                 },
             ),
         TaskId::Convert => format!(

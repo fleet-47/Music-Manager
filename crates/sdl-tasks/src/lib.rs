@@ -15,7 +15,6 @@
 
 mod conversation;
 mod failure;
-mod fmt;
 mod progress;
 mod runner;
 mod tasks;
@@ -52,7 +51,7 @@ pub enum Command {
 
 /// Errors that end a task. Turned into an [`sdl_core::ErrorInfo`] (or `RateLimited`) for the popup.
 #[derive(Debug, thiserror::Error)]
-pub enum TaskError {
+pub(crate) enum TaskError {
     /// A Spotify failure.
     #[error(transparent)]
     Spotify(#[from] sdl_spotify::SpotifyError),

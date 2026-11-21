@@ -9,7 +9,7 @@ use sdl_tasks::Answers;
 use super::choices::ticked_of;
 use super::conversation::Conversation;
 use crate::app::Settings;
-use crate::fmt::thousands;
+use sdl_core::words::thousands;
 
 /// The tick list of Spotify lists. Values are list ids.
 pub(super) const LISTS: &str = "lists";

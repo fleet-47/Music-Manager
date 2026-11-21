@@ -28,7 +28,7 @@ use crate::plan::DevicePlan;
 /// `sdl_library::converter::convert_file` (`converter::parallelism()` at a time) when a format is
 /// chosen and the file is not already in it; then each ticked playlist is written to
 /// `<device>/Music/<List name>.m3u8` with `sdl_library::playlists::write_for_destination`. From
-/// device: files are copied as they are to the place [`crate::place_incoming`] gave in the plan.
+/// device: files are copied as they are to the place the plan gave each (its tags, else `Unsorted`).
 /// A destination that has appeared since the plan (in any format) is skipped, never replaced. Sends
 /// [`sdl_core::EventKind::Counts`] after each file and an `Attention` for a failed one. `stop` is
 /// checked before each file starts: the files in hand finish, then the run ends (without writing
@@ -68,9 +68,13 @@ pub async fn run(
         .unwrap_or_else(PoisonError::into_inner)
         .clear();
     let mut fatal = None;
-    let mut results = futures::stream::iter(&plan.jobs)
-        .map(|(src, dest)| run.file(src, dest))
-        .buffer_unordered(width);
+    // A plain loop, not a closure over `&plan.jobs`: such a closure makes the future unprovable as
+    // `Send` for every lifetime (rustc), and the task layer spawns it.
+    let mut files = Vec::with_capacity(plan.jobs.len());
+    for (src, dest) in &plan.jobs {
+        files.push(run.file(src, dest));
+    }
+    let mut results = futures::stream::iter(files).buffer_unordered(width);
     while let Some(result) = results.next().await {
         match result {
             Ok(Outcome::NotStarted) => continue,
@@ -152,9 +156,17 @@ impl Run<'_> {
         let Some(folder) = dest.parent() else {
             return Ok(Outcome::NotStarted);
         };
+        let made = missing_folders(folder, &self.plan.device.mount_point);
         if let Err(source) = tokio::fs::create_dir_all(folder).await {
             return self.failed(src, dest, &source);
         }
+        // Folders this run made are its own too: clean-up may remove the `._` file macOS leaves
+        // beside each (F10).
+        self.plan
+            .written
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(made);
         let preset = self.plan.choice.preset();
         let to_device = self.plan.choice.direction == Direction::ToDevice;
         match preset {
@@ -305,6 +317,17 @@ impl Run<'_> {
     }
 }
 
+/// The folders from `folder` up to (not including) `root` that do not exist yet, so a run can tell
+/// which folders it made. Empty outside `root`.
+fn missing_folders(folder: &Path, root: &Path) -> Vec<PathBuf> {
+    folder
+        .ancestors()
+        .take_while(|dir| *dir != root && dir.starts_with(root))
+        .take_while(|dir| !dir.exists())
+        .map(Path::to_path_buf)
+        .collect()
+}
+
 /// How a finished part is put in its final place.
 #[derive(Clone, Copy)]
 enum Landing {
@@ -423,7 +446,12 @@ mod tests {
         assert!(leftovers.is_empty(), "{leftovers:?}");
         assert_eq!((report.total, report.done, report.added), (Some(3), 3, 2));
         assert_eq!((report.skipped, report.failed), (1, 0));
-        assert_eq!(plan.written().len(), 3, "two songs and the playlist");
+        let mut written = plan.written();
+        written.sort();
+        // The folders were there already (made for `two.m4a` above), so only files are listed.
+        let expected = ["A/Al/Mr. Three.opus", "A/Al/one.opus", "Mix.m3u8"]
+            .map(|relative| music.join(relative));
+        assert_eq!(written, expected, "two songs and the playlist");
         assert_eq!(
             std::fs::read_to_string(music.join("Mix.m3u8"))?,
             "#EXTM3U\n#PLAYLIST:Mix\nA/Al/one.opus\nA/Al/two.m4a\n"
@@ -475,8 +503,13 @@ mod tests {
         let report = run(&plan, &events, &stop).await?;
         watcher.await?;
         assert!(report.added >= 1 && report.added < 40, "{report:?}");
-        assert_eq!(plan.written().len(), report.added);
-        for file in &plan.written() {
+        let music = dev.path().join("Music");
+        let made: Vec<PathBuf> = plan.written().into_iter().filter(|p| p.is_dir()).collect();
+        assert_eq!(made.len(), 3, "the folders this run made: {made:?}");
+        assert!(made.contains(&music) && made.contains(&music.join("A/Al")));
+        let files: Vec<PathBuf> = plan.written().into_iter().filter(|p| p.is_file()).collect();
+        assert_eq!(files.len(), report.added);
+        for file in &files {
             assert_eq!(std::fs::read(file)?, b"data");
         }
         assert!(

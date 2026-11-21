@@ -43,9 +43,9 @@ impl DevicePlan {
         &self.summary
     }
 
-    /// The files the last [`crate::run`] of this plan wrote, up to now, also when the run ended
-    /// with an error (a full or vanished device) or a stop: what [`crate::clean_up_and_eject`]
-    /// needs to remove the `._` files macOS made beside them.
+    /// The files the last [`crate::run`] of this plan wrote and the folders it made, up to now,
+    /// also when the run ended with an error (a full or vanished device) or a stop: what
+    /// [`crate::clean_up_and_eject`] needs to remove the `._` files macOS made beside them.
     #[must_use]
     pub fn written(&self) -> Vec<PathBuf> {
         self.written
@@ -64,7 +64,7 @@ impl DevicePlan {
 ///   Sizes come from `sdl_library::converter::output_size`: exact for copies, estimated for
 ///   conversions (`estimated` is then set). Free space is `device.free_bytes`.
 /// - **From device**: `.opus`, `.mp3` and `.m4a` files under the ticked `choice.from_folders` (folders
-///   in the device root); a file is skipped when its place ([`place_incoming`]) is present in the
+///   in the device root); a file is skipped when its place ([`incoming_path`]) is present in the
 ///   library in any format. Free space is not checked (`free_bytes` is `None`).
 ///
 /// Names that start with a dot are never planned. Reads tags and durations, so the scan runs on a
@@ -102,6 +102,10 @@ fn build(
         Direction::ToDevice => Some(device.free_bytes),
         Direction::FromDevice => None,
     };
+    // Nothing to write: no file, and (To device) no playlist to write either.
+    let nothing = jobs.is_empty()
+        && (choice.direction == Direction::FromDevice || choice.what.playlists.is_empty());
+    let refusal = nothing.then(|| nothing_to_copy(&device, choice.direction, already));
     Ok(DevicePlan {
         summary: PlanSummary {
             files: jobs.len(),
@@ -109,7 +113,7 @@ fn build(
             estimated,
             already,
             free_bytes,
-            refusal: None,
+            refusal,
         },
         device,
         music_root,
@@ -117,6 +121,25 @@ fn build(
         jobs,
         written: Arc::default(),
     })
+}
+
+/// Why a plan with nothing to write cannot start, in plain words.
+fn nothing_to_copy(device: &Device, direction: Direction, already: usize) -> String {
+    let name = &device.name;
+    match (direction, already > 0) {
+        (Direction::ToDevice, true) => {
+            format!("Nothing to copy: every chosen song is already on {name}.")
+        }
+        (Direction::ToDevice, false) => {
+            "Nothing to copy: what is ticked holds no songs. Tick something else.".to_owned()
+        }
+        (Direction::FromDevice, true) => format!(
+            "Nothing to copy: every song in the ticked folders of {name} is already in the library."
+        ),
+        (Direction::FromDevice, false) => format!(
+            "Nothing to copy: the ticked folders of {name} hold no .opus, .mp3 or .m4a files."
+        ),
+    }
 }
 
 type Planned = (Vec<(PathBuf, PathBuf)>, usize, u64, bool);
@@ -231,25 +254,7 @@ fn plan_from_device(
 /// (`sdl_library::tags::place_from_tags`, F7) with the file's own extension; a file without a
 /// title or artist tag, or whose tags cannot be read, goes to
 /// `<music_root>/Unsorted/<its path relative to the device root>`, each component made safe like
-/// any library name.
-///
-/// # Errors
-/// [`DevicesError::Io`] when `file` is not an audio file under the device.
-pub async fn place_incoming(
-    music_root: &Path,
-    device: &Device,
-    file: &Path,
-) -> Result<PathBuf, DevicesError> {
-    let (music_root, mount, file) = (
-        music_root.to_path_buf(),
-        device.mount_point.clone(),
-        file.to_path_buf(),
-    );
-    tokio::task::spawn_blocking(move || incoming_path(&music_root, &mount, &file))
-        .await
-        .map_err(|error| joined(&error))?
-}
-
+/// any library name. A file that is not `.opus`, `.mp3` or `.m4a` is [`DevicesError::Io`].
 fn incoming_path(music_root: &Path, mount: &Path, file: &Path) -> Result<PathBuf, DevicesError> {
     let Some(format) = Format::of(file) else {
         return Err(not_audio(file));
@@ -483,12 +488,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            place_incoming(
-                root.path(),
-                &device(dev.path(), 0),
-                &dev.path().join("Old/tagged.mp3")
-            )
-            .await?,
+            incoming_path(root.path(), dev.path(), &dev.path().join("Old/tagged.mp3"))?,
             root.path().join("Band/Rec/Song One.mp3")
         );
         Ok(())

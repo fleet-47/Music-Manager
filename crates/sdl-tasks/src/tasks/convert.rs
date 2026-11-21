@@ -10,9 +10,9 @@ use sdl_library::convert::{ConvertPlan, plan, run};
 use sdl_library::playlists;
 
 use crate::conversation::{Answered, Answers, Opened, Step};
-use crate::fmt::thousands;
-use crate::progress::{on_blocking_pool, stopped_line, written_line};
+use crate::progress::{stopped_line, written_line};
 use crate::{Flow, TaskContext, TaskError};
+use sdl_core::words::files;
 
 /// The Convert task.
 pub(crate) struct Convert<'a> {
@@ -64,15 +64,11 @@ impl Step for Convert<'_> {
         let Some(planned) = self.plan.take() else {
             return Ok(Flow::Cancelled);
         };
-        let files = planned.summary().files;
         context.events.send(EventKind::Headline(format!(
-            "Converting {} {}",
-            thousands(files),
-            if files == 1 { "file" } else { "files" }
+            "Converting {}",
+            files(planned.summary().files)
         )));
-        let (events, stop) = (context.events.clone(), context.stop.clone());
-        let counts =
-            on_blocking_pool(move || async move { run(&planned, &events, &stop).await }).await??;
+        let counts = run(&planned, &context.events, &context.stop).await?;
         if context.stop.is_requested() {
             return Ok(Flow::Stopped {
                 line: stopped_line(&counts),
@@ -134,11 +130,28 @@ mod tests {
 
         let good = ConvertChoice {
             destination: dir.path().join("converted"),
+            what: sdl_core::Selection {
+                whole_library: true,
+                playlists: Vec::new(),
+            },
             ..ConvertChoice::default()
         };
         assert!(runner.send(TaskId::Convert, answer(&good)));
+        let empty = next_plan(&mut rx).await?;
+        assert!(
+            empty
+                .refusal
+                .as_deref()
+                .is_some_and(|why| why.starts_with("Nothing to convert")),
+            "an empty library has nothing to do"
+        );
+        // A file that is not audio: the run goes through to its end with one failed item.
+        let song = dir.path().join("music/Band/Record/Song.opus");
+        std::fs::create_dir_all(song.parent().ok_or("no folder")?)?;
+        std::fs::write(&song, b"not audio")?;
+        assert!(runner.send(TaskId::Convert, answer(&good)));
         let plan = next_plan(&mut rx).await?;
-        assert!(plan.can_start());
+        assert!(plan.can_start() && plan.files == 1);
         assert!(runner.send(TaskId::Convert, Command::Go));
         let mut kinds = Vec::new();
         loop {
@@ -153,7 +166,10 @@ mod tests {
         let run = runner.state().last_run.get(&TaskId::Convert).cloned();
         assert_eq!(
             run.map(|r| (r.line, r.outcome)),
-            Some(("0 converted".to_owned(), RunOutcome::Done))
+            Some((
+                "0 converted, 1 needs attention".to_owned(),
+                RunOutcome::NeedsAttention
+            ))
         );
         assert_eq!(runner.state().convert, good);
         Ok(())

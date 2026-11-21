@@ -91,7 +91,24 @@ impl<'a> Intake<'a> {
     ) -> Result<Outcome, TaskError> {
         let root = &self.context.config.music_root;
         let place = Place::of(root, song);
-        if place.present()?.is_some() || !self.claim(&place) {
+        if place.present()?.is_some() {
+            return Ok(Outcome::Skipped);
+        }
+        // A song that is held, or was marked "never", is never searched again (F8). Review takes
+        // held songs by another route.
+        if route == Route::Search {
+            if self.context.is_held(song.key()) {
+                return Ok(Outcome::Held(Attention::held(
+                    song.title.clone(),
+                    song.artists_joined(),
+                    "Already waiting in Review: choose a match there.".to_owned(),
+                )));
+            }
+            if self.context.is_never(song.key()) {
+                return Ok(Outcome::Skipped);
+            }
+        }
+        if !self.claim(&place) {
             return Ok(Outcome::Skipped);
         }
         self.context
@@ -118,7 +135,7 @@ impl<'a> Intake<'a> {
                         return Ok(Outcome::Held(Attention::held(
                             song.title.clone(),
                             song.artists_joined(),
-                            reason,
+                            format!("{reason} Choose what to do with it in Review."),
                         )));
                     }
                     MatchOutcome::Failed(reason) => {

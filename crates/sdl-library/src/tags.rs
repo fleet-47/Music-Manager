@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
 use lofty::config::WriteOptions;
 use lofty::file::TaggedFileExt;
@@ -173,17 +174,31 @@ fn matching_release<'a>(recording: &'a Recording, song: &WantedSong) -> Option<(
         })
 }
 
-/// Write all tags and the cover (downloaded from `song.cover_url`) to `file` in one write.
+/// How long a cover download may take, from connecting to the last byte (F6).
+const COVER_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Write all tags and the cover (downloaded from `song.cover_url`, giving up after 20 seconds) to
+/// `file` in one write.
 ///
 /// # Errors
-/// The file cannot be read or written, or the cover download failed.
+/// The file cannot be read or written, or the cover download failed or took too long.
 pub async fn write_tags(
     file: &Path,
     song: &WantedSong,
     enrichment: &Enrichment,
 ) -> Result<(), LibraryError> {
     let cover = match &song.cover_url {
-        Some(url) => Some(reqwest::get(url).await?.error_for_status()?.bytes().await?),
+        Some(url) => Some(
+            reqwest::Client::builder()
+                .timeout(COVER_TIMEOUT)
+                .build()?
+                .get(url)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?,
+        ),
         None => None,
     };
     let tag_err = |message: String| LibraryError::Tag {

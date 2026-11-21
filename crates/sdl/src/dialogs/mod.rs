@@ -32,7 +32,9 @@
 //!    `PlanSummary::can_start`, otherwise `Form::set_blocked` says why in plain words
 //!    (`Not enough room on SNOWSKY: 3.2 GB to copy, 1.1 GB free`, or the plan's refusal).
 //! 6. **Leaving.** `Reaction::Cancel` sends `Cancel` and closes, except in Review's song detail,
-//!    where it goes back to the list (`Form::set_back`).
+//!    where it goes back to the list (`Form::set_back`), and while the form shows `Starting`: the
+//!    run is already on its way (it would only be stopped again), so Esc and Cancel wait for
+//!    `Started`, which comes at once, and the footer shows no keys meanwhile.
 //! 7. **Function keys** are what the form ignores (`r`, `o`); [`Dialog::hints`] adds them to the
 //!    footer only while they work, so nothing has to be remembered.
 //!
@@ -144,6 +146,9 @@ impl Dialog {
     /// candidate is chosen).
     #[must_use]
     pub fn hints(&self) -> Vec<Hint> {
+        if self.conv.is_starting() {
+            return Vec::new();
+        }
         let mut hints = self.form.hints();
         let own = match &self.extra {
             Extra::SyncDevice(_) if self.looks_again_works() => Some(Hint {
@@ -241,6 +246,7 @@ impl Dialog {
     /// What a reaction of the form means for this function.
     fn react(&mut self, reaction: &Reaction, key: Option<KeyEvent>, settings: &Settings) -> Step {
         let commands = match reaction {
+            Reaction::Cancel if self.conv.is_starting() => Vec::new(),
             Reaction::Cancel => {
                 if let Extra::Review(state) = &mut self.extra
                     && review::back(&mut self.form, state)

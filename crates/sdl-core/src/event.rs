@@ -183,8 +183,8 @@ pub struct PlanSummary {
     pub already: usize,
     /// Free space where the files go; `None` when it is not known (Convert, From device).
     pub free_bytes: Option<u64>,
-    /// Why this plan cannot start, in plain words (Convert: "the destination is inside a folder
-    /// being converted"); `None` when nothing stands in the way. Not enough room is
+    /// Why this plan cannot start, in plain words (Convert: the destination is inside the library;
+    /// Convert and Sync device: there is nothing to write); `None` when nothing stands in the way. Not enough room is
     /// [`PlanSummary::fits`], not a refusal.
     pub refusal: Option<String>,
 }

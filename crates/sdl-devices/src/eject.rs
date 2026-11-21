@@ -24,8 +24,8 @@ const APPLE_DOUBLE: [u8; 4] = [0x00, 0x05, 0x16, 0x07];
 
 /// Clean up and eject (the owner has been asked, and was told it empties the device's Trash):
 /// remove `.Spotlight-V100`, `.Trashes`, `.fseventsd` and `.TemporaryItems` from the device root
-/// and every `.DS_Store`; remove a `._X` file only when `X` is in `written` (this run wrote it)
-/// and the file starts with the `AppleDouble` signature (bytes `00 05 16 07`); then
+/// and every `.DS_Store`; remove a `._X` file only when `X` is in `written` (a file this run
+/// wrote, or a folder it made: [`crate::DevicePlan::written`]) and the file starts with the `AppleDouble` signature (bytes `00 05 16 07`); then
 /// `diskutil unmount <mount point>` (`tokio::process::Command`). Removes nothing else. A clean-up
 /// that fails stops before the unmount, so the owner is told before anything else happens.
 ///
@@ -164,7 +164,23 @@ mod tests {
         // A hidden folder that is not on the list: stays, and so does its content.
         put(&root.join(".diskos/keep"), b"x")?;
 
-        clean_up(root, &[wrote.clone(), wrote_too, short])?;
+        // A folder this run made, and one it did not: only the first one's `._` file goes.
+        put(&root.join("Music/._A"), &signature)?;
+        put(&root.join("Music/._B"), &signature)?;
+        std::fs::create_dir_all(root.join("Music/B"))?;
+
+        clean_up(
+            root,
+            &[wrote.clone(), wrote_too, short, root.join("Music/A")],
+        )?;
+        assert!(
+            !root.join("Music/._A").exists(),
+            "beside a folder this run made"
+        );
+        assert!(
+            root.join("Music/._B").exists(),
+            "beside a folder it did not make"
+        );
 
         for name in ROOT_ITEMS {
             assert!(!root.join(name).exists(), "{name}");

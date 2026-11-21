@@ -16,6 +16,7 @@ pub mod song;
 pub mod state;
 pub mod stop;
 mod storage;
+pub mod words;
 
 pub use config::{Config, ConfigError};
 pub use device::{ConvertChoice, Device, DeviceChoice, Direction, Selection};
