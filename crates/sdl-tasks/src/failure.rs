@@ -33,7 +33,7 @@ pub(crate) fn error_info(error: &TaskError) -> ErrorInfo {
         }
         TaskError::Youtube(YoutubeError::Search(_))
         | TaskError::Spotify(SpotifyError::Api(_))
-        | TaskError::Library(LibraryError::MusicBrainz(_) | LibraryError::Cover(_)) => NETWORK,
+        | TaskError::Library(LibraryError::MusicBrainz(_)) => NETWORK,
         TaskError::Spotify(SpotifyError::Forbidden { .. }) => {
             "Check the app's settings on the Spotify developer dashboard, then try again."
         }

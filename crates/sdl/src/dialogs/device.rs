@@ -188,7 +188,7 @@ pub(super) fn on_event(
                 devices
                     .iter()
                     .map(|device| {
-                        Choice::new(device.id().to_owned(), device.name.clone())
+                        Choice::new(device.id().to_owned(), device.label())
                             .with_detail(format!("{} free", bytes(device.free_bytes)))
                     })
                     .collect(),
@@ -236,7 +236,8 @@ pub(super) fn on_event(
             conv.changed();
         }
         EventKind::Plan(plan) => {
-            let device = chosen_device(form, state).map_or("the device", |d| d.name.as_str());
+            let device =
+                chosen_device(form, state).map_or_else(|| "the device".to_owned(), Device::label);
             let mut summary = format!(
                 "{}, {}{} to copy · {} already there",
                 files(plan.files),

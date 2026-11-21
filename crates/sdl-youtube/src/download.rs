@@ -20,30 +20,21 @@ const FILE_TEMPLATE: &str = "audio.%(ext)s";
 /// Which audio to ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Audio {
-    /// A match's audio as Opus. Decision waiting for the owner (Opus stream missing): when the
-    /// source has no Opus stream, `--audio-format opus` makes `yt-dlp` re-encode it. This is the
-    /// one place the command is chosen.
+    /// A match's audio: the Opus stream when there is one, else the best stream. Nothing is
+    /// re-encoded (F3). This is the one place the command is chosen.
     Opus,
-    /// A link's own audio, kept as served: no `--audio-format` (its default `best` keeps the
-    /// source codec).
+    /// A link's own audio, kept as served: the best stream, whatever its codec.
     AsServed,
 }
 
 /// The `yt-dlp` arguments for one download (pure). `-f bestaudio[acodec=opus]/bestaudio -x
-/// --audio-format opus --no-playlist --no-progress -o <dir>/audio.%(ext)s -- <url>` for
-/// [`Audio::Opus`]; `-f bestaudio -x --no-playlist --no-progress -o <dir>/audio.%(ext)s -- <url>`
+/// --no-playlist --no-progress -o <dir>/audio.%(ext)s -- <url>` for [`Audio::Opus`]; `-f bestaudio -x --no-playlist --no-progress -o <dir>/audio.%(ext)s -- <url>`
 /// for [`Audio::AsServed`].
 fn args(audio: Audio, dir: &Path, url: &str) -> Vec<OsString> {
     let mut args: Vec<OsString> = match audio {
-        Audio::Opus => [
-            "-f",
-            "bestaudio[acodec=opus]/bestaudio",
-            "-x",
-            "--audio-format",
-            "opus",
-        ]
-        .map(OsString::from)
-        .to_vec(),
+        Audio::Opus => ["-f", "bestaudio[acodec=opus]/bestaudio", "-x"]
+            .map(OsString::from)
+            .to_vec(),
         Audio::AsServed => ["-f", "bestaudio", "-x"].map(OsString::from).to_vec(),
     };
     args.extend(["--no-playlist", "--no-progress", "-o"].map(OsString::from));
@@ -78,13 +69,13 @@ impl Downloaded {
     }
 }
 
-/// Download `url` (a candidate's URL, or a `music.youtube.com` item URL) as Opus into a new temp
-/// directory under `music_root`'s `.sdl-tmp`.
+/// Download `url` (a candidate's URL, or a `music.youtube.com` item URL), preferring its Opus
+/// stream, into a new temp directory under `music_root`'s `.sdl-tmp`.
 ///
-/// Arguments: `-f bestaudio[acodec=opus]/bestaudio -x --audio-format opus --no-playlist
-/// --no-progress -o <temp dir>/audio.%(ext)s -- <url>`. An Opus stream is copied, not re-encoded
-/// (`yt-dlp` runs `-acodec copy`); a source with no Opus stream is re-encoded by `yt-dlp`.
-/// The result is the single audio file left in the directory.
+/// Arguments: `-f bestaudio[acodec=opus]/bestaudio -x --no-playlist --no-progress
+/// -o <temp dir>/audio.%(ext)s -- <url>`. Nothing is re-encoded: an Opus stream stays `.opus`; a
+/// source with no Opus stream keeps the best stream as served (usually `.m4a`), so the caller
+/// reads [`Downloaded::format`]. The result is the single audio file left in the directory.
 ///
 /// # Errors
 /// `ErrorKind::NotFound` on spawn is [`YoutubeError::YtDlpNotFound`] ("yt-dlp was not found on
@@ -149,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn the_opus_arguments_are_the_specified_command() {
+    fn the_opus_arguments_are_the_specified_command_and_name_no_audio_format() {
         let args = args(
             Audio::Opus,
             Path::new("/m/.sdl-tmp/dl-x"),
@@ -161,8 +152,6 @@ mod tests {
                 "-f",
                 "bestaudio[acodec=opus]/bestaudio",
                 "-x",
-                "--audio-format",
-                "opus",
                 "--no-playlist",
                 "--no-progress",
                 "-o",
@@ -211,6 +200,36 @@ mod tests {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join("audio.opus"), b"x")?;
         assert_eq!(finish(dir)?.format(), Some(Format::Opus));
+        Ok(())
+    }
+
+    #[test]
+    fn a_download_with_no_opus_stream_lands_with_its_own_extension() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let song = sdl_core::WantedSong {
+            source: sdl_core::SongSource::Spotify {
+                track_id: "t".into(),
+            },
+            title: "Title".into(),
+            artists: vec!["Artist".into()],
+            album: Some("Album".into()),
+            album_artist: None,
+            track_number: None,
+            disc_number: None,
+            date: None,
+            isrc: None,
+            duration: None,
+            cover_url: None,
+        };
+        let place = sdl_core::Place::of(root.path(), &song);
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("audio.m4a"), b"x")?;
+        let format = finish(dir)?.format().ok_or("m4a is held as it is")?;
+        let landed = place.path(format);
+        assert_eq!(landed.extension().and_then(|e| e.to_str()), Some("m4a"));
+        std::fs::create_dir_all(place.dir())?;
+        std::fs::write(&landed, b"x")?;
+        assert_eq!(place.present()?, Some(Format::M4a));
         Ok(())
     }
 

@@ -74,7 +74,7 @@ async fn settle(
     // A skip leaves the list only when the song really is in the library: a second held song with
     // the same place is skipped in this run, but stays held if the first one failed.
     let landed = match outcome {
-        Outcome::Added | Outcome::AddedWithoutGenre => true,
+        Outcome::Added | Outcome::AddedMissing { .. } => true,
         Outcome::Skipped => Place::of(&context.config.music_root, &held.song)
             .present()?
             .is_some(),

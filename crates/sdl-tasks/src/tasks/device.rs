@@ -138,6 +138,7 @@ mod tests {
             mount_point: format!("/Volumes/{name}").into(),
             volume_uuid: uuid.map(str::to_owned),
             free_bytes: 0,
+            disk_image: false,
         }
     }
 

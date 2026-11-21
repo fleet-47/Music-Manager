@@ -579,6 +579,7 @@ mod tests {
             mount_point: "/Volumes/SNOWSKY".into(),
             volume_uuid: Some("AAAA".into()),
             free_bytes: 0,
+            disk_image: false,
         };
         let _ = task(
             &mut app,

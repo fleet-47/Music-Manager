@@ -181,6 +181,7 @@ fn device(name: &str, uuid: &str, free: u64) -> Device {
         mount_point: PathBuf::from(format!("/Volumes/{name}")),
         volume_uuid: Some(uuid.into()),
         free_bytes: free,
+        disk_image: false,
     }
 }
 
@@ -705,6 +706,31 @@ fn sync_device_follows_the_devices_and_the_remembered_choices() -> TestResult {
     assert_eq!(rig.enter(), vec![send(TaskId::SyncDevice, Command::Go)]);
     assert!(is_closed(&rig.event(&EventKind::Started)));
     Ok(())
+}
+
+#[test]
+fn a_mounted_disk_image_is_listed_with_its_label() {
+    let (mut rig, _) = Rig::open(TaskId::SyncDevice, device_settings(None));
+    let image = Device {
+        disk_image: true,
+        ..device("SDLTEST", "U3", 40_000_000)
+    };
+    let _ = rig.event(&EventKind::Devices(vec![device("SNOWSKY", "U1", 9), image]));
+    let area = Rect::new(0, 0, 100, 60);
+    let mut buf = Buffer::empty(area);
+    let _ = render(rig.dialog.form(), area, &mut buf, &FormStyle::default());
+    let drawn = area
+        .rows()
+        .map(|row| {
+            row.columns()
+                .filter_map(|p| buf.cell((p.x, p.y)))
+                .map(|cell| cell.symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(drawn.contains("SDLTEST (disk image)"), "{drawn}");
+    assert!(!drawn.contains("SNOWSKY (disk image)"));
 }
 
 #[test]

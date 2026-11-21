@@ -33,6 +33,12 @@ SD card. Build spec: `.fleet/docs/SPEC-tui.md`.
 - Eject clean-up list (confirmed 2026-11-20): `.Spotlight-V100`, `.Trashes` (this empties the device's Trash; the eject question says so), `.fseventsd` and `.TemporaryItems` at the device root, every `.DS_Store`, and the narrow `._` rule.
 - The old-flow folders were moved out of the library to `~/Music-old` (2026-11-20), so the library starts clean.
 - yt-dlp's JavaScript engine stays `deno` (ruled 2026-11-20). Reason: yt-dlp runs YouTube's script in it with no file system or network access; QuickJS is 1.4 MB against 82 MB but has no such restriction, and Bun is larger and deprecated by yt-dlp (yt-dlp wiki, EJS page).
+- Fidelity before uniformity (ruled 2026-11-21): nothing is re-encoded on the way into the library. A song with no Opus stream on YouTube Music is kept as served (usually M4A).
+- A cover that cannot be downloaded does not fail the song (ruled 2026-11-21); the last-run line counts songs without a cover.
+- Mounted disk images are listed as devices, labelled "(disk image)" (ruled 2026-11-21).
+- A Spotify rate limit is recorded as "stopped" with the wait shown (ruled 2026-11-21).
+- ffmpeg stays an outside tool and is not compiled in (confirmed 2026-11-21).
+- How `sdl` is installed and started (a global command, tools in mise's global config) is decided after the full live run, which is the final gate before a release build (ruled 2026-11-21).
 - Build standard is `fleet-47/Gen.v2`: fenix stable, the global `~/.cargo/config.toml`, and the lint flags in the spec. The repo carries no `.cargo/`, `clippy.toml`, `[lints]` table, rustflags or profile overrides.
 - mise config lives in `.mise/config.toml` and is committed. mise supplies yt-dlp, ffmpeg and deno and starts the TUI.
 

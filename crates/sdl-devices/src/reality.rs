@@ -211,6 +211,7 @@ async fn conversion_with_the_real_ffmpeg() -> TestResult {
         mount_point: dev.path().to_path_buf(),
         volume_uuid: None,
         free_bytes: u64::MAX,
+        disk_image: false,
     };
     let choice = DeviceChoice {
         what: Selection {

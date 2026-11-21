@@ -396,6 +396,7 @@ mod tests {
             mount_point: mount.to_path_buf(),
             volume_uuid: None,
             free_bytes: u64::MAX,
+            disk_image: false,
         }
     }
 

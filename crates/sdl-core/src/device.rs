@@ -18,9 +18,22 @@ pub struct Device {
     pub volume_uuid: Option<String>,
     /// Free space in bytes when it was listed (`APFSContainerFree` on APFS, else `FreeSpace`).
     pub free_bytes: u64,
+    /// A mounted disk image rather than a physical drive (`BusProtocol` is `Disk Image`).
+    pub disk_image: bool,
 }
 
 impl Device {
+    /// The name as shown to the owner: the volume name, followed by " (disk image)" for a mounted
+    /// disk image (F10). The one place this wording lives.
+    #[must_use]
+    pub fn label(&self) -> String {
+        if self.disk_image {
+            format!("{} (disk image)", self.name)
+        } else {
+            self.name.clone()
+        }
+    }
+
     /// How the device is remembered: its volume UUID, falling back to its name.
     #[must_use]
     pub fn id(&self) -> &str {
@@ -209,6 +222,7 @@ mod tests {
             mount_point: PathBuf::from("/Volumes/SNOWSKY"),
             volume_uuid: uuid.map(str::to_owned),
             free_bytes: 1,
+            disk_image: false,
         }
     }
 
@@ -216,6 +230,14 @@ mod tests {
     fn id_is_the_uuid_else_the_name() {
         assert_eq!(device(Some("U-1")).id(), "U-1");
         assert_eq!(device(None).id(), "SNOWSKY");
+    }
+
+    #[test]
+    fn a_disk_image_is_labelled_after_its_name() {
+        let mut image = device(None);
+        assert_eq!(image.label(), "SNOWSKY");
+        image.disk_image = true;
+        assert_eq!(image.label(), "SNOWSKY (disk image)");
     }
 
     #[test]

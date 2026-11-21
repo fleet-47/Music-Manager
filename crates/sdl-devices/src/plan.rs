@@ -329,6 +329,7 @@ mod tests {
             mount_point: mount.to_path_buf(),
             volume_uuid: None,
             free_bytes,
+            disk_image: false,
         }
     }
 

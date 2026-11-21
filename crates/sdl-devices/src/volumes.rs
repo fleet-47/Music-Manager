@@ -26,6 +26,15 @@ struct VolumeInfo {
     #[serde(rename = "APFSContainerFree")]
     apfs_container_free: Option<u64>,
     free_space: Option<u64>,
+    /// `Disk Image` for a mounted disk image; a physical drive names its bus (`USB`, `Apple
+    /// Fabric`, ...).
+    bus_protocol: Option<String>,
+}
+
+impl VolumeInfo {
+    fn is_disk_image(&self) -> bool {
+        self.bus_protocol.as_deref() == Some("Disk Image")
+    }
 }
 
 /// Every entry of `/Volumes` asked with `diskutil info -plist <mount point>`
@@ -39,7 +48,8 @@ struct VolumeInfo {
 /// and `Recovery` volumes; it is the "external or removable" test), `APFSContainerFree` (APFS
 /// only) and `FreeSpace` (0 on APFS, the real free bytes on FAT32). Free space is
 /// `APFSContainerFree` when present, else `FreeSpace`. A mounted disk image counts as removable,
-/// so it is listed too.
+/// so it is listed too, and `BusProtocol` is `Disk Image` for it (`Apple Fabric` for the internal
+/// disk), which is what [`Device::disk_image`] is read from.
 ///
 /// Entries are sorted by name. An entry `diskutil` does not know as a volume, and any name that
 /// starts with a dot, is left out. Only reads; nothing is mounted or changed.
@@ -96,6 +106,7 @@ async fn device_at(mount_point: &Path) -> Result<Option<Device>, DevicesError> {
     if !info.removable_media_or_external_device {
         return Ok(None);
     }
+    let disk_image = info.is_disk_image();
     let name = info
         .volume_name
         .filter(|name| !name.is_empty())
@@ -112,6 +123,7 @@ async fn device_at(mount_point: &Path) -> Result<Option<Device>, DevicesError> {
             .unwrap_or_else(|| mount_point.to_path_buf()),
         volume_uuid: info.volume_uuid.filter(|uuid| !uuid.is_empty()),
         free_bytes: info.apfs_container_free.or(info.free_space).unwrap_or(0),
+        disk_image,
     }))
 }
 
@@ -209,6 +221,65 @@ mod tests {
         assert!(info.apfs_container_free.is_some_and(|free| free > 0));
         assert_eq!(info.free_space.unwrap_or(0), 0);
         assert!(device_at(Path::new("/")).await?.is_none());
+        Ok(())
+    }
+
+    /// Trimmed from real `diskutil info -plist` output (macOS 27.2) for a 40 MB FAT32 image
+    /// attached with `hdiutil`.
+    const DISK_IMAGE_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>BusProtocol</key>
+	<string>Disk Image</string>
+	<key>FilesystemName</key>
+	<string>MS-DOS FAT32</string>
+	<key>FreeSpace</key>
+	<integer>41280000</integer>
+	<key>Internal</key>
+	<false/>
+	<key>MediaName</key>
+	<string>Disk Image</string>
+	<key>MountPoint</key>
+	<string>/Volumes/SDLTEST</string>
+	<key>RemovableMediaOrExternalDevice</key>
+	<true/>
+	<key>VirtualOrPhysical</key>
+	<string>Virtual</string>
+	<key>VolumeName</key>
+	<string>SDLTEST</string>
+	<key>VolumeUUID</key>
+	<string>D1206E50-7C38-3AAE-B4DB-0B5104478293</string>
+</dict>
+</plist>"#;
+
+    /// Trimmed from real `diskutil info -plist /` output (macOS 27.2).
+    const INTERNAL_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>APFSContainerFree</key>
+	<integer>866613555200</integer>
+	<key>BusProtocol</key>
+	<string>Apple Fabric</string>
+	<key>FreeSpace</key>
+	<integer>0</integer>
+	<key>Internal</key>
+	<true/>
+	<key>RemovableMediaOrExternalDevice</key>
+	<false/>
+</dict>
+</plist>"#;
+
+    #[test]
+    fn the_bus_protocol_tells_a_disk_image_from_a_drive() -> TestResult {
+        let image: VolumeInfo = plist::from_bytes(DISK_IMAGE_PLIST.as_bytes())?;
+        assert!(image.is_disk_image());
+        assert!(image.removable_media_or_external_device);
+        assert_eq!(image.volume_name.as_deref(), Some("SDLTEST"));
+        assert_eq!(image.free_space, Some(41_280_000));
+        let internal: VolumeInfo = plist::from_bytes(INTERNAL_PLIST.as_bytes())?;
+        assert!(!internal.is_disk_image());
         Ok(())
     }
 

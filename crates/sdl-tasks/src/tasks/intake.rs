@@ -15,7 +15,7 @@ use sdl_core::{
 use sdl_library::LibraryError;
 use sdl_library::converter::convert_file;
 use sdl_library::playlists::correct_line;
-use sdl_library::tags::{Enrichment, ReleaseCache, lookup, write_tags};
+use sdl_library::tags::{Cover, Enrichment, ReleaseCache, lookup, write_tags};
 use sdl_youtube::{Matcher, YoutubeError, download_opus, download_own_audio};
 use tokio::sync::OnceCell;
 
@@ -170,7 +170,7 @@ impl<'a> Intake<'a> {
         } else {
             Enrichment::default()
         };
-        write_tags(&file, song, &enrichment).await?;
+        let cover = write_tags(&file, song, &enrichment).await?;
         // Another task may have landed the song while this one worked, in any format.
         if place.present()?.is_some() {
             return Ok(Outcome::Skipped);
@@ -180,7 +180,7 @@ impl<'a> Intake<'a> {
             correct_line(root, from, &place, format)?;
         }
         Ok(match landed {
-            Outcome::Added if enrichment.genre.is_none() => Outcome::AddedWithoutGenre,
+            Outcome::Added => added(enrichment.genre.is_none(), cover == Cover::Missing),
             other => other,
         })
     }
@@ -188,6 +188,18 @@ impl<'a> Intake<'a> {
     async fn find(&self, song: &WantedSong) -> Result<MatchOutcome, TaskError> {
         let matcher = self.matcher.get_or_try_init(Matcher::new).await?;
         Ok(matcher.find(song).await)
+    }
+}
+
+/// A song that landed: plain [`Outcome::Added`] unless it has no genre or no cover.
+fn added(without_genre: bool, without_cover: bool) -> Outcome {
+    if without_genre || without_cover {
+        Outcome::AddedMissing {
+            genre: without_genre,
+            cover: without_cover,
+        }
+    } else {
+        Outcome::Added
     }
 }
 

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use sdl_core::{Direction, Format, RunOutcome, State, TaskId};
+use sdl_core::{Device, Direction, Format, RunOutcome, State, TaskId};
 use sdl_tasks::estimate_remaining;
 
 use super::{App, FunctionView};
@@ -67,7 +67,12 @@ pub fn main_rows(app: &App) -> Vec<RowView> {
             RowView {
                 task,
                 name: task.name(),
-                selection: selection_text(task, &app.settings.state, app.settings.review.len()),
+                selection: selection_text(
+                    task,
+                    &app.settings.state,
+                    &app.devices,
+                    app.settings.review.len(),
+                ),
                 last,
                 held: (task == TaskId::Review).then(|| app.settings.review.len()),
                 running: app.view(task).is_some_and(FunctionView::is_running),
@@ -78,7 +83,7 @@ pub fn main_rows(app: &App) -> Vec<RowView> {
 
 /// A function's remembered selection, in words.
 #[must_use]
-pub fn selection_text(task: TaskId, state: &State, held: usize) -> String {
+pub fn selection_text(task: TaskId, state: &State, devices: &[Device], held: usize) -> String {
     match task {
         TaskId::SyncSpotify => match state.ticked_lists.len() {
             0 => "no lists chosen yet".to_owned(),
@@ -94,17 +99,24 @@ pub fn selection_text(task: TaskId, state: &State, held: usize) -> String {
         TaskId::SyncDevice => state
             .last_device
             .as_ref()
-            .and_then(|id| state.devices.get(id))
+            .and_then(|id| state.devices.get(id).map(|choice| (id, choice)))
             .map_or_else(
                 || "no device synced yet".to_owned(),
                 // The format only applies To device.
-                |choice| match choice.direction {
-                    Direction::ToDevice => format!(
-                        "{} · {}",
-                        choice.direction.label(),
-                        Format::device_label(choice.format)
-                    ),
-                    Direction::FromDevice => choice.direction.label().to_owned(),
+                |(id, choice)| {
+                    let how = match choice.direction {
+                        Direction::ToDevice => format!(
+                            "{} · {}",
+                            choice.direction.label(),
+                            Format::device_label(choice.format)
+                        ),
+                        Direction::FromDevice => choice.direction.label().to_owned(),
+                    };
+                    // The device is named once the list has seen it.
+                    match devices.iter().find(|device| device.id() == id) {
+                        Some(device) => format!("{} · {how}", device.label()),
+                        None => how,
+                    }
                 },
             ),
         TaskId::Convert => format!(
@@ -256,8 +268,19 @@ mod tests {
             },
         );
         assert_eq!(
-            selection_text(TaskId::SyncDevice, &state, 0),
+            selection_text(TaskId::SyncDevice, &state, &[], 0),
             "To device · MP3"
+        );
+        let image = Device {
+            name: "SDLTEST".into(),
+            mount_point: "/Volumes/SDLTEST".into(),
+            volume_uuid: Some("uuid".into()),
+            free_bytes: 1,
+            disk_image: true,
+        };
+        assert_eq!(
+            selection_text(TaskId::SyncDevice, &state, &[image], 0),
+            "SDLTEST (disk image) · To device · MP3"
         );
     }
 }

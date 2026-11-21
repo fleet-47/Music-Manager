@@ -177,28 +177,45 @@ fn matching_release<'a>(recording: &'a Recording, song: &WantedSong) -> Option<(
 /// How long a cover download may take, from connecting to the last byte (F6).
 const COVER_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Whether a written file carries the song's cover (F6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cover {
+    /// The cover is stored as the front cover.
+    Stored,
+    /// The song has no cover: it has no cover URL, the download failed or timed out, or the image
+    /// is one the tag library cannot store. Every other tag was still written.
+    Missing,
+}
+
+/// The cover image at `url`, giving up after 20 seconds.
+async fn fetch_cover(url: &str) -> Result<Picture, Box<dyn std::error::Error + Send + Sync>> {
+    let bytes = reqwest::Client::builder()
+        .timeout(COVER_TIMEOUT)
+        .build()?
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    let mut picture = Picture::from_reader(&mut Cursor::new(bytes))?;
+    picture.set_pic_type(PictureType::CoverFront);
+    Ok(picture)
+}
+
 /// Write all tags and the cover (downloaded from `song.cover_url`, giving up after 20 seconds) to
-/// `file` in one write.
+/// `file` in one write. A cover that cannot be downloaded or stored leaves the song without one
+/// ([`Cover::Missing`]); the other tags are still written.
 ///
 /// # Errors
-/// The file cannot be read or written, or the cover download failed or took too long.
+/// The file cannot be read or written.
 pub async fn write_tags(
     file: &Path,
     song: &WantedSong,
     enrichment: &Enrichment,
-) -> Result<(), LibraryError> {
-    let cover = match &song.cover_url {
-        Some(url) => Some(
-            reqwest::Client::builder()
-                .timeout(COVER_TIMEOUT)
-                .build()?
-                .get(url)
-                .send()
-                .await?
-                .error_for_status()?
-                .bytes()
-                .await?,
-        ),
+) -> Result<Cover, LibraryError> {
+    let picture = match &song.cover_url {
+        Some(url) => fetch_cover(url).await.ok(),
         None => None,
     };
     let tag_err = |message: String| LibraryError::Tag {
@@ -214,15 +231,16 @@ pub async fn write_tags(
         .primary_tag_mut()
         .ok_or_else(|| tag_err("no writable tag".to_owned()))?;
     fill_tag(tag, song, enrichment);
-    if let Some(bytes) = cover {
-        let mut picture =
-            Picture::from_reader(&mut Cursor::new(bytes)).map_err(|e| tag_err(e.to_string()))?;
-        picture.set_pic_type(PictureType::CoverFront);
+    let cover = if let Some(picture) = picture {
         tag.remove_picture_type(PictureType::CoverFront);
         tag.push_picture(picture);
-    }
+        Cover::Stored
+    } else {
+        Cover::Missing
+    };
     tag.save_to_path(file, WriteOptions::default())
-        .map_err(|e| tag_err(e.to_string()))
+        .map_err(|e| tag_err(e.to_string()))?;
+    Ok(cover)
 }
 
 /// The one process-wide client: the rate limiter lives inside it.
@@ -414,7 +432,7 @@ mod tests {
             track_total: Some(5),
             disc_total: Some(1),
         };
-        write_tags(&file, &song, &enrichment).await?;
+        assert_eq!(write_tags(&file, &song, &enrichment).await?, Cover::Stored);
         let tag = read_tag(&file)?;
         assert_eq!(tag.title().as_deref(), Some("Blue in Green"));
         assert_eq!(
@@ -448,7 +466,7 @@ mod tests {
         // No ISRC: nothing is asked of MusicBrainz, so nothing can fail and nothing is found.
         let found = lookup(&song, &ReleaseCache::default()).await?;
         assert_eq!(found, Enrichment::default());
-        write_tags(&file, &song, &found).await?;
+        assert_eq!(write_tags(&file, &song, &found).await?, Cover::Missing);
         let tag = read_tag(&file)?;
         assert_eq!(tag.title().as_deref(), Some("Blue in Green"));
         assert_eq!(tag.album().as_deref(), Some("Kind of Blue"));
@@ -460,16 +478,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_cover_download_fails_the_song_before_anything_is_written() -> TestResult {
-        // The ruling waiting on the owner (core contract amendment 4b), kept in this one place.
+    async fn a_failed_cover_download_leaves_the_song_without_a_cover_but_tagged() -> TestResult {
         let dir = tempfile::tempdir()?;
         let file = dir.path().join("t.opus");
         make_audio(&file, 1)?;
         let mut song = link();
         song.cover_url = Some("http://127.0.0.1:1/none.png".into());
-        let result = write_tags(&file, &song, &Enrichment::default()).await;
-        assert!(matches!(result, Err(LibraryError::Cover(_))), "{result:?}");
-        assert_eq!(read_tag(&file)?.title(), None);
+        let cover = write_tags(&file, &song, &Enrichment::default()).await?;
+        assert_eq!(cover, Cover::Missing);
+        let tag = read_tag(&file)?;
+        assert_eq!(tag.title().as_deref(), Some("Blue in Green"));
+        assert_eq!(tag.album().as_deref(), Some("Kind of Blue"));
+        assert!(tag.get_picture_type(PictureType::CoverFront).is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_image_the_tag_library_cannot_store_leaves_the_song_without_a_cover() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("t.opus");
+        make_audio(&file, 1)?;
+        let mut song = link();
+        song.cover_url = Some(serve_once(b"not an image".to_vec())?);
+        let cover = write_tags(&file, &song, &Enrichment::default()).await?;
+        assert_eq!(cover, Cover::Missing);
+        assert_eq!(read_tag(&file)?.title().as_deref(), Some("Blue in Green"));
         Ok(())
     }
 

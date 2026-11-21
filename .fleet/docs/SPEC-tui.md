@@ -107,10 +107,11 @@ report it; do not substitute another crate or hand-write the capability.
   directly. Every other link item, plain YouTube included, goes through matching.
 - **Download** (`sdl-youtube`): the `yt-dlp` binary through `tokio::process::Command`
   (`.stdin(Stdio::null())`, `.kill_on_drop(true)`, output piped):
-  `-f bestaudio[acodec=opus]/bestaudio -x --audio-format opus --no-playlist --no-progress
-  -o <temp dir>/audio.%(ext)s -- <url>`; a match's URL is
-  `https://music.youtube.com/watch?v=<video_id>`. An Opus stream is copied, not re-encoded (confirm
-  in yt-dlp's docs). Each download has its own temp directory (`tempfile`) inside
+  `-f bestaudio[acodec=opus]/bestaudio -x --no-playlist --no-progress
+  -o <temp dir>/audio.%(ext)s -- <url>`, with no `--audio-format`, so nothing is ever re-encoded; a
+  match's URL is `https://music.youtube.com/watch?v=<video_id>`. An Opus stream is kept as it is.
+  When a song has no Opus stream, the best stream is kept as served (usually M4A): fidelity comes
+  before a uniform file type. Each download has its own temp directory (`tempfile`) inside
   `<music_root>/.sdl-tmp/`; the result is the single audio file left in it, and its extension is
   its real type. The directory is removed on success, failure or cancel; `.sdl-tmp` is removed when
   no task runs.
@@ -176,8 +177,10 @@ report it; do not substitute another crate or hand-write the capability.
 - `lofty` 0.25, one write to the temp file through its format-independent tag interface: title,
   artists, album, album artist, track number and total, disc number and total, date, ISRC, genre,
   and the cover (fetched with `reqwest`, giving up after 20 seconds) as the front cover.
-- A failed or empty lookup leaves those tags empty and the song still completes. The last-run line
-  counts songs left without a genre. A failed tag write fails the song.
+- A failed or empty lookup leaves those tags empty and the song still completes. A cover that
+  cannot be downloaded leaves the song without a cover and the song still completes. The last-run
+  line counts songs left without a genre and songs left without a cover. A failed tag write fails
+  the song.
 - **Not:** no Last.fm, no Spotify genre, no lyrics, no ReplayGain, no retagging of files already in
   the library.
 
@@ -250,7 +253,9 @@ report it; do not substitute another crate or hand-write the capability.
   already there · Y GB free on <device>`; when there is not enough room it says so in plain words
   and Start is unavailable → Start → when done, "Clean up and eject <device>?".
 - Devices: every entry of `/Volumes` asked with `diskutil info -plist <mount point>`
-  (`tokio::process::Command`), parsed with `plist` and `serde`; kept when external or removable.
+  (`tokio::process::Command`), parsed with `plist` and `serde`; kept when external or removable. A
+  mounted disk image is listed with "(disk image)" after its name (confirm in real `diskutil`
+  output which key tells an image from a physical drive).
   Free space is `APFSContainerFree` when the volume has it, otherwise `FreeSpace` (on APFS
   `FreeSpace` reads 0; confirm both keys in real output). A
   device is identified by its volume UUID, falling back to its name. The list updates while the

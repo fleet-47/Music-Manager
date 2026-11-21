@@ -19,9 +19,14 @@ use sdl_core::words::{need_attention, thousands, x_of_y};
 pub enum Outcome {
     /// Downloaded and placed in the library (or converted, or copied).
     Added,
-    /// Downloaded and placed in the library, but `MusicBrainz` gave no genre (F6): counted as
-    /// added, and in the last-run line's "without a genre".
-    AddedWithoutGenre,
+    /// Downloaded and placed in the library, but left without a genre and/or a cover (F6):
+    /// counted as added, and in the last-run line's "without a genre" and "without a cover".
+    AddedMissing {
+        /// `MusicBrainz` gave no genre.
+        genre: bool,
+        /// The cover could not be downloaded or stored.
+        cover: bool,
+    },
     /// Already in the library.
     Skipped,
     /// Held for review: no confident match.
@@ -30,12 +35,13 @@ pub enum Outcome {
     Failed(Attention),
 }
 
-/// The counts of one run: what the UI keeps ([`Counts`]) and the songs added without a genre,
-/// which only the last-run line uses (F6).
+/// The counts of one run: what the UI keeps ([`Counts`]) and the songs added without a genre or
+/// without a cover, which only the last-run line uses (F6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tally {
     counts: Counts,
     without_genre: usize,
+    without_cover: usize,
 }
 
 impl Tally {
@@ -48,6 +54,7 @@ impl Tally {
                 ..Counts::default()
             },
             without_genre: 0,
+            without_cover: 0,
         }
     }
 
@@ -65,9 +72,14 @@ impl Tally {
                 self.counts.added = self.counts.added.saturating_add(1);
                 None
             }
-            Outcome::AddedWithoutGenre => {
+            Outcome::AddedMissing { genre, cover } => {
                 self.counts.added = self.counts.added.saturating_add(1);
-                self.without_genre = self.without_genre.saturating_add(1);
+                if genre {
+                    self.without_genre = self.without_genre.saturating_add(1);
+                }
+                if cover {
+                    self.without_cover = self.without_cover.saturating_add(1);
+                }
                 None
             }
             Outcome::Skipped => {
@@ -179,8 +191,8 @@ pub fn written_line(counts: &Counts, verb: &str) -> String {
     line
 }
 
-/// The last-run line of a download run: `412 added, 12 already there, 30 without a genre, 3 need
-/// attention`. A part that is zero is left out, except the number added.
+/// The last-run line of a download run: `412 added, 12 already there, 30 without a genre, 2
+/// without a cover, 3 need attention`. A part that is zero is left out, except the number added.
 #[must_use]
 pub fn summary_line(tally: &Tally) -> String {
     let counts = tally.counts();
@@ -190,6 +202,9 @@ pub fn summary_line(tally: &Tally) -> String {
     }
     if tally.without_genre > 0 {
         let _ = write!(line, ", {} without a genre", thousands(tally.without_genre));
+    }
+    if tally.without_cover > 0 {
+        let _ = write!(line, ", {} without a cover", thousands(tally.without_cover));
     }
     push_attention(&mut line, &counts);
     line
@@ -220,8 +235,13 @@ mod tests {
         assert_eq!(tally.record(Outcome::Skipped), None);
         assert_eq!(tally.record(Outcome::Held(item("u"))), Some(item("u")));
         assert_eq!(tally.record(Outcome::Failed(item("f"))), Some(item("f")));
-        assert_eq!(tally.record(Outcome::AddedWithoutGenre), None);
+        let missing = Outcome::AddedMissing {
+            genre: true,
+            cover: false,
+        };
+        assert_eq!(tally.record(missing), None);
         assert_eq!(tally.without_genre, 1);
+        assert_eq!(tally.without_cover, 0);
         assert_eq!(
             tally.counts(),
             Counts {
@@ -269,9 +289,31 @@ mod tests {
     fn songs_left_out_before_the_run_count_as_skipped_in_its_line() {
         let mut tally = Tally::new(2);
         tally.record(Outcome::Added);
-        tally.record(Outcome::AddedWithoutGenre);
+        tally.record(Outcome::AddedMissing {
+            genre: true,
+            cover: false,
+        });
         let line = summary_line(&with_already(tally, 10));
         assert_eq!(line, "2 added, 10 already there, 1 without a genre");
+    }
+
+    #[test]
+    fn songs_without_a_cover_are_counted_in_the_line_only_when_there_are_some() {
+        let mut tally = Tally::new(3);
+        tally.record(Outcome::Added);
+        assert_eq!(summary_line(&tally), "1 added");
+        tally.record(Outcome::AddedMissing {
+            genre: false,
+            cover: true,
+        });
+        tally.record(Outcome::AddedMissing {
+            genre: true,
+            cover: true,
+        });
+        assert_eq!(
+            summary_line(&tally),
+            "3 added, 1 without a genre, 2 without a cover"
+        );
     }
 
     #[test]

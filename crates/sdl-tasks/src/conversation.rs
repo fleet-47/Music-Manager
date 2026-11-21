@@ -343,6 +343,7 @@ mod tests {
             mount_point: "/Volumes/D".into(),
             volume_uuid: None,
             free_bytes: 0,
+            disk_image: false,
         }
     }
 

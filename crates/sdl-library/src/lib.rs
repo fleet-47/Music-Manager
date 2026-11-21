@@ -20,9 +20,6 @@ pub enum LibraryError {
     /// `MusicBrainz` request failed.
     #[error("MusicBrainz lookup failed: {0}")]
     MusicBrainz(String),
-    /// Cover download failed.
-    #[error("cover download failed: {0}")]
-    Cover(#[from] reqwest::Error),
     /// Tag read or write failed.
     #[error("tag error on {path}: {message}")]
     Tag {
