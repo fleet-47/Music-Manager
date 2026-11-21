@@ -270,7 +270,14 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.select_by(1),
             KeyCode::Left | KeyCode::Char('h') => self.select_across(false),
             KeyCode::Right | KeyCode::Char('l') => self.select_across(true),
-            KeyCode::Char('i') if !self.missing_tools.is_empty() && self.tools_note.is_none() => {
+            // Offered again after a failed install; not while one is still running.
+            KeyCode::Char('i')
+                if !self.missing_tools.is_empty()
+                    && !self
+                        .tools_note
+                        .as_deref()
+                        .is_some_and(|note| note.starts_with("Installing")) =>
+            {
                 self.tools_note = Some(format!(
                     "Installing {} with mise…",
                     self.missing_tools.join(", ")
