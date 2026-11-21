@@ -3974,6 +3974,7 @@ name = "sdl-youtube"
 version = "0.1.0"
 dependencies = [
  "innertube-rs",
+ "rustix",
  "sdl-core",
  "serde",
  "serde_json",
