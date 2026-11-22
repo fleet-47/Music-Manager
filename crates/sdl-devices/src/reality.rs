@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use sdl_core::run::CancellationToken;
 use sdl_core::{
-    Counts, DeviceChoice, EventKind, EventSender, Format, Quality, Selection, StopFlag, TaskId,
-    channel,
+    Counts, DeviceChoice, EventKind, EventSender, Format, Quality, Selection, TaskId, channel,
 };
 
 use crate::testing::{lib, mp3, put};
@@ -131,7 +131,7 @@ async fn sdl_devices_on_a_real_fat32_volume() -> TestResult {
     let forced = plan(&lib(library.path()), &roomy, &choice).await?;
     let (tx, mut rx) = channel();
     let events = EventSender::new(TaskId::SyncDevice, tx);
-    let error = run(&forced, &events, &StopFlag::new()).await.err();
+    let error = run(&forced, &events, &CancellationToken::new()).await.err();
     assert!(
         matches!(error, Some(DevicesError::Full { .. })),
         "{error:?}"
@@ -231,7 +231,7 @@ async fn conversion_with_the_real_ffmpeg() -> TestResult {
     );
     let (tx, _rx) = channel();
     let events = EventSender::new(TaskId::SyncDevice, tx);
-    let report = run(&planned, &events, &StopFlag::new()).await?;
+    let report = run(&planned, &events, &CancellationToken::new()).await?;
     assert_eq!((report.added, report.failed), (1, 0), "{report:?}");
     assert!(std::fs::metadata(dev.path().join("Music/Band/Rec/Song.m4a"))?.len() > 0);
     Ok(())

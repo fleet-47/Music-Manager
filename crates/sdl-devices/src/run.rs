@@ -1,19 +1,20 @@
 //! Running a device plan (F10), in both directions.
 //!
 //! Every file is copied to a `*.part` name beside its destination and then renamed into place;
-//! nothing is ever replaced. On a device (FAT32, where macOS refuses `persist_noclobber`) the place
-//! is checked free and the part renamed; in the library the part lands with `persist_noclobber`,
-//! which fails instead of replacing (F3).
+//! nothing is ever replaced (`sdl_core::landing`). The files are driven by
+//! `sdl_core::run::Run`.
 
 use std::io::ErrorKind;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 
-use futures::StreamExt;
+use sdl_core::landing::{self, Landed, Landing};
 use sdl_core::place::device_music_dir;
 use sdl_core::playlist::PLAYLIST_EXTENSION;
-use sdl_core::{Attention, Counts, Direction, EventKind, EventSender, StopFlag};
-use sdl_library::converter::{convert_file, parallelism};
+use sdl_core::run::{CancellationToken, Outcome, Run};
+use sdl_core::{Attention, Counts, Direction, EventKind, EventSender};
+use sdl_library::converter::{Converted, convert_file, parallelism};
 use sdl_library::{LibraryError, playlists};
 
 use crate::DevicesError;
@@ -30,107 +31,62 @@ use crate::plan::DevicePlan;
 /// `<device>/Music/<List name>.m3u8` with `sdl_library::playlists::write_for_destination`. From
 /// device: files are copied as they are to the place the plan gave each (its tags, else `Unsorted`).
 /// A destination that has appeared since the plan (in any format) is skipped, never replaced. Sends
-/// [`sdl_core::EventKind::Counts`] after each file and an `Attention` for a failed one. `stop` is
-/// checked before each file starts: the files in hand finish, then the run ends (without writing
-/// playlists) and the device stays mounted. A write that fails because the device is full or gone
-/// ends the run with [`DevicesError::Full`] or [`DevicesError::Gone`]; the files already complete
-/// stay (their list is [`DevicePlan::written`]). `ffmpeg`
-/// missing ends the run too. Never deletes a song on either side.
+/// the headline, then [`sdl_core::EventKind::Counts`] after each file and an `Attention` for a
+/// failed one. Once `stop` is cancelled no further file starts: the files in hand finish, then the
+/// run ends (without writing playlists) and the device stays mounted. A write that fails because
+/// the device is full or gone ends the run with [`DevicesError::Full`] or [`DevicesError::Gone`];
+/// the files already complete stay (their list is [`DevicePlan::written`]). `ffmpeg` missing ends
+/// the run too. Never deletes a song on either side.
 ///
 /// # Errors
 /// The errors above.
 pub async fn run(
     plan: &DevicePlan,
     events: &EventSender,
-    stop: &StopFlag,
+    stop: &CancellationToken,
 ) -> Result<Counts, DevicesError> {
     let to_device = plan.choice.direction == Direction::ToDevice;
-    let run = Run {
-        plan,
-        stop,
-        halt: StopFlag::new(),
-    };
-    let mut counts = Counts {
-        total: Some(plan.jobs.len()),
-        ..Counts::default()
-    };
-    events.send(EventKind::Headline(run.headline()));
-    events.send(EventKind::Counts(counts));
+    let job = Job { plan };
+    events.send(EventKind::Headline(job.headline()));
 
     // Copies go one at a time (one USB device); conversions as many as the Mac has cores.
-    let width = if to_device && plan.choice.format.is_some() {
-        parallelism().get()
+    let limit = if to_device && plan.choice.format.is_some() {
+        parallelism()
     } else {
-        1
+        NonZeroUsize::MIN
     };
     plan.written
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .clear();
-    let mut fatal = None;
     // A plain loop, not a closure over `&plan.jobs`: such a closure makes the future unprovable as
     // `Send` for every lifetime (rustc), and the task layer spawns it.
-    let mut files = Vec::with_capacity(plan.jobs.len());
+    let mut jobs = Vec::with_capacity(plan.jobs.len());
     for (src, dest) in &plan.jobs {
-        files.push(run.file(src, dest));
+        jobs.push(job.file(src, dest));
     }
-    let mut results = futures::stream::iter(files).buffer_unordered(width);
-    while let Some(result) = results.next().await {
-        match result {
-            Ok(Outcome::NotStarted) => continue,
-            Ok(Outcome::Written(dest)) => {
-                counts.added = counts.added.saturating_add(1);
-                plan.written
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(dest);
-            }
-            Ok(Outcome::Skipped) => counts.skipped = counts.skipped.saturating_add(1),
-            Ok(Outcome::Failed(attention)) => {
-                counts.failed = counts.failed.saturating_add(1);
-                events.send(EventKind::Attention(attention));
-            }
-            Err(error) => {
-                run.halt.request();
-                fatal.get_or_insert(error);
-                continue;
-            }
-        }
-        counts.done = counts.done.saturating_add(1);
-        events.send(EventKind::Counts(counts));
+    let tally = Run {
+        limit,
+        events,
+        stop,
+        settled: Vec::new(),
     }
-    drop(results);
-    if let Some(error) = fatal {
-        return Err(error);
-    }
-    if to_device && !stop.is_requested() {
+    .drive(jobs)
+    .await?;
+    let mut counts = tally.counts();
+    if to_device && !stop.is_cancelled() {
         events.send(EventKind::Headline("Writing playlists".to_owned()));
-        run.write_playlists(events, &mut counts)?;
+        job.write_playlists(events, &mut counts)?;
         events.send(EventKind::Counts(counts));
     }
     Ok(counts)
 }
 
-/// What became of one planned file.
-enum Outcome {
-    /// Not started because a stop was asked for or the run ended early.
-    NotStarted,
-    /// Complete at its destination.
-    Written(PathBuf),
-    /// Its place was taken before it could be written.
-    Skipped,
-    /// This file failed; the run goes on.
-    Failed(Attention),
-}
-
-struct Run<'a> {
+struct Job<'a> {
     plan: &'a DevicePlan,
-    stop: &'a StopFlag,
-    /// Set when the run must end early (full or gone device); never the caller's flag.
-    halt: StopFlag,
 }
 
-impl Run<'_> {
+impl Job<'_> {
     fn headline(&self) -> String {
         let name = &self.plan.device.name;
         match (self.plan.choice.direction, self.plan.choice.format) {
@@ -142,11 +98,17 @@ impl Run<'_> {
         }
     }
 
+    /// Note `paths` as written by this run.
+    fn record(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        self.plan
+            .written
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(paths);
+    }
+
     /// One file. `Err` ends the whole run.
     async fn file(&self, src: &Path, dest: &Path) -> Result<Outcome, DevicesError> {
-        if self.stop.is_requested() || self.halt.is_requested() {
-            return Ok(Outcome::NotStarted);
-        }
         match existing_in_any_format(dest) {
             Ok(None) => {}
             Ok(Some(_)) => return Ok(Outcome::Skipped),
@@ -154,7 +116,7 @@ impl Run<'_> {
             Err(other) => return Err(other),
         }
         let Some(folder) = dest.parent() else {
-            return Ok(Outcome::NotStarted);
+            return Ok(Outcome::Skipped);
         };
         let made = missing_folders(folder, &self.plan.device.mount_point);
         if let Err(source) = tokio::fs::create_dir_all(folder).await {
@@ -162,34 +124,19 @@ impl Run<'_> {
         }
         // Folders this run made are its own too: clean-up may remove the `._` file macOS leaves
         // beside each (F10).
-        self.plan
-            .written
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend(made);
+        self.record(made);
         let preset = self.plan.choice.preset();
         let to_device = self.plan.choice.direction == Direction::ToDevice;
         match preset {
             Some(preset) if to_device && !preset.format.holds(src) => {
-                match convert_file(src, dest, preset).await {
-                    Ok(()) => Ok(Outcome::Written(dest.to_path_buf())),
-                    Err(LibraryError::FfmpegNotFound) => {
-                        Err(DevicesError::Library(LibraryError::FfmpegNotFound))
-                    }
-                    Err(LibraryError::Io { source, .. }) => self.failed(src, dest, &source),
-                    Err(LibraryError::Ffmpeg { message, .. })
-                        if message.contains("No space left on device") =>
-                    {
-                        Err(self.full())
-                    }
-                    Err(other) => self.failed(src, dest, &std::io::Error::other(other.to_string())),
-                }
+                let converted = convert_file(src, dest, preset).await;
+                self.converted(src, dest, converted)
             }
             _ => {
                 let landing = if to_device {
-                    Landing::RenameIfFree
+                    Landing::Destination
                 } else {
-                    Landing::NoClobber
+                    Landing::Library
                 };
                 let (from, to) = (src.to_path_buf(), dest.to_path_buf());
                 let copied = tokio::task::spawn_blocking(move || copy_in(&from, &to, landing))
@@ -198,11 +145,36 @@ impl Run<'_> {
                         DevicesError::Library(LibraryError::Task(error.to_string()))
                     })?;
                 match copied {
-                    Ok(Landed::Written) => Ok(Outcome::Written(dest.to_path_buf())),
+                    Ok(Landed::Written) => {
+                        self.record([dest.to_path_buf()]);
+                        Ok(Outcome::Added)
+                    }
                     Ok(Landed::Existed) => Ok(Outcome::Skipped),
                     Err(source) => self.failed(src, dest, &source),
                 }
             }
+        }
+    }
+
+    /// What a converter's answer for `src` -> `dest` makes of the file.
+    fn converted(
+        &self,
+        src: &Path,
+        dest: &Path,
+        result: Result<Converted, LibraryError>,
+    ) -> Result<Outcome, DevicesError> {
+        match result {
+            Ok(Converted::Written) => {
+                self.record([dest.to_path_buf()]);
+                Ok(Outcome::Added)
+            }
+            Ok(Converted::Existed) => Ok(Outcome::Skipped),
+            Err(LibraryError::Full { .. }) => Err(self.full()),
+            Err(LibraryError::FfmpegNotFound) => {
+                Err(DevicesError::Library(LibraryError::FfmpegNotFound))
+            }
+            Err(LibraryError::Io { source, .. }) => self.failed(src, dest, &source),
+            Err(other) => self.failed(src, dest, &std::io::Error::other(other.to_string())),
         }
     }
 
@@ -283,11 +255,7 @@ impl Run<'_> {
                 Ok(_) => {
                     let file = music_dir.join(format!("{stem}.{PLAYLIST_EXTENSION}"));
                     if file.try_exists().unwrap_or(false) {
-                        self.plan
-                            .written
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .push(file);
+                        self.record([file]);
                     }
                 }
                 Err(LibraryError::Io { path, source }) => {
@@ -328,49 +296,12 @@ fn missing_folders(folder: &Path, root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// How a finished part is put in its final place.
-#[derive(Clone, Copy)]
-enum Landing {
-    /// Check the place is free, then rename (a device, where `persist_noclobber` fails on FAT32
-    /// with os error 45).
-    RenameIfFree,
-    /// `tempfile`'s `persist_noclobber`, which fails instead of replacing (the library, F3).
-    NoClobber,
-}
-
-enum Landed {
-    Written,
-    /// The place was taken first; nothing was replaced.
-    Existed,
-}
-
-/// Copy `src` to a new `<name><random>.part` file beside `dest` (`tempfile`: a fresh name, so nothing
-/// that is there is ever truncated; data only, no extended attributes), then put it in place.
-/// The part is removed on every way out: landed, place taken, or failed.
+/// Copy `src` to a new `.part` file beside `dest` (data only, no extended attributes), then put it
+/// in place. The part is removed on every way out: landed, place taken, or failed.
 fn copy_in(src: &Path, dest: &Path, landing: Landing) -> std::io::Result<Landed> {
-    let (Some(folder), Some(name)) = (dest.parent(), dest.file_name()) else {
-        return Err(std::io::Error::other("not a file path"));
-    };
-    let mut part = tempfile::Builder::new()
-        .prefix(name)
-        .suffix(".part")
-        .tempfile_in(folder)?;
+    let mut part = landing::part_beside(dest)?;
     std::io::copy(&mut std::fs::File::open(src)?, part.as_file_mut())?;
-    let part = part.into_temp_path();
-    match landing {
-        Landing::RenameIfFree => {
-            if dest.try_exists()? {
-                return Ok(Landed::Existed);
-            }
-            part.persist(dest).map_err(|failure| failure.error)?;
-            Ok(Landed::Written)
-        }
-        Landing::NoClobber => match part.persist_noclobber(dest) {
-            Ok(()) => Ok(Landed::Written),
-            Err(failure) if failure.error.kind() == ErrorKind::AlreadyExists => Ok(Landed::Existed),
-            Err(failure) => Err(failure.error),
-        },
-    }
+    landing::land(part.into_temp_path(), dest, landing)
 }
 
 #[cfg(test)]
@@ -434,7 +365,7 @@ mod tests {
         // Taken between the plan and the run, in another format: never replaced.
         touch(&dev.path().join("Music/A/Al/two.m4a"), b"theirs")?;
         let (events, mut rx) = sender();
-        let report = run(&plan, &events, &StopFlag::new()).await?;
+        let report = run(&plan, &events, &CancellationToken::new()).await?;
         let music = dev.path().join("Music");
         assert_eq!(std::fs::read(music.join("A/Al/one.opus"))?, b"one");
         assert_eq!(std::fs::read(music.join("A/Al/Mr. Three.opus"))?, b"three");
@@ -492,12 +423,12 @@ mod tests {
         }
         let plan = plan(&lib(root.path()), &device(dev.path()), &choice(&[])).await?;
         let (events, mut rx) = sender();
-        let stop = StopFlag::new();
+        let stop = CancellationToken::new();
         let asker = stop.clone();
         let watcher = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 if matches!(event.kind, EventKind::Counts(counts) if counts.done >= 1) {
-                    asker.request();
+                    asker.cancel();
                     break;
                 }
             }
@@ -529,7 +460,7 @@ mod tests {
         let gone = device(Path::new("/this-volume-is-not-mounted/DEV"));
         let plan = plan(&lib(root.path()), &gone, &choice(&[])).await?;
         let (events, _rx) = sender();
-        let error = run(&plan, &events, &StopFlag::new()).await.err();
+        let error = run(&plan, &events, &CancellationToken::new()).await.err();
         assert!(
             matches!(error, Some(DevicesError::Gone { ref device }) if device == "TESTDEV"),
             "{error:?}"
@@ -550,7 +481,7 @@ mod tests {
         let plan = plan(&lib(root.path()), &device(dev.path()), &choice(&[])).await?;
         std::fs::remove_file(root.path().join("A/Al/one.opus"))?;
         let (events, mut rx) = sender();
-        let report = run(&plan, &events, &StopFlag::new()).await?;
+        let report = run(&plan, &events, &CancellationToken::new()).await?;
         assert_eq!((report.added, report.failed), (1, 1));
         let mut reason = None;
         while let Ok(event) = rx.try_recv() {
@@ -574,7 +505,7 @@ mod tests {
         std::fs::write(&src, b"new")?;
         let only_src =
             || -> Result<bool, std::io::Error> { Ok(std::fs::read_dir(dir.path())?.count() == 1) };
-        for landing in [Landing::RenameIfFree, Landing::NoClobber] {
+        for landing in [Landing::Destination, Landing::Library] {
             let dest = dir.path().join("Mr. Song.opus");
             std::fs::write(&dest, b"old")?;
             assert!(matches!(copy_in(&src, &dest, landing)?, Landed::Existed));
@@ -586,6 +517,29 @@ mod tests {
             std::fs::remove_file(&dest)?;
             assert!(only_src()?, "no part left behind");
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_converted_place_taken_mid_run_is_skipped_and_a_full_device_ends_the_run()
+    -> TestResult {
+        let root = tempfile::tempdir()?;
+        let dev = tempfile::tempdir()?;
+        touch(&root.path().join("A/Al/one.opus"), b"one")?;
+        let plan = plan(&lib(root.path()), &device(dev.path()), &choice(&[])).await?;
+        let job = Job { plan: &plan };
+        let (src, dest) = (
+            root.path().join("A/Al/one.opus"),
+            dev.path().join("one.mp3"),
+        );
+        let skipped = job.converted(&src, &dest, Ok(Converted::Existed))?;
+        assert_eq!(skipped, Outcome::Skipped);
+        let full = job.converted(&src, &dest, Err(LibraryError::Full { path: dest.clone() }));
+        assert!(
+            matches!(full, Err(DevicesError::Full { ref device }) if device == "TESTDEV"),
+            "{full:?}"
+        );
+        assert_eq!(plan.written(), Vec::<PathBuf>::new());
         Ok(())
     }
 
@@ -607,7 +561,7 @@ mod tests {
         let device = device(dev.path());
         let first = plan(&lib(root.path()), &device, &choice).await?;
         let (events, _rx) = sender();
-        let report = run(&first, &events, &StopFlag::new()).await?;
+        let report = run(&first, &events, &CancellationToken::new()).await?;
         assert_eq!((report.added, report.failed), (2, 0));
         assert_eq!(
             std::fs::read(root.path().join("Band/Rec/Song One.mp3"))?,
@@ -619,7 +573,7 @@ mod tests {
         );
         assert!(walk_names(root.path()).iter().all(|name| !is_part(name)));
         // The same plan again: the places are taken now, so nothing is written or replaced.
-        let again = run(&first, &events, &StopFlag::new()).await?;
+        let again = run(&first, &events, &CancellationToken::new()).await?;
         assert_eq!((again.added, again.skipped), (0, 2));
         let fresh = plan(&lib(root.path()), &device, &choice).await?;
         assert_eq!((fresh.summary().files, fresh.summary().already), (0, 2));

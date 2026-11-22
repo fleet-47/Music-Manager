@@ -144,7 +144,7 @@ impl Step for SyncDevice<'_> {
             context.remember_synced_library(&device, library)?;
         }
         let counts = result?;
-        if context.stop.is_requested() {
+        if context.stop.is_cancelled() {
             return Ok(Flow::Stopped {
                 line: stopped_line(&counts),
             });

@@ -10,6 +10,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use sanitize_filename::{Options, sanitize_with_options};
+use walkdir::WalkDir;
 
 use crate::format::{existing_format, is_audio_file};
 use crate::{Format, Library, WantedSong};
@@ -195,40 +196,31 @@ impl Place {
 /// # Errors
 /// A folder that exists but cannot be read.
 pub fn library_files(library: &Library) -> std::io::Result<Vec<PathBuf>> {
+    let walk = WalkDir::new(library.root())
+        .follow_links(true)
+        .max_depth(3)
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.depth() == 0 || !entry.file_name().to_string_lossy().starts_with('.')
+        });
     let mut files = Vec::new();
-    for artist in subfolders(library.root())? {
-        for album in subfolders(&artist)? {
-            for entry in read_dir_or_empty(&album)? {
-                let path = entry?.path();
-                if path.is_file() && is_audio_file(&path) {
-                    files.push(path);
+    for entry in walk {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                let io = std::io::Error::from(error);
+                if io.kind() == ErrorKind::NotFound {
+                    continue;
                 }
+                return Err(io);
             }
+        };
+        if entry.depth() == 3 && entry.file_type().is_file() && is_audio_file(entry.path()) {
+            files.push(entry.into_path());
         }
     }
     files.sort();
     Ok(files)
-}
-
-/// The folders directly inside `dir` whose names do not start with a dot.
-fn subfolders(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut found = Vec::new();
-    for entry in read_dir_or_empty(dir)? {
-        let entry = entry?;
-        let hidden = entry.file_name().to_string_lossy().starts_with('.');
-        if !hidden && entry.path().is_dir() {
-            found.push(entry.path());
-        }
-    }
-    Ok(found)
-}
-
-fn read_dir_or_empty(dir: &Path) -> std::io::Result<Vec<std::io::Result<std::fs::DirEntry>>> {
-    match std::fs::read_dir(dir) {
-        Ok(entries) => Ok(entries.collect()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error),
-    }
 }
 
 /// `<device>/Music/`, the mirror of the music root on a device.

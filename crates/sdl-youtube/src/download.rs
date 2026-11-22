@@ -1,4 +1,4 @@
-//! Downloads (F3) with the `yt-dlp` binary, run by [`crate::ytdlp`].
+//! Downloads (F3) with the `yt-dlp` binary, run by [`sdl_core::process`].
 //!
 //! Each download has its own temp directory (`tempfile`) inside `<music_root>/.sdl-tmp/`
 //! (`sdl_core::place::tmp_dir`), so landing the file in the library is a same-volume rename. The
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use sdl_core::{Format, place};
 use tempfile::TempDir;
 
-use crate::{YoutubeError, ytdlp};
+use crate::YoutubeError;
 
 /// What the file is named inside its temp directory; `%(ext)s` is filled in by `yt-dlp` with the
 /// file's real type.
@@ -100,7 +100,7 @@ async fn download(audio: Audio, url: &str, music_root: &Path) -> Result<Download
     let tmp = place::tmp_dir(music_root);
     tokio::fs::create_dir_all(&tmp).await?;
     let dir = tempfile::Builder::new().prefix("dl-").tempdir_in(&tmp)?;
-    ytdlp::run(&args(audio, dir.path(), url)).await?;
+    sdl_core::process::run("yt-dlp", &args(audio, dir.path(), url)).await?;
     finish(dir)
 }
 

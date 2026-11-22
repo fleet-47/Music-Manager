@@ -1,19 +1,17 @@
 //! The Convert function (F9): converted copies of the library (or ticked playlists) written to a
 //! separate destination, with the library's layout. Never changes or deletes the library.
 
-use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-use futures::{StreamExt, stream};
 use sdl_core::format::existing_format;
-use sdl_core::playlist::PLAYLIST_EXTENSION;
+use sdl_core::run::{CancellationToken, Outcome, Run};
 use sdl_core::{
-    Attention, ConvertChoice, Counts, EventKind, EventSender, Format, Library, PlanSummary,
-    Playlist, Preset, StopFlag, library_files,
+    Attention, ConvertChoice, Counts, EventSender, Format, Library, PlanSummary, Preset,
 };
 
-use crate::converter::{convert_file, output_size, parallelism};
+use crate::converter::{Converted, convert_file, output_size, parallelism};
 use crate::playlists::write_for_destination;
+use crate::selection;
 use crate::{LibraryError, io_err};
 
 /// What a Convert run would do: the files to convert and the summary shown before Start.
@@ -47,10 +45,16 @@ impl ConvertPlan {
 /// [`crate::converter::output_size`] gives them. `free_bytes` is `None`:
 /// the destination's free space is not asked for.
 ///
+/// The scan runs on a blocking thread.
+///
 /// # Errors
-/// [`LibraryError::Io`] when a library folder or a file cannot be read.
+/// [`LibraryError::Io`] when a library folder or a file cannot be read; [`LibraryError::Task`]
+/// when the scan thread fails.
 pub async fn plan(library: &Library, choice: &ConvertChoice) -> Result<ConvertPlan, LibraryError> {
-    std::future::ready(plan_now(library, choice)).await
+    let (library, choice) = (library.clone(), choice.clone());
+    tokio::task::spawn_blocking(move || plan_now(&library, &choice))
+        .await
+        .map_err(|error| LibraryError::Task(error.to_string()))?
 }
 
 fn plan_now(library: &Library, choice: &ConvertChoice) -> Result<ConvertPlan, LibraryError> {
@@ -88,7 +92,11 @@ fn plan_now(library: &Library, choice: &ConvertChoice) -> Result<ConvertPlan, Li
         ));
         return Ok(plan);
     }
-    for (source, relative) in selected_songs(library, choice)? {
+    for selection::Song {
+        file: source,
+        relative,
+    } in selection::songs(library, &choice.what)?
+    {
         if existing_in(&destination, &relative)?.is_some() {
             plan.summary.already = plan.summary.already.saturating_add(1);
             continue;
@@ -109,57 +117,6 @@ fn plan_now(library: &Library, choice: &ConvertChoice) -> Result<ConvertPlan, Li
         });
     }
     Ok(plan)
-}
-
-/// The songs the choice names, once each, as `(file in the library, path relative to the root)`:
-/// the whole library first when ticked, then each ticked playlist's songs in list order. A
-/// playlist line counts when it is `<artist>/<album>/<file>` and a file with its stem exists in
-/// the library in some format (the line's extension may be out of date).
-fn selected_songs(
-    library: &Library,
-    choice: &ConvertChoice,
-) -> Result<Vec<(PathBuf, PathBuf)>, LibraryError> {
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    let mut songs = Vec::new();
-    let mut add = |source: PathBuf, relative: PathBuf| {
-        if seen.insert(relative.with_extension("")) {
-            songs.push((source, relative));
-        }
-    };
-    if choice.what.whole_library {
-        for file in library_files(library).map_err(io_err(library.root()))? {
-            if let Ok(relative) = file.strip_prefix(library.root()) {
-                add(file.clone(), relative.to_path_buf());
-            }
-        }
-    }
-    for stem in &choice.what.playlists {
-        let path = library.root().join(format!("{stem}.{PLAYLIST_EXTENSION}"));
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(io_err(&path)(error)),
-        };
-        for entry in Playlist::parse(&text, stem).entries {
-            let is_song_path = entry.components().count() == 3
-                && entry
-                    .components()
-                    .all(|part| matches!(part, Component::Normal(_)));
-            if !is_song_path {
-                continue;
-            }
-            if let Some(found) = existing_in(library.root(), &entry)? {
-                add(
-                    library
-                        .root()
-                        .join(&entry)
-                        .with_extension(found.extension()),
-                    entry,
-                );
-            }
-        }
-    }
-    Ok(songs)
 }
 
 /// The format of the file with `relative`'s name under `root` in any format, if there is one.
@@ -188,11 +145,11 @@ fn resolve(path: &Path) -> PathBuf {
 }
 
 /// Run a plan: convert each file with [`crate::converter::convert_file`],
-/// [`crate::converter::parallelism`] at a time, sending [`sdl_core::EventKind::Counts`] after each
-/// file and an `Attention` for each failed one. Then write each ticked playlist to the
-/// destination with [`crate::playlists::write_for_destination`]. `stop` is checked before each
-/// file starts: files in hand finish, no new one begins, and the run returns the counts so far
-/// without writing playlists. A file that appeared at its place meanwhile counts as skipped.
+/// [`crate::converter::parallelism`] at a time, through [`sdl_core::run::Run`], which sends the
+/// counts and an `Attention` for each failed file. Then write each ticked playlist to the
+/// destination with [`crate::playlists::write_for_destination`]. Once `stop` is cancelled no new
+/// file starts: files in hand finish, and the run returns the counts so far without writing
+/// playlists. A file that appeared at its place meanwhile counts as skipped.
 ///
 /// # Errors
 /// A failure that ends the whole run: `ffmpeg` not found, the destination not writable or full,
@@ -200,82 +157,75 @@ fn resolve(path: &Path) -> PathBuf {
 pub async fn run(
     plan: &ConvertPlan,
     events: &EventSender,
-    stop: &StopFlag,
+    stop: &CancellationToken,
 ) -> Result<Counts, LibraryError> {
     if let Some(refusal) = &plan.summary.refusal {
         return Err(LibraryError::Task(refusal.clone()));
     }
     std::fs::create_dir_all(&plan.destination).map_err(io_err(&plan.destination))?;
-    let mut counts = Counts {
-        total: Some(plan.jobs.len()),
-        ..Counts::default()
-    };
-    events.send(EventKind::Counts(counts));
-    let preset = plan.preset;
     // A plain loop, not a closure over `&plan.jobs`: such a closure makes the future unprovable as
     // `Send` for every lifetime (rustc), and the task layer spawns it.
-    let mut files = Vec::with_capacity(plan.jobs.len());
+    let mut jobs = Vec::with_capacity(plan.jobs.len());
     for (source, target) in &plan.jobs {
-        files.push(convert_one(source, target, preset, stop));
+        jobs.push(convert_one(
+            source,
+            target,
+            plan.preset,
+            plan.library.root(),
+        ));
     }
-    let mut finished = stream::iter(files).buffer_unordered(parallelism().get());
-    while let Some(item) = finished.next().await {
-        // A file not started because of the stop is not counted; files in hand finish first.
-        let Some((source, result)) = item else {
-            continue;
-        };
-        counts.done = counts.done.saturating_add(1);
-        match result {
-            Ok(()) => counts.added = counts.added.saturating_add(1),
-            Err(LibraryError::Io { source: cause, .. })
-                if cause.kind() == std::io::ErrorKind::AlreadyExists =>
-            {
-                counts.skipped = counts.skipped.saturating_add(1);
-            }
-            Err(error) if ends_the_run(&error) => return Err(error),
-            Err(error) => {
-                counts.failed = counts.failed.saturating_add(1);
-                events.send(EventKind::Attention(attention(
-                    source,
-                    plan.library.root(),
-                    &error,
-                )));
-            }
-        }
-        events.send(EventKind::Counts(counts));
+    let tally = Run {
+        limit: parallelism(),
+        events,
+        stop,
+        settled: Vec::new(),
     }
-    drop(finished);
-    if !stop.is_requested() {
+    .drive(jobs)
+    .await?;
+    if !stop.is_cancelled() {
         for stem in &plan.playlists {
             write_for_destination(&plan.library, &plan.destination, stem)?;
         }
     }
-    Ok(counts)
+    Ok(tally.counts())
 }
 
-/// One planned file, unless a stop was asked for before it started (`None`).
-async fn convert_one<'a>(
-    source: &'a Path,
-    target: &'a Path,
+/// One planned file, ended as an outcome.
+async fn convert_one(
+    source: &Path,
+    target: &Path,
     preset: Preset,
-    stop: &StopFlag,
-) -> Option<(&'a Path, Result<(), LibraryError>)> {
-    if stop.is_requested() {
-        return None;
+    library_root: &Path,
+) -> Result<Outcome, LibraryError> {
+    outcome_of(
+        convert_file(source, target, preset).await,
+        source,
+        library_root,
+    )
+}
+
+/// What a converter result means for the run: an outcome, or an error that would repeat for every
+/// file and so ends the run.
+fn outcome_of(
+    result: Result<Converted, LibraryError>,
+    source: &Path,
+    library_root: &Path,
+) -> Result<Outcome, LibraryError> {
+    match result {
+        Ok(Converted::Written) => Ok(Outcome::Added),
+        Ok(Converted::Existed) => Ok(Outcome::Skipped),
+        Err(error) if ends_the_run(&error) => Err(error),
+        Err(error) => Ok(Outcome::Failed(attention(source, library_root, &error))),
     }
-    Some((source, convert_file(source, target, preset).await))
 }
 
 /// Whether a failed file means every further file would fail too.
 fn ends_the_run(error: &LibraryError) -> bool {
-    use std::io::ErrorKind::{PermissionDenied, ReadOnlyFilesystem, StorageFull};
+    use std::io::ErrorKind::{PermissionDenied, ReadOnlyFilesystem};
     match error {
-        LibraryError::FfmpegNotFound => true,
+        LibraryError::Full { .. } | LibraryError::FfmpegNotFound => true,
         LibraryError::Io { source, .. } => {
-            matches!(
-                source.kind(),
-                PermissionDenied | ReadOnlyFilesystem | StorageFull
-            )
+            matches!(source.kind(), PermissionDenied | ReadOnlyFilesystem)
         }
         _ => false,
     }
@@ -298,7 +248,9 @@ fn attention(source: &Path, library_root: &Path, error: &LibraryError) -> Attent
 
 #[cfg(test)]
 mod tests {
-    use sdl_core::{Format, Quality, Selection, SongSource, TaskId, WantedSong, channel};
+    use sdl_core::{
+        EventKind, Format, Quality, Selection, SongSource, TaskId, WantedSong, channel,
+    };
 
     use super::*;
     use crate::playlists;
@@ -371,7 +323,7 @@ mod tests {
         assert!(summary.estimated && summary.can_start() && summary.free_bytes.is_none());
 
         let (events, mut rx) = sender();
-        let counts = run(&planned, &events, &StopFlag::new()).await?;
+        let counts = run(&planned, &events, &CancellationToken::new()).await?;
         assert_eq!(
             (counts.total, counts.done, counts.added, counts.failed),
             (Some(2), 2, 2, 0)
@@ -419,7 +371,7 @@ mod tests {
         let planned = plan(&lib(&me), &picked).await?;
         assert_eq!(planned.summary().files, 2);
         let (events, _rx) = sender();
-        run(&planned, &events, &StopFlag::new()).await?;
+        run(&planned, &events, &CancellationToken::new()).await?;
         assert!(out.path().join("A/Al/a.m4a").exists() && out.path().join("A/Al/c.m4a").exists());
         assert!(!out.path().join("A/Al/b.m4a").exists());
         assert_eq!(
@@ -444,7 +396,7 @@ mod tests {
         let planned = plan(&lib(&me), &choice(out.path(), what, Format::Mp3)).await?;
         assert_eq!(planned.summary().files, 1);
         let (events, _rx) = sender();
-        run(&planned, &events, &StopFlag::new()).await?;
+        run(&planned, &events, &CancellationToken::new()).await?;
         assert!(out.path().join("A/Al/Mr. Brightside.mp3").exists());
         let again = plan(
             &lib(&me),
@@ -498,7 +450,11 @@ mod tests {
             );
             assert_eq!(summary.files, 0);
             let (events, _rx) = sender();
-            assert!(run(&planned, &events, &StopFlag::new()).await.is_err());
+            assert!(
+                run(&planned, &events, &CancellationToken::new())
+                    .await
+                    .is_err()
+            );
         }
         assert!(!root.path().join("sub").exists() && !me.join("A/new").exists());
         // A folder beside the library is fine, made or not.
@@ -515,12 +471,50 @@ mod tests {
         let out = tempfile::tempdir()?;
         library(&me)?;
         let planned = plan(&lib(&me), &choice(out.path(), whole(), Format::Mp3)).await?;
-        let stop = StopFlag::new();
-        stop.request();
+        let stop = CancellationToken::new();
+        stop.cancel();
         let (events, _rx) = sender();
         let counts = run(&planned, &events, &stop).await?;
         assert_eq!((counts.done, counts.added), (0, 0));
         assert_eq!(std::fs::read_dir(out.path())?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_full_destination_ends_the_run_and_one_bad_file_does_not() -> TestResult {
+        let root = Path::new("/lib");
+        let source = Path::new("/lib/A/Al/a.opus");
+        let ended = |error: LibraryError| outcome_of(Err(error), source, root).is_err();
+        assert!(ended(LibraryError::Full {
+            path: PathBuf::from("/out/a.mp3")
+        }));
+        assert!(ended(LibraryError::FfmpegNotFound));
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::ReadOnlyFilesystem,
+        ] {
+            assert!(ended(LibraryError::Io {
+                path: PathBuf::from("/out"),
+                source: kind.into()
+            }));
+        }
+        let bad = outcome_of(
+            Err(LibraryError::Ffmpeg {
+                path: source.to_path_buf(),
+                message: "broken".into(),
+            }),
+            source,
+            root,
+        )?;
+        assert!(matches!(bad, Outcome::Failed(item) if item.title == "a" && item.artist == "A"));
+        assert_eq!(
+            outcome_of(Ok(Converted::Written), source, root)?,
+            Outcome::Added
+        );
+        assert_eq!(
+            outcome_of(Ok(Converted::Existed), source, root)?,
+            Outcome::Skipped
+        );
         Ok(())
     }
 
@@ -535,7 +529,7 @@ mod tests {
         // The broken file counts at its own size, so the plan still starts.
         assert_eq!(planned.summary().files, 3);
         let (events, mut rx) = sender();
-        let counts = run(&planned, &events, &StopFlag::new()).await?;
+        let counts = run(&planned, &events, &CancellationToken::new()).await?;
         assert_eq!((counts.done, counts.added, counts.failed), (3, 2, 1));
         let mut failed = Vec::new();
         while let Ok(event) = rx.try_recv() {

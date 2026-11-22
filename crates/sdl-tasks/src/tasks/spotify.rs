@@ -7,8 +7,7 @@
 
 use std::collections::HashMap;
 
-use futures::StreamExt;
-use futures::stream;
+use sdl_core::run::Run;
 use sdl_core::{
     Attention, EventKind, Library, ListChoice, ReviewList, SignInState, State, WantedSong,
 };
@@ -16,7 +15,7 @@ use sdl_library::playlists;
 use sdl_spotify::{ListedSongs, Session, list_choices, list_songs, resume, sign_in_browser};
 
 use crate::conversation::{Answered, Answers, Offer, Opened, Recipient, Step};
-use crate::progress::{drive, summary_line, with_already};
+use crate::progress::summary_line;
 use crate::tasks::intake::{Intake, Listed, Route};
 use crate::tasks::send_libraries;
 use crate::{Flow, TaskContext, TaskError};
@@ -263,8 +262,14 @@ impl Step for SyncSpotify<'_> {
         for (song, from) in &plan.new {
             pending.push(intake.take(&library, song, from, Route::Search));
         }
-        let outcomes = stream::iter(pending).buffer_unordered(context.config.download_jobs.get());
-        let tally = drive(outcomes, total, &context.events).await?;
+        let tally = Run {
+            limit: context.config.download_jobs,
+            events: &context.events,
+            stop: &context.stop,
+            settled: Vec::new(),
+        }
+        .drive(pending)
+        .await?;
         self.note_keychain();
         context
             .events
@@ -276,7 +281,7 @@ impl Step for SyncSpotify<'_> {
         {
             playlists::write(&library, &list.list.name, &list.list.id, &list.songs)?;
         }
-        let line = summary_line(&with_already(tally, plan.already));
+        let line = summary_line(&tally.with_already(plan.already));
         Ok(Flow::done(line, &tally.counts()))
     }
 }

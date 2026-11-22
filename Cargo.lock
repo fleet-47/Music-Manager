@@ -291,6 +291,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "atomic-write-file"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae67d5c03ee972c101a1d8db3ddbf8a9c819ad1ea9d6fd9cd385605547b60edb"
+dependencies = [
+ "nix 0.31.4",
+ "rand 0.10.4",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3884,14 +3894,20 @@ dependencies = [
 name = "sdl-core"
 version = "0.1.0"
 dependencies = [
+ "atomic-write-file",
  "directories",
+ "futures",
+ "rustix",
  "sanitize-filename",
  "serde",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "toml",
  "url",
+ "walkdir",
+ "which",
 ]
 
 [[package]]
@@ -3928,7 +3944,6 @@ dependencies = [
 name = "sdl-library"
 version = "0.1.0"
 dependencies = [
- "futures",
  "lofty",
  "musicbrainz_rs",
  "reqwest 0.13.5",
@@ -3958,7 +3973,6 @@ dependencies = [
 name = "sdl-tasks"
 version = "0.1.0"
 dependencies = [
- "futures",
  "sdl-core",
  "sdl-devices",
  "sdl-library",
@@ -3974,7 +3988,6 @@ name = "sdl-youtube"
 version = "0.1.0"
 dependencies = [
  "innertube-rs",
- "rustix",
  "sdl-core",
  "serde",
  "serde_json",
@@ -5271,6 +5284,15 @@ dependencies = [
  "lazy_static",
  "serde",
  "wezterm-dynamic",
+]
+
+[[package]]
+name = "which"
+version = "8.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

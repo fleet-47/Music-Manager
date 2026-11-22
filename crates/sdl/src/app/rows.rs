@@ -1,4 +1,5 @@
-//! What the main panel and the running panel say, as plain data. The screen only draws it.
+//! What the cards say, as plain data: one row per function, and for a running function the
+//! progress its card shows. The screen only draws it.
 
 use std::time::Duration;
 
@@ -6,19 +7,10 @@ use sdl_core::{Device, Direction, Format, RunOutcome, State, TaskId};
 use sdl_tasks::estimate_remaining;
 
 use super::{App, FunctionView};
-use crate::fmt::{ago, estimate_text, library_words, percent, stamp};
+use crate::fmt::{estimate_text, library_words, percent, stamp};
 use sdl_core::words::{need_attention, thousands, x_of_y};
 
-/// A function's last-run line, with its age.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LastView {
-    /// `412 added, 3 need attention · 5 min ago`.
-    pub text: String,
-    /// Picks the colour: done green, needs attention yellow, failed red, stopped skipped-grey.
-    pub outcome: RunOutcome,
-}
-
-/// One row of the main panel.
+/// What a function's card says apart from its progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowView {
     /// The function.
@@ -27,15 +19,13 @@ pub struct RowView {
     pub name: &'static str,
     /// Its current selection, in words (`3 lists chosen`).
     pub selection: String,
-    /// Its last run; `None` before the first run.
-    pub last: Option<LastView>,
     /// The number of held songs: only on the Review row.
     pub held: Option<usize>,
     /// Whether it is running now (its row shows it).
     pub running: bool,
 }
 
-/// One task of the running panel.
+/// A running function's progress, as its card shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunView {
     /// The function.
@@ -54,29 +44,22 @@ pub struct RunView {
     pub attention: Option<String>,
 }
 
-/// The main panel's rows, one per function, in order.
+/// One row per function, in order.
 #[must_use]
 pub fn main_rows(app: &App) -> Vec<RowView> {
     TaskId::ALL
         .into_iter()
-        .map(|task| {
-            let last = app.settings.state.last_run.get(&task).map(|run| LastView {
-                text: format!("{} · {}", run.line, ago(app.clock.epoch, run.at)),
-                outcome: run.outcome,
-            });
-            RowView {
+        .map(|task| RowView {
+            task,
+            name: task.name(),
+            selection: selection_text(
                 task,
-                name: task.name(),
-                selection: selection_text(
-                    task,
-                    &app.settings.state,
-                    &app.devices,
-                    app.settings.review.len(),
-                ),
-                last,
-                held: (task == TaskId::Review).then(|| app.settings.review.len()),
-                running: app.view(task).is_some_and(FunctionView::is_running),
-            }
+                &app.settings.state,
+                &app.devices,
+                app.settings.review.len(),
+            ),
+            held: (task == TaskId::Review).then(|| app.settings.review.len()),
+            running: app.view(task).is_some_and(FunctionView::is_running),
         })
         .collect()
 }
@@ -283,7 +266,7 @@ pub fn cards(app: &App) -> Vec<CardView> {
         .collect()
 }
 
-/// The running panel's tasks, in panel order; `elapsed` is read from the clock of `app`.
+/// The running functions' progress, in function order; `elapsed` is read from the clock of `app`.
 #[must_use]
 pub fn running_rows(app: &App) -> Vec<RunView> {
     app.running()
@@ -355,31 +338,14 @@ mod tests {
 
     #[test]
     fn every_function_has_a_row_with_a_selection_and_the_review_count() {
-        let mut app = app();
+        let app = app();
         let rows = main_rows(&app);
         assert_eq!(rows.len(), 5);
         assert_eq!(rows[0].selection, "");
         assert_eq!(rows[2].held, Some(0));
         assert_eq!(rows[2].selection, "");
         assert_eq!(rows[4].selection, "MP3 High to ~/Music-converted");
-        assert!(rows.iter().all(|row| row.last.is_none() && !row.running));
-        app.settings.state.last_run.insert(
-            TaskId::Convert,
-            LastRun {
-                line: "12 converted".into(),
-                at: 400,
-                outcome: RunOutcome::Done,
-                attention: Vec::new(),
-            },
-        );
-        let rows = main_rows(&app);
-        assert_eq!(
-            rows[4].last,
-            Some(LastView {
-                text: "12 converted · 10 min ago".into(),
-                outcome: RunOutcome::Done
-            })
-        );
+        assert!(rows.iter().all(|row| !row.running));
     }
 
     #[test]

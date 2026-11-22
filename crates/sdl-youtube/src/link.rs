@@ -1,6 +1,6 @@
 //! What a pasted link contains (F5), as wanted songs.
 //!
-//! Both calls run `yt-dlp` ([`crate::ytdlp`]) and read its JSON with `serde`; the reading itself
+//! Both calls run `yt-dlp` ([`sdl_core::process`]) and read its JSON with `serde`; the reading itself
 //! is pure and tested without the binary.
 
 use std::ffi::OsString;
@@ -10,7 +10,7 @@ use sdl_core::{SongSource, WantedSong};
 use serde::Deserialize;
 use url::Url;
 
-use crate::{YoutubeError, ytdlp};
+use crate::YoutubeError;
 
 /// A playlist link's name and id as `yt-dlp` reports them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,7 +120,11 @@ fn args(flags: &[&str], url: &str) -> Vec<OsString> {
 /// [`YoutubeError::YtDlpNotFound`], [`YoutubeError::YtDlp`] (with `yt-dlp`'s own reason) or
 /// [`YoutubeError::Listing`] when its answer cannot be read.
 pub async fn list_link(url: &str) -> Result<LinkListing, YoutubeError> {
-    let out = ytdlp::run(&args(&["--dump-single-json", "--flat-playlist"], url)).await?;
+    let out = sdl_core::process::run(
+        "yt-dlp",
+        &args(&["--dump-single-json", "--flat-playlist"], url),
+    )
+    .await?;
     parse_listing(&out)
 }
 
@@ -134,7 +138,11 @@ pub async fn list_link(url: &str) -> Result<LinkListing, YoutubeError> {
 /// # Errors
 /// As [`list_link`]; a title-less item is [`YoutubeError::Listing`].
 pub async fn read_item(item: &LinkItem) -> Result<WantedSong, YoutubeError> {
-    let out = ytdlp::run(&args(&["--dump-single-json", "--no-playlist"], &item.url)).await?;
+    let out = sdl_core::process::run(
+        "yt-dlp",
+        &args(&["--dump-single-json", "--no-playlist"], &item.url),
+    )
+    .await?;
     parse_item(&out, item)
 }
 

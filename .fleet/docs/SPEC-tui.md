@@ -316,7 +316,8 @@ report it; do not substitute another crate or hand-write the capability.
 - Each function runs as one task; different functions can run at the same time, the same function
   not twice. The UI keeps per task only: counts (total, done, added, skipped, held, failed), the
   headline and the attention items.
-- Stopping a download task aborts it (`JoinHandle::abort`; children die through `kill_on_drop`);
+- Stopping a download task aborts it (`JoinHandle::abort`; yt-dlp and everything it started die
+  with it, H1);
   Convert and Sync device stop cooperatively (F9, F10). The last-run line says "stopped" with the
   count finished before the stop.
 - `state.toml` and `review.toml` each have one writer: the task layer's runner. Tasks send it
@@ -359,14 +360,68 @@ report it; do not substitute another crate or hand-write the capability.
   on devices.
 
 ## F13. Tools check
-- At start the app looks on `PATH` for the three tools its functions run: `yt-dlp`, `ffmpeg` and
-  `deno`. When any is missing, the first row of the home screen names them and offers `i`, which
+- At start the app looks on `PATH` (`which`) for the three tools its functions run: `yt-dlp`,
+  `ffmpeg` and `deno`. When any is missing, the first row of the home screen names them and offers `i`, which
   runs `mise install` for the missing ones (`yt-dlp`, `conda:ffmpeg`, `deno`) and checks again.
 - The row then says how it ended: nothing when all are found; that they were installed but are
   not on `PATH` yet, with how to start the app so they are (`mise run tui`); or what mise said when
   it failed.
 - **Not:** no download or update of tools by the app itself, no change to any mise config, no
   check while a function runs.
+
+## Shared helpers (ruled 2026-11-22)
+One pathway per behaviour. Each helper below is the only place its behaviour is written; the call
+sites named use it and their own copies are deleted. What the app does is unchanged, except the two
+fixes named under H2 and H5. Each helper's interface is written out at the top of its file
+(`sdl-core/src/{process,landing,run}.rs`, `sdl-library/src/selection.rs`).
+
+- **H1. Process runner** (`sdl-core::process`): one function runs an outside tool and returns what
+  it printed. `tokio::process::Command` with stdin closed, output piped, `.process_group(0)` and
+  `.kill_on_drop(true)`, plus a guard that kills the whole group (`rustix`) when the run is dropped,
+  so a stopped task leaves no helper behind. One error type: the tool was not found (naming it), it
+  failed (the last `ERROR:` line of stderr, else the last non-empty line, else the exit code), or
+  an I/O error. Used for `yt-dlp`, `ffmpeg`, `diskutil` and `mise`; `sdl-youtube/src/ytdlp.rs` and
+  the spawn code in the converter, `sdl-devices` and the binary go. The tools check (F13) looks
+  along `PATH` with the `which` crate and moves out of the binary into `sdl-tasks`.
+- **H2. Landing** (`sdl-core::landing`): one function puts a finished temp file at its place and
+  never replaces a file. Two modes: the library (`tempfile`'s `persist_noclobber`) and a device or
+  Convert destination (check the place is free, then rename: FAT32 refuses the first, os error
+  45). Both answer "written" or "already there"; "already there" is never an error. One function
+  writes a small text file whole (`atomic-write-file`: temp file, sync, rename), used for
+  `state.toml`, `review.toml` and every playlist file. Replaces `progress::place`, `copy_in` in
+  `sdl-devices`, the landing inside `convert_file`, the body of `storage::save` and the three
+  `std::fs::write` calls in `playlists`. **Fix:** in a device sync that converts, a song whose place
+  is taken mid-run counts as skipped, not failed.
+- **H3. Selection** (`sdl-library::selection`): one function turns "Whole library and these
+  playlists" into the library's files, each once: the whole library first (F7, walked with
+  `walkdir` at depth 3, dot names skipped), then each ticked playlist's songs in list order. A
+  playlist line counts when it is three plain path components, none starting with a dot, and a
+  file with its stem exists in any format. Used by the device plan and the Convert plan; both
+  plans scan on a blocking thread.
+- **H4. Run driver** (`sdl-core::run`): one outcome type, one tally and one driver for every
+  function's run: jobs run a set number at a time (`futures` `buffer_unordered`), `Counts` are sent
+  at the start and after every job, an `Attention` for every held or failed one. A job's error
+  ends the run: no further job starts and the ones in hand are dropped. A cooperative stop
+  (`tokio_util::sync::CancellationToken`, which replaces `StopFlag`) lets the jobs in hand finish
+  and starts no other. Replaces `progress::drive` and the loops in `sdl-library::convert::run` and
+  `sdl-devices::run`. What ends a run is decided where the error is typed (H5: a full
+  destination, a missing tool), never by a loop reading error text. Outcomes known before the run
+  (a link that could not be read) are counted first.
+- **H5. Converter result** (`sdl-library::converter`): `convert_file` runs `ffmpeg` through H1 and
+  lands through H2. Its result is typed: written, already there, the destination is full, or this
+  file failed (with the reason); a missing `ffmpeg` is its own error. "Full" is recognised in this
+  one place (the I/O error kind, or ffmpeg's "No space left on device"). **Fix:** Convert onto a
+  full disk ends the run with a plain message, as Sync device does.
+- **Removed with this work:** `Scene.running`, `running_in` and `Kind::Running` in
+  `sdl/src/screen/effects.rs`; `RowView.last` and `LastView` in `sdl/src/app/rows.rs`;
+  `App::shows_running_panel` is renamed for what it asks (whether a function runs).
+- **Order of work**, each step passing the gate by itself: removals; H1; H2; H3; H5; H4.
+- **New dependencies:** `atomic-write-file`, `tokio-util`, `which`; `walkdir` is also used by
+  `sdl-core`.
+- **Not:** no change to what any function does or shows beyond the two fixes; no new formats; no
+  `ffmpeg-sidecar`, `process-wrap`, `cap-std` or playlist crate (looked at 2026-11-22: none kills a
+  process group on drop, checks containment more simply than the three-component rule, or reads
+  plain `.m3u8` music playlists while maintained).
 
 ## Config: `~/.config/sdl/config.toml`
 `client_id`, `music_root` (default `~/Music`, `~` expanded), `my_library` (default `Me`),

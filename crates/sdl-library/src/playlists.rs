@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use sdl_core::format::existing_format;
+use sdl_core::landing;
 use sdl_core::playlist::PLAYLIST_EXTENSION;
 use sdl_core::{Format, Library, Place, Playlist, WantedSong};
 
@@ -66,7 +67,7 @@ pub fn write(
         entries,
     };
     let path = library.root().join(Playlist::file_name(name, id));
-    std::fs::write(&path, playlist.render()).map_err(io_err(&path))
+    landing::write_atomic(&path, playlist.render().as_bytes()).map_err(io_err(&path))
 }
 
 /// Correct one song's line after review landed it with another extension: in each of the playlist
@@ -96,7 +97,7 @@ pub fn correct_line(
             .map(|stem| stem.to_string_lossy().into_owned());
         let mut playlist = Playlist::parse(&text, fallback.as_deref().unwrap_or_default());
         if playlist.correct(&relative_stem, format) {
-            std::fs::write(&path, playlist.render()).map_err(io_err(&path))?;
+            landing::write_atomic(&path, playlist.render().as_bytes()).map_err(io_err(&path))?;
         }
     }
     Ok(())
@@ -136,7 +137,7 @@ pub fn write_for_destination(
     };
     std::fs::create_dir_all(dest_music_dir).map_err(io_err(dest_music_dir))?;
     let target = dest_music_dir.join(&file);
-    std::fs::write(&target, playlist.render()).map_err(io_err(&target))?;
+    landing::write_atomic(&target, playlist.render().as_bytes()).map_err(io_err(&target))?;
     Ok(count)
 }
 

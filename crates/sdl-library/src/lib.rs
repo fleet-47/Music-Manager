@@ -7,6 +7,7 @@
 pub mod convert;
 pub mod converter;
 pub mod playlists;
+pub mod selection;
 pub mod tags;
 
 #[cfg(test)]
@@ -42,6 +43,12 @@ pub enum LibraryError {
     /// The `ffmpeg` binary could not be started because it is not on `PATH`.
     #[error("ffmpeg was not found on PATH")]
     FfmpegNotFound,
+    /// The destination has no room left.
+    #[error("there is no room left at {}", path.display())]
+    Full {
+        /// The file that could not be written.
+        path: PathBuf,
+    },
     /// `ffmpeg` ran and failed; carries its last error line.
     #[error("ffmpeg could not convert {}: {message}", path.display())]
     Ffmpeg {

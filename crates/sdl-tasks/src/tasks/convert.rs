@@ -80,7 +80,7 @@ impl Step for Convert<'_> {
             files(planned.summary().files)
         )));
         let counts = run(&planned, &context.events, &context.stop).await?;
-        if context.stop.is_requested() {
+        if context.stop.is_cancelled() {
             return Ok(Flow::Stopped {
                 line: stopped_line(&counts),
             });

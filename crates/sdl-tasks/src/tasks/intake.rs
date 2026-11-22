@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
+use sdl_core::run::Outcome;
 use sdl_core::{
     Attention, EventKind, Format, HeldSong, Library, MatchOutcome, Place, Playlist, Preset,
     SongSource, WantedSong,
@@ -22,7 +23,7 @@ use sdl_youtube::{Matcher, YoutubeError, download_opus, download_own_audio};
 use tokio::sync::OnceCell;
 
 use crate::failure::error_info;
-use crate::progress::{self, Outcome, scratch_dir};
+use crate::progress::{land_in_library, scratch_dir};
 use crate::{TaskContext, TaskError};
 
 /// Where a song's audio comes from.
@@ -220,7 +221,7 @@ impl<'a> Intake<'a> {
         if place.present()?.is_some() {
             return Ok(Outcome::Skipped);
         }
-        let landed = progress::place(&file, &place.path(format)).await?;
+        let landed = land_in_library(&file, &place.path(format))?;
         if landed == Outcome::Added && format != Format::Opus {
             let files: Vec<String> = from.iter().map(|list| list.file.clone()).collect();
             correct_line(library, &files, &place, format)?;
@@ -242,7 +243,7 @@ impl<'a> Intake<'a> {
         tokio::task::spawn_blocking(move || std::fs::copy(from, to))
             .await
             .map_err(|error| LibraryError::Task(error.to_string()))??;
-        Ok(progress::place(&copy, &place.path(format)).await?)
+        Ok(land_in_library(&copy, &place.path(format))?)
     }
 
     async fn find(&self, song: &WantedSong) -> Result<MatchOutcome, TaskError> {
@@ -278,7 +279,7 @@ pub(crate) fn ends_the_run(error: &TaskError) -> bool {
     matches!(
         error,
         TaskError::Youtube(YoutubeError::YtDlpNotFound | YoutubeError::Search(_))
-            | TaskError::Library(LibraryError::FfmpegNotFound)
+            | TaskError::Library(LibraryError::FfmpegNotFound | LibraryError::Full { .. })
             | TaskError::State(_)
     )
 }

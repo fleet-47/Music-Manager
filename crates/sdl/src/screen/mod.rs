@@ -26,6 +26,7 @@ use ratatui::DefaultTerminal;
 use ratatui::layout::Size;
 use sdl_core::{Config, ErrorInfo, EventReceiver, TaskId, channel};
 use sdl_tasks::Runner;
+use sdl_tasks::tools::{install_tools, missing_tools};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::app::wake::next_wake;
@@ -202,7 +203,6 @@ fn draw(
             let scene = Scene {
                 popups: app.popups.len(),
                 top,
-                running: None,
                 ended: ended
                     .iter()
                     .filter_map(|task| {
@@ -266,56 +266,6 @@ async fn run_cmd(
         }
         Cmd::Quit => {}
     }
-}
-
-/// The tools the functions run, as the command name and the name mise installs it under.
-const TOOLS: [(&str, &str); 3] = [
-    ("yt-dlp", "yt-dlp"),
-    ("ffmpeg", "conda:ffmpeg"),
-    ("deno", "deno"),
-];
-
-/// The tools that are not on `PATH`, by command name.
-fn missing_tools() -> Vec<String> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    TOOLS
-        .iter()
-        .filter(|(command, _)| {
-            !std::env::split_paths(&path).any(|folder| folder.join(command).is_file())
-        })
-        .map(|(command, _)| (*command).to_owned())
-        .collect()
-}
-
-/// Run `mise install` for the tools named; the error says what went wrong in plain words.
-async fn install_tools(names: &[String]) -> Result<(), String> {
-    let wanted = TOOLS
-        .iter()
-        .filter(|(command, _)| names.iter().any(|name| name == command))
-        .map(|(_, mise_name)| *mise_name);
-    let output = tokio::process::Command::new("mise")
-        .arg("install")
-        .args(wanted)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => "mise was not found on PATH".to_owned(),
-            _ => error.to_string(),
-        })?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let said = String::from_utf8_lossy(&output.stderr);
-    Err(said
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .map_or_else(
-            || "mise install failed".to_owned(),
-            |line| line.trim().to_owned(),
-        ))
 }
 
 #[cfg(test)]

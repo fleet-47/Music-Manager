@@ -4,9 +4,9 @@ Read first, end to end: `.agents/AGENTS.md` (rulings), `.fleet/docs/SPEC-tui.md`
 F1 to F13), `.fleet/docs/BACKLOG.md` (tasks waiting on a condition).
 
 ## Where it stands (2026-11-22)
-- `sdl` is a music library manager: eight crates, one Rust TUI. The work of 2026-11-22 is in the
-  jj working copy, not yet described as a commit.
-- The gate passes: `cargo fmt`, `cargo clippy` with the Gen.v2 flags, 438 tests run as
+- `sdl` is a music library manager: eight crates, one Rust TUI. Everything up to the keyboard-focus and several-links
+  work is committed and pushed to GitHub; the docs for the shared-helpers build are not yet.
+- The gate passes: `cargo fmt`, `cargo clippy` with the Gen.v2 flags, 456 tests run as
   `mise x -- cargo test --workspace --all-features --locked`.
 - Release binary: `$SHIP_ROOT/outputs/cargo/target/release/sdl`. cargo's output folder left the repo
   on 2026-11-21 (fleet cargo config in `~/.config/cargo`); `mise run tui` runs that path. The repo's own
@@ -32,14 +32,23 @@ On 2026-11-21 at 19:40 Yazid ran Download link, saw his whole Wi-Fi connection s
   If it does, record the app's process tree, its connections (`lsof -i`) and the bytes on `en0`
   before and after Stop, with the link that was pasted, before naming a cause.
 
-### 2. Built 2026-11-22, gate green, not yet seen on a real terminal or run against real tools
-- Several links at once (spec F5): the Link field splits on spaces, line breaks and commas
-  (`sdl/src/dialogs/link.rs`), a pasted line break becomes a space (`sdl-form/src/form.rs`,
-  `one_line`), and the run reads each link in turn and takes all items as one run
-  (`sdl-tasks/src/tasks/link.rs`). The run itself has no test: it needs yt-dlp and the network.
-- Keyboard focus (spec F1): the chosen card is filled with `›` before its name and the border
-  colour tells its state; the focused button of every form and popup is filled; a question's
-  answers take Left, Right and Tab (`Popup::Confirm` carries which answer has the focus).
+### 2. The shared-helpers build (built 2026-11-22, gate green, waiting for Yazid's hands-on test)
+- Built to the spec's "Shared helpers" section: `sdl-core/src/{process,landing,run}.rs`,
+  `sdl-library/src/selection.rs`, the converter's typed result, and every call site moved onto
+  them. `StopFlag`, `sdl-youtube/src/ytdlp.rs` and the dead running-panel code are gone; the tools
+  check lives in `sdl-tasks/src/tools.rs`.
+- Gate: fmt, clippy with the Gen.v2 flags, 456 tests pass, 2 ignored (the real-machine tests in
+  `sdl-devices/src/reality.rs`). The release binary is rebuilt.
+- Not committed. Not run by an agent against real tools, a real device or a full disk: the
+  hands-on test, the full live run and the red team are Yazid's.
+- The two fixes have tests on how a result is turned into an outcome, not on a real full disk or
+  a real device: Convert onto a full destination ends the run; a place taken during a converting
+  device sync counts as skipped.
+- One change to expect: a device sync copies in selection order (whole library sorted, then each
+  playlist in list order), where it used to copy one sorted list.
+- `library_files` walks with `walkdir` at depths up to 3 and keeps depth-3 files; it does not use
+  `min_depth(3)`, because walkdir does not offer shallower entries to the filter that skips dot
+  folders.
 
 ### 3. Review of today's unreviewed code
 An Opus red team of the libraries change and the home-screen rebuild was planned and put on hold by
@@ -51,13 +60,9 @@ Yazid. Ask before sending one. If it runs: scope it to F1, F12 and F13, give it 
   under the name field. `sdl-form`'s `Field::validate` takes a plain `fn(&str)` and cannot know the
   existing libraries; it needs a settable message per field (`sdl-form/src/field.rs`, used from
   `sdl/src/dialogs/libraries.rs`).
-- Dead code from the old running panel: `Scene.running` and `running_in` in
-  `sdl/src/screen/effects.rs` (always `None` now), `RowView.last` and `LastView` in
-  `sdl/src/app/rows.rs`, and the name `App::shows_running_panel`.
 - The home screen's footer says "Enter run" while the chosen card says "Enter sync" (or "paste a
   link", "review", "convert"): one wording.
 - The Sync device card shows its purpose line when a last run exists but no device is remembered.
-- The tools check looks along `PATH` with a few lines of our own code; the `which` crate does this.
 - The test for "Stop at the instant a run starts" does not reliably fail on the old bug.
 
 ### 5. Decisions waiting for Yazid

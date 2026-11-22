@@ -1,13 +1,13 @@
 //! The device list (F10): `/Volumes` entries asked with `diskutil info -plist`, the watch on
 //! `/Volumes`, and a device's top-level folders.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use sdl_core::Device;
+use sdl_core::process::{self, ToolError};
 use serde::Deserialize;
-use tokio::process::Command;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::DevicesError;
@@ -38,7 +38,7 @@ impl VolumeInfo {
 }
 
 /// Every entry of `/Volumes` asked with `diskutil info -plist <mount point>`
-/// (`tokio::process::Command`), parsed with `plist` and `serde`, kept when external or
+/// (`sdl_core::process::run`), parsed with `plist` and `serde`, kept when external or
 /// removable. A device is identified by its volume UUID, falling back to its name
 /// ([`Device::id`]).
 ///
@@ -81,28 +81,28 @@ async fn list_in(volumes: &Path) -> Result<Vec<Device>, DevicesError> {
 /// The device mounted at `mount_point`, or `None` when it is not external or removable (or
 /// `diskutil` does not know it as a volume).
 async fn device_at(mount_point: &Path) -> Result<Option<Device>, DevicesError> {
-    let output = Command::new("diskutil")
-        .args(["info", "-plist"])
-        .arg(mount_point)
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|error| DevicesError::Diskutil {
-            action: "info",
-            message: error.to_string(),
-        })?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let info: VolumeInfo =
-        plist::from_bytes(&output.stdout).map_err(|error| DevicesError::Diskutil {
-            action: "info",
-            message: format!(
-                "could not read its answer for {}: {error}",
-                mount_point.display()
-            ),
-        })?;
+    let args = [
+        OsString::from("info"),
+        OsString::from("-plist"),
+        mount_point.as_os_str().to_owned(),
+    ];
+    let stdout = match process::run("diskutil", &args).await {
+        Ok(stdout) => stdout,
+        Err(ToolError::Failed { .. }) => return Ok(None),
+        Err(other) => {
+            return Err(DevicesError::Diskutil {
+                action: "info",
+                message: other.to_string(),
+            });
+        }
+    };
+    let info: VolumeInfo = plist::from_bytes(&stdout).map_err(|error| DevicesError::Diskutil {
+        action: "info",
+        message: format!(
+            "could not read its answer for {}: {error}",
+            mount_point.display()
+        ),
+    })?;
     if !info.removable_media_or_external_device {
         return Ok(None);
     }
@@ -212,11 +212,9 @@ mod tests {
     #[tokio::test]
     async fn the_internal_disk_is_not_a_device_and_its_free_space_is_the_container_key()
     -> TestResult {
-        let output = Command::new("diskutil")
-            .args(["info", "-plist", "/"])
-            .output()
-            .await?;
-        let info: VolumeInfo = plist::from_bytes(&output.stdout)?;
+        let stdout =
+            process::run("diskutil", &["info".into(), "-plist".into(), "/".into()]).await?;
+        let info: VolumeInfo = plist::from_bytes(&stdout)?;
         assert!(!info.removable_media_or_external_device);
         assert!(info.apfs_container_free.is_some_and(|free| free > 0));
         assert_eq!(info.free_space.unwrap_or(0), 0);

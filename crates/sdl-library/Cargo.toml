@@ -10,10 +10,9 @@ sdl-core.workspace = true
 musicbrainz_rs.workspace = true
 lofty.workspace = true
 reqwest.workspace = true
-futures.workspace = true
-tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "process", "rt", "sync"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
 
 [dev-dependencies]
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

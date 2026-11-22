@@ -90,7 +90,7 @@ pub enum PopupTarget {
 /// `App::update` for mouse events; everything else treats it as read-only.
 #[derive(Debug, Clone, Default)]
 pub struct Hits {
-    /// Main screen: function rows and running tasks.
+    /// Main screen: one card per function, with its progress while it runs.
     pub main: HitMap<MainTarget>,
     /// The open dialog's form (`sdl_form::render`'s map).
     pub form: HitMap<sdl_form::Target>,
@@ -189,14 +189,14 @@ impl App {
         self.views.iter_mut().find(|view| view.task == task)
     }
 
-    /// The functions whose run has started and not ended, in panel order.
+    /// The functions whose run has started and not ended, in function order.
     pub fn running(&self) -> impl Iterator<Item = &FunctionView> {
         self.views.iter().filter(|view| view.is_running())
     }
 
     /// Whether some function runs (its card shows progress).
     #[must_use]
-    pub fn shows_running_panel(&self) -> bool {
+    pub fn anything_runs(&self) -> bool {
         self.running().next().is_some()
     }
 

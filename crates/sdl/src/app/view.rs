@@ -11,9 +11,9 @@ pub enum Phase {
     /// Not running. Its result is the last-run line.
     #[default]
     Idle,
-    /// Started and waiting at its form (nothing runs yet): the running panel does not show it.
+    /// Started and waiting at its form (nothing runs yet): its card shows no progress.
     AtForm,
-    /// The run has started (`Started`): the running panel shows it.
+    /// The run has started (`Started`): its card shows its progress.
     Running,
 }
 
@@ -74,7 +74,7 @@ impl FunctionView {
         }
     }
 
-    /// Whether the running panel shows this function.
+    /// Whether this function's run has started and not ended.
     #[must_use]
     pub fn is_running(&self) -> bool {
         self.phase == Phase::Running
@@ -87,7 +87,7 @@ impl FunctionView {
         self.phase != Phase::Idle
     }
 
-    /// Whether the running panel shows a spinner for it: beside its name while it runs.
+    /// Whether its card shows a spinner: beside its name while it runs.
     #[must_use]
     pub fn shows_spinner(&self) -> bool {
         self.is_running()

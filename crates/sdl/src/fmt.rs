@@ -37,21 +37,6 @@ pub fn library_words(library: &LibraryId) -> Option<String> {
     }
 }
 
-/// How long ago `at` was, relative to `now` (both seconds since the Unix epoch).
-#[must_use]
-pub fn ago(now: u64, at: u64) -> String {
-    let secs = now.saturating_sub(at);
-    if secs < 60 {
-        "just now".to_owned()
-    } else if secs < 3_600 {
-        format!("{} min ago", secs / 60)
-    } else if secs < 86_400 {
-        format!("{} h ago", secs / 3_600)
-    } else {
-        format!("{} d ago", secs / 86_400)
-    }
-}
-
 /// A moment as the clock and date read here: `14:05 21/11/2026`. Empty when it cannot be told.
 #[must_use]
 pub fn stamp(at: u64) -> String {
@@ -111,16 +96,13 @@ mod tests {
     }
 
     #[test]
-    fn estimate_and_age_wording() {
+    fn estimate_wording() {
         assert_eq!(estimate_text(None), "estimating time left");
         assert_eq!(
             estimate_text(Some(Duration::from_mins(5))),
             "about 5 min left"
         );
         assert_eq!(duration_text(Duration::from_mins(125)), "about 2 h 5 min");
-        assert_eq!(ago(100, 90), "just now");
-        assert_eq!(ago(1_000, 400), "10 min ago");
-        assert_eq!(ago(100_000, 1), "1 d ago");
     }
 
     #[test]

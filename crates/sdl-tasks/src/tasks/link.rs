@@ -7,14 +7,13 @@
 
 use std::sync::{Mutex, PoisonError};
 
-use futures::StreamExt;
-use futures::stream;
+use sdl_core::run::{Outcome, Run};
 use sdl_core::{Attention, EventKind, Library, WantedSong};
 use sdl_library::playlists;
 use sdl_youtube::{LinkItem, LinkListing, list_link, read_item};
 
 use crate::conversation::{Answered, Answers, Offer, Opened, Recipient, Step};
-use crate::progress::{Outcome, drive, summary_line};
+use crate::progress::summary_line;
 use crate::tasks::intake::{Intake, Listed, Route, ends_the_run, failed};
 use crate::tasks::send_libraries;
 use crate::{Flow, TaskContext, TaskError};
@@ -180,11 +179,14 @@ impl Step for DownloadLink<'_> {
                 ));
             }
         }
-        let total = items.saturating_add(unread.len());
-        let outcomes = stream::iter(unread)
-            .map(Ok::<Outcome, TaskError>)
-            .chain(stream::iter(pending).buffer_unordered(context.config.download_jobs.get()));
-        let tally = drive(outcomes, total, &context.events).await?;
+        let tally = Run {
+            limit: context.config.download_jobs,
+            events: &context.events,
+            stop: &context.stop,
+            settled: unread,
+        }
+        .drive(pending)
+        .await?;
         let mut songs = read.into_inner().unwrap_or_else(PoisonError::into_inner);
         songs.sort_by_key(|(at, _)| *at);
         for listing in &listings {

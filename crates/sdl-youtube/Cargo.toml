@@ -10,13 +10,11 @@ sdl-core.workspace = true
 innertube-rs.workspace = true
 strsim.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["process", "io-util", "fs"] }
+tokio = { workspace = true, features = ["io-util", "fs"] }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
-# Killing a process group (yt-dlp and everything it started) without `unsafe`.
-rustix = { version = "1.1", features = ["process"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

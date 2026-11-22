@@ -74,29 +74,17 @@ pub(crate) fn load_or_default<T: DeserializeOwned + Default>(path: &Path) -> Res
     }
 }
 
-/// Write `value` to `path` as TOML, atomically (F11): the text goes to a temp file in the same
-/// folder (`tempfile`), which is then renamed over `path` (`persist`). A crash leaves either the
-/// old file or the new one, never half of either. Creates the folder if needed.
+/// Write `value` to `path` as TOML, atomically (F11, H2): a crash leaves either the old file or
+/// the new one, never half of either. Creates the folder if needed.
 pub(crate) fn save<T: Serialize>(value: &T, path: &Path) -> Result<(), StoreError> {
-    use std::io::Write;
     let text = toml::to_string_pretty(value).map_err(|source| StoreError::Encode {
         path: path.to_path_buf(),
         source,
     })?;
-    let write = |source| StoreError::Write {
+    crate::landing::write_atomic(path, text.as_bytes()).map_err(|source| StoreError::Write {
         path: path.to_path_buf(),
         source,
-    };
-    let folder = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    std::fs::create_dir_all(folder).map_err(write)?;
-    let mut temp = tempfile::NamedTempFile::new_in(folder).map_err(write)?;
-    temp.write_all(text.as_bytes()).map_err(write)?;
-    temp.as_file().sync_all().map_err(write)?;
-    temp.persist(path).map_err(|failure| write(failure.error))?;
-    Ok(())
+    })
 }
 
 /// A `Option<Duration>` stored as whole seconds (TOML has no duration type). Sub-second parts are

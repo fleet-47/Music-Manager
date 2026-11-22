@@ -4,59 +4,84 @@
 use std::ffi::OsString;
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::process::Stdio;
 
 use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, FileType, TaggedFileExt};
 use lofty::tag::TagExt;
+use sdl_core::landing::{self, Landed, Landing};
+use sdl_core::process::{self, ToolError};
 use sdl_core::{Format, Preset, Quality};
-use tokio::process::Command;
 
 use crate::{LibraryError, io_err};
 
+/// How a conversion ended when it did not fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Converted {
+    /// The file is at `dest`.
+    Written,
+    /// A file was already at `dest`; nothing was replaced.
+    Existed,
+}
+
 /// Convert `src` to `dest` with `ffmpeg`, audio only, sample rate kept.
 ///
-/// - runs the `ffmpeg` binary through `tokio::process::Command` with `.stdin(Stdio::null())` and
-///   `.kill_on_drop(true)`; the arguments come from [`ffmpeg_args`];
-/// - writes to a `<name>.part` temp file beside `dest` (same folder, so the rename cannot cross
-///   volumes), then renames it to `dest` when complete. A plain rename after checking `dest` is
-///   free: `tempfile`'s `persist_noclobber` fails with os error 45 on FAT32 on macOS;
+/// - runs the `ffmpeg` binary through [`sdl_core::process::run`]; the arguments come from
+///   [`ffmpeg_args`];
+/// - writes to a `<name>.part` temp file beside `dest` ([`landing::part_beside`]), then lands it
+///   at `dest` ([`landing::land`], as a destination: the drive may be FAT32) when complete;
 /// - then copies the tags from `src` with `lofty`, and the cover only when `preset.keep_cover`;
 /// - a `src` already in the target format is copied as it is;
-/// - `ErrorKind::NotFound` on spawn is [`LibraryError::FfmpegNotFound`]; a non-zero exit is
-///   [`LibraryError::Ffmpeg`] with ffmpeg's last error line.
+/// - a file already at `dest` is never replaced: [`Converted::Existed`], no temp file left.
 ///
 /// # Errors
-/// The errors above; [`LibraryError::Io`] with `ErrorKind::AlreadyExists` when `dest` exists
-/// (it is never replaced); [`LibraryError::Tag`] when the tags cannot be copied.
-pub async fn convert_file(src: &Path, dest: &Path, preset: Preset) -> Result<(), LibraryError> {
-    ensure_free(dest)?;
-    let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else {
-        return Err(io_err(dest)(std::io::Error::other("not a file path")));
-    };
-    std::fs::create_dir_all(dir).map_err(io_err(dir))?;
-    let temp = tempfile::Builder::new()
-        .prefix(name)
-        .suffix(".part")
-        .tempfile_in(dir)
-        .map_err(io_err(dir))?;
+/// [`LibraryError::FfmpegNotFound`] when `ffmpeg` is not on `PATH`; [`LibraryError::Ffmpeg`] with
+/// ffmpeg's last error line on a non-zero exit; [`LibraryError::Full`] when the destination has
+/// no room left; [`LibraryError::Tag`] when the tags cannot be copied; [`LibraryError::Io`] on
+/// any other file failure.
+pub async fn convert_file(
+    src: &Path,
+    dest: &Path,
+    preset: Preset,
+) -> Result<Converted, LibraryError> {
+    convert_to_part(src, dest, preset).await.map_err(|error| {
+        if is_full(&error) {
+            LibraryError::Full {
+                path: dest.to_path_buf(),
+            }
+        } else {
+            error
+        }
+    })
+}
+
+async fn convert_to_part(
+    src: &Path,
+    dest: &Path,
+    preset: Preset,
+) -> Result<Converted, LibraryError> {
+    let temp = landing::part_beside(dest).map_err(io_err(dest))?;
     if preset.format.holds(src) {
         std::fs::copy(src, temp.path()).map_err(io_err(src))?;
     } else {
         run_ffmpeg(src, temp.path(), preset).await?;
         copy_tags(src, temp.path(), preset)?;
     }
-    ensure_free(dest)?;
-    temp.persist(dest).map_err(|e| io_err(dest)(e.error))?;
-    Ok(())
+    match landing::land(temp.into_temp_path(), dest, Landing::Destination).map_err(io_err(dest))? {
+        Landed::Written => Ok(Converted::Written),
+        Landed::Existed => Ok(Converted::Existed),
+    }
 }
 
-/// `dest` must not exist: a file is never replaced.
-fn ensure_free(dest: &Path) -> Result<(), LibraryError> {
-    if dest.try_exists().map_err(io_err(dest))? {
-        return Err(io_err(dest)(std::io::ErrorKind::AlreadyExists.into()));
+/// Whether `error` says the destination has no room left.
+fn is_full(error: &LibraryError) -> bool {
+    match error {
+        LibraryError::Io { source, .. } => matches!(
+            source.kind(),
+            std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded
+        ),
+        LibraryError::Ffmpeg { message, .. } => message.contains("No space left on device"),
+        _ => false,
     }
-    Ok(())
 }
 
 /// The `ffmpeg` arguments that write `src` as `out` in the preset's format: audio only (`-vn`,
@@ -91,31 +116,15 @@ pub(crate) fn ffmpeg_args(src: &Path, out: &Path, preset: Preset) -> Vec<OsStrin
 }
 
 async fn run_ffmpeg(src: &Path, out: &Path, preset: Preset) -> Result<(), LibraryError> {
-    let output = Command::new("ffmpeg")
-        .args(ffmpeg_args(src, out, preset))
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => LibraryError::FfmpegNotFound,
-            _ => io_err(src)(error),
-        })?;
-    if output.status.success() {
-        return Ok(());
+    match process::run("ffmpeg", &ffmpeg_args(src, out, preset)).await {
+        Ok(_) => Ok(()),
+        Err(ToolError::NotFound(_)) => Err(LibraryError::FfmpegNotFound),
+        Err(ToolError::Failed { reason, .. }) => Err(LibraryError::Ffmpeg {
+            path: src.to_path_buf(),
+            message: reason,
+        }),
+        Err(ToolError::Io { source, .. }) => Err(io_err(src)(source)),
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let message = stderr
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("ffmpeg stopped without saying why")
-        .to_owned();
-    Err(LibraryError::Ffmpeg {
-        path: src.to_path_buf(),
-        message,
-    })
 }
 
 /// Copy `src`'s tags (and its pictures when the preset keeps the cover) onto `out`, mapped to the
@@ -192,6 +201,8 @@ pub fn output_size(src: &Path, preset: Option<Preset>) -> Result<OutputSize, Lib
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use sdl_core::{Format, Quality};
 
     use super::*;
@@ -348,14 +359,32 @@ mod tests {
         let dest = dir.path().join("out/Song.mp3");
         std::fs::create_dir_all(dir.path().join("out"))?;
         std::fs::write(&dest, b"mine")?;
-        let error = convert_file(&src, &dest, preset(Format::Mp3, Quality::High, true)).await;
-        assert!(matches!(
-            error,
-            Err(LibraryError::Io { source, .. }) if source.kind() == std::io::ErrorKind::AlreadyExists
-        ));
+        let result = convert_file(&src, &dest, preset(Format::Mp3, Quality::High, true)).await?;
+        assert_eq!(result, Converted::Existed);
         assert_eq!(std::fs::read(&dest)?, b"mine");
         assert_eq!(std::fs::read_dir(dir.path().join("out"))?.count(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn a_full_destination_is_recognised_by_kind_or_by_ffmpegs_words() {
+        let io = |kind: std::io::ErrorKind| LibraryError::Io {
+            path: PathBuf::from("x"),
+            source: kind.into(),
+        };
+        let ffmpeg = |message: &str| LibraryError::Ffmpeg {
+            path: PathBuf::from("x"),
+            message: message.to_owned(),
+        };
+        assert!(is_full(&io(std::io::ErrorKind::StorageFull)));
+        assert!(is_full(&io(std::io::ErrorKind::QuotaExceeded)));
+        assert!(is_full(&ffmpeg(
+            "Error writing trailer: No space left on device"
+        )));
+        assert!(!is_full(&io(std::io::ErrorKind::PermissionDenied)));
+        assert!(!is_full(&ffmpeg(
+            "Invalid data found when processing input"
+        )));
     }
 
     #[tokio::test]

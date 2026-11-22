@@ -1,11 +1,11 @@
 //! Clean up and eject (F10): remove the macOS items a Mac leaves on a device, then unmount it.
 
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use sdl_core::Device;
-use tokio::process::Command;
+use sdl_core::process::{self, ToolError};
 use walkdir::WalkDir;
 
 use crate::DevicesError;
@@ -26,7 +26,7 @@ const APPLE_DOUBLE: [u8; 4] = [0x00, 0x05, 0x16, 0x07];
 /// remove `.Spotlight-V100`, `.Trashes`, `.fseventsd` and `.TemporaryItems` from the device root
 /// and every `.DS_Store`; remove a `._X` file only when `X` is in `written` (a file this run
 /// wrote, or a folder it made: [`crate::DevicePlan::written`]) and the file starts with the `AppleDouble` signature (bytes `00 05 16 07`); then
-/// `diskutil unmount <mount point>` (`tokio::process::Command`). Removes nothing else. A clean-up
+/// `diskutil unmount <mount point>` (`sdl_core::process::run`). Removes nothing else. A clean-up
 /// that fails stops before the unmount, so the owner is told before anything else happens.
 ///
 /// # Errors
@@ -40,29 +40,20 @@ pub async fn clean_up_and_eject(device: &Device, written: &[PathBuf]) -> Result<
         .map_err(|error| {
             DevicesError::Library(sdl_library::LibraryError::Task(error.to_string()))
         })??;
-    let output = Command::new("diskutil")
-        .arg("unmount")
-        .arg(&device.mount_point)
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
+    let args = [
+        OsString::from("unmount"),
+        device.mount_point.as_os_str().to_owned(),
+    ];
+    process::run("diskutil", &args)
         .await
+        .map(drop)
         .map_err(|error| DevicesError::Diskutil {
             action: "unmount",
-            message: error.to_string(),
-        })?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let said = if output.stderr.is_empty() {
-        &output.stdout
-    } else {
-        &output.stderr
-    };
-    Err(DevicesError::Diskutil {
-        action: "unmount",
-        message: String::from_utf8_lossy(said).trim().to_owned(),
-    })
+            message: match error {
+                ToolError::Failed { reason, .. } => reason,
+                other => other.to_string(),
+            },
+        })
 }
 
 /// The file-system half of the clean-up, on the tree under `root`.

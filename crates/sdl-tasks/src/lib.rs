@@ -18,6 +18,7 @@ mod failure;
 mod progress;
 mod runner;
 mod tasks;
+pub mod tools;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

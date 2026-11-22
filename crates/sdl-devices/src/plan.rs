@@ -1,23 +1,19 @@
 //! Planning a device sync (F10): what would be written, how big it is, whether it fits, and where
 //! a file that comes from a device lands in the library.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use sdl_core::format::is_audio_file;
 use sdl_core::place::{component, device_music_dir};
-use sdl_core::playlist::PLAYLIST_EXTENSION;
-use sdl_core::{
-    Device, DeviceChoice, Direction, Format, Library, PlanSummary, Playlist, Selection,
-    library_files,
-};
+use sdl_core::{Device, DeviceChoice, Direction, Format, Library, PlanSummary};
 use sdl_library::converter::output_size;
+use sdl_library::selection;
 use sdl_library::{LibraryError, tags};
 use walkdir::WalkDir;
 
 use crate::DevicesError;
-use crate::paths::{existing_in_any_format, has_dot_name, io_err, stays_inside};
+use crate::paths::{existing_in_any_format, stays_inside};
 
 /// Folder of the library that holds files whose tags do not say where they belong.
 const UNSORTED: &str = "Unsorted";
@@ -60,8 +56,9 @@ impl DevicePlan {
 /// `library`, which the caller resolved from `choice.library` (F12). Songs on the device have no
 /// library level: `<device>/Music/<artist>/<album>/<file>`.
 ///
-/// - **To device**: each song of the chosen selection (`choice.what`: whole library
-///   via `sdl_core::library_files`, and each ticked playlist's songs that exist) maps to
+/// - **To device**: each song of the chosen selection (`choice.what`, listed by
+///   `sdl_library::selection::songs`: the whole library, then each ticked playlist's songs that
+///   exist) maps to
 ///   `<device>/Music/<same relative path>`, with the preset's extension when a format is chosen
 ///   and the file is not already in it; a song is skipped when present there in any format.
 ///   Sizes come from `sdl_library::converter::output_size`: exact for copies, estimated for
@@ -155,14 +152,12 @@ fn plan_to_device(
     let preset = choice.preset();
     let dest_root = device_music_dir(&device.mount_point);
     let (mut jobs, mut already, mut bytes, mut estimated) = (Vec::new(), 0_usize, 0_u64, false);
-    for src in selected_files(library, &choice.what)? {
-        let Ok(relative) = src.strip_prefix(library.root()) else {
-            continue;
-        };
+    for song in selection::songs(library, &choice.what)? {
+        let (src, relative) = (song.file, song.relative);
         let converts = preset.is_some_and(|preset| !preset.format.holds(&src));
         let relative = match preset {
             Some(preset) if converts => relative.with_extension(preset.format.extension()),
-            _ => relative.to_path_buf(),
+            _ => relative,
         };
         let dest = dest_root.join(relative);
         if existing_in_any_format(&dest)?.is_some() {
@@ -175,40 +170,6 @@ fn plan_to_device(
         jobs.push((src, dest));
     }
     Ok((jobs, already, bytes, estimated))
-}
-
-/// The library files the selection names: every library file when the whole library is ticked,
-/// and each ticked playlist's songs that exist (a line is followed in any format, since review can
-/// land a song with another extension). Sorted, each once, never a dot name.
-fn selected_files(library: &Library, what: &Selection) -> Result<BTreeSet<PathBuf>, DevicesError> {
-    let music_root = library.root();
-    let mut files = BTreeSet::new();
-    if what.whole_library {
-        files.extend(library_files(library).map_err(io_err(music_root))?);
-    }
-    for stem in &what.playlists {
-        if !stays_inside(Path::new(stem)) {
-            continue;
-        }
-        let path = music_root.join(format!("{stem}.{PLAYLIST_EXTENSION}"));
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(io_err(&path)(error)),
-        };
-        for entry in Playlist::parse(&text, stem).entries {
-            if stays_inside(&entry)
-                && let Some(found) = existing_in_any_format(&music_root.join(&entry))?
-            {
-                files.insert(found);
-            }
-        }
-    }
-    files.retain(|file| {
-        file.strip_prefix(music_root)
-            .is_ok_and(|relative| !has_dot_name(relative))
-    });
-    Ok(files)
 }
 
 fn plan_from_device(
@@ -312,7 +273,7 @@ fn safe_part(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use sdl_core::{Format, Quality};
+    use sdl_core::{Format, Quality, Selection};
 
     use super::*;
     use crate::testing::lib;

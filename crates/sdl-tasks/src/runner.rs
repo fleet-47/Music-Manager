@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use sdl_core::StoreError;
 use sdl_core::place::remove_tmp_dir_if_empty;
+use sdl_core::run::CancellationToken;
 use sdl_core::{
     Config, ConvertChoice, Device, DeviceChoice, ErrorInfo, Event, EventKind, EventSender,
-    HeldSong, LastRun, Library, LibraryId, Never, ReviewList, RunOutcome, State, StopFlag, TaskId,
+    HeldSong, LastRun, Library, LibraryId, Never, ReviewList, RunOutcome, State, TaskId,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
@@ -93,7 +94,7 @@ impl Active {
     }
 }
 
-/// What a task body needs: its tagged event sender, the config, a stop flag, and the only ways to
+/// What a task body needs: its tagged event sender, the config, a stop token, and the only ways to
 /// change `state.toml` and `review.toml`. Task bodies are written against this; the UI never sees
 /// it.
 #[derive(Debug, Clone)]
@@ -102,8 +103,8 @@ pub(crate) struct TaskContext {
     pub events: EventSender,
     /// The config.
     pub config: Arc<Config>,
-    /// Set by [`Runner::stop`]; Convert and Sync device check it between files.
-    pub stop: StopFlag,
+    /// Cancelled by [`Runner::stop`]; Convert and Sync device check it between files.
+    pub stop: CancellationToken,
     state: SharedState,
     state_path: Arc<PathBuf>,
     review: SharedReview,
@@ -529,7 +530,7 @@ impl Runner {
 
     /// Stop a running task from outside. A task whose run has not started (still at its form) is
     /// cancelled: it ends with `Stopped` and its last-run line stays as it was. Once the run has
-    /// started, Convert and Sync device are asked to stop ([`StopFlag`]) and end themselves after
+    /// started, Convert and Sync device are asked to stop ([`CancellationToken`]) and end themselves after
     /// the file in hand; the others are aborted (`JoinHandle::abort`; children die through
     /// `kill_on_drop`) and their last-run line is written here as `stopped after N of M`. `false`
     /// when the task was not running.
@@ -550,7 +551,7 @@ impl Runner {
             }
         }
         if matches!(task, TaskId::Convert | TaskId::SyncDevice) {
-            running.context.stop.request();
+            running.context.stop.cancel();
             return true;
         }
         let Some(context) = self.abort(task).await else {
@@ -610,7 +611,7 @@ impl Runner {
         TaskContext {
             events: EventSender::new(task, self.events.clone()),
             config: Arc::clone(&self.config),
-            stop: StopFlag::new(),
+            stop: CancellationToken::new(),
             state: Arc::clone(&self.state),
             state_path: Arc::clone(&self.state_path),
             review: Arc::clone(&self.review),
@@ -745,7 +746,7 @@ mod tests {
         let (mut runner, mut rx) = runner(dir.path());
         runner.spawn(TaskId::Convert, |context, _commands| async move {
             context.events.send(EventKind::Started);
-            while !context.stop.is_requested() {
+            while !context.stop.is_cancelled() {
                 tokio::task::yield_now().await;
             }
             context.conclude(Ok(Flow::Stopped {

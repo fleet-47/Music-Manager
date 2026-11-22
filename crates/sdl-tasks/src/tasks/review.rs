@@ -4,12 +4,11 @@
 //! run: "never" choices are settled first (they need no download), then each chosen song goes
 //! through intake from its download step and leaves the review list the moment it lands.
 
-use futures::StreamExt;
-use futures::stream;
+use sdl_core::run::{Outcome, Run};
 use sdl_core::{Attention, EventKind, HeldSong, Library, Place};
 
 use crate::conversation::{Answered, Answers, Opened, Resolution, ReviewChoice, Step};
-use crate::progress::{Outcome, drive, summary_line};
+use crate::progress::summary_line;
 use crate::tasks::intake::{Intake, Listed, Route};
 use crate::{Flow, TaskContext, TaskError};
 use sdl_core::words::thousands;
@@ -149,8 +148,14 @@ impl Step for Review<'_> {
         for (song, route) in &jobs {
             pending.push(settle(context, &intake, song, route));
         }
-        let outcomes = stream::iter(pending).buffer_unordered(context.config.download_jobs.get());
-        let tally = drive(outcomes, total, &context.events).await?;
+        let tally = Run {
+            limit: context.config.download_jobs,
+            events: &context.events,
+            stop: &context.stop,
+            settled: Vec::new(),
+        }
+        .drive(pending)
+        .await?;
         Ok(Flow::done(summary_line(&tally), &tally.counts()))
     }
 }

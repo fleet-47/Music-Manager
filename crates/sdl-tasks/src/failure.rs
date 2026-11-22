@@ -59,6 +59,9 @@ pub(crate) fn error_info(error: &TaskError) -> ErrorInfo {
         TaskError::Devices(DevicesError::Gone { .. }) => {
             "Plug the device back in and run Sync device again. The files already copied stay."
         }
+        TaskError::Library(LibraryError::Full { .. }) => {
+            "Free some space there or pick fewer songs, then try again. The files already written stay."
+        }
         TaskError::Library(LibraryError::Ffmpeg { .. }) => {
             "Check that the file plays, then try again."
         }

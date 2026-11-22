@@ -16,3 +16,8 @@ Tasks waiting on a condition. Each names when it runs.
 - **When:** after the first real device sync shows the behaviour on the Disc.
 - **What:** raise upstream (zmd22/diskos-disco) that importing a changed `.m3u8` creates "<name> (2)" instead of updating the playlist, and ask for an update-in-place option.
 - **Why:** every sync that changes a playlist leaves an extra copy on the Disc, which has to be deleted there by hand.
+
+## Reassess the device format options
+- **When:** after the shared-helpers build has landed and Yazid has run a device sync using the "Format on device" choice (As is, MP3, M4A).
+- **What:** decide with Yazid whether more is wanted (other formats, another place for the option). A new format also changes what "already present" means (F7), so it needs a spec line first.
+- **Why:** Yazid missed the option in his first test (2026-11-22); after the build, formats sit in one table that Sync device and Convert both read, so a change is small.

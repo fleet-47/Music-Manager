@@ -1,17 +1,16 @@
 //! `YouTube` Music matching (`innertube-rs`), link listing and downloading (the `yt-dlp` binary,
-//! run directly with `tokio::process::Command`).
+//! run through `sdl_core::process`).
 //!
 //! - [`matching`] (F3): a wanted song against `YouTube` Music, returning a match or the candidates
 //!   held for review.
 //! - [`download`] (F3): a match's audio as Opus, or a link's own audio as served.
 //! - [`link`] (F5): what a pasted link contains, as wanted songs.
 //!
-//! `ytdlp` is the one place the `yt-dlp` binary is run.
+//! `yt-dlp` is run through `sdl_core::process::run`.
 
 mod download;
 mod link;
 mod matching;
-mod ytdlp;
 
 pub use download::{Downloaded, download_opus, download_own_audio};
 pub use link::{LinkItem, LinkListing, PlaylistInfo, list_link, read_item};
@@ -35,4 +34,26 @@ pub enum YoutubeError {
     /// File system or process failure.
     #[error("file or process error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl From<sdl_core::process::ToolError> for YoutubeError {
+    fn from(error: sdl_core::process::ToolError) -> Self {
+        use sdl_core::process::ToolError;
+        match error {
+            ToolError::NotFound(_) => Self::YtDlpNotFound,
+            ToolError::Failed { reason, .. } => Self::YtDlp(reason),
+            ToolError::Io { source, .. } => Self::Io(source),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_tool_reads_as_not_on_path() {
+        let error = YoutubeError::from(sdl_core::process::ToolError::NotFound("yt-dlp".to_owned()));
+        assert_eq!(error.to_string(), "yt-dlp was not found on PATH");
+    }
 }

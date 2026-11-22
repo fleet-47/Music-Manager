@@ -1,11 +1,11 @@
-//! Motion (F1): popups and the running panel fade or slide in and out (150 ms at most), a
-//! function row flashes once when its task ends. Built on `tachyonfx`. Input is never held up:
+//! Motion (F1): popups fade in and out (150 ms at most), a function's card flashes once when its
+//! task ends. Built on `tachyonfx`. Input is never held up:
 //! an effect only recolours cells of the frame that is drawn anyway, and the loop reads input
 //! while it plays.
 //!
-//! Going out needs what is no longer drawn: the last frame is kept, and while a popup or the
-//! running panel goes, its cells from that frame are copied back over the new frame
-//! (`tachyonfx::blit_buffer_region`) and faded or slid out there. The app already acts on the
+//! Going out needs what is no longer drawn: the last frame is kept, and while a popup goes,
+//! its cells from that frame are copied back over the new frame
+//! (`tachyonfx::blit_buffer_region`) and faded out there. The app already acts on the
 //! screen underneath; the ghost only paints over it for at most 150 ms.
 
 use std::time::Duration;
@@ -13,7 +13,7 @@ use std::time::Duration;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Offset, Rect};
 use ratatui::style::Color;
-use tachyonfx::{Effect, EffectManager, Interpolation, Motion, blit_buffer_region, fx};
+use tachyonfx::{Effect, EffectManager, Interpolation, blit_buffer_region, fx};
 
 /// How long any effect plays, at most.
 pub const LENGTH_MS: u32 = 150;
@@ -24,9 +24,7 @@ enum Kind {
     /// A popup opening.
     #[default]
     Popup,
-    /// The running panel opening.
-    Running,
-    /// The row at this position flashing.
+    /// The card at this position flashing.
     Row(usize),
 }
 
@@ -37,9 +35,8 @@ pub struct Scene {
     pub popups: usize,
     /// The top popup's frame.
     pub top: Option<Rect>,
-    /// Where the running panel is, when it is shown.
-    pub running: Option<Rect>,
-    /// Function rows whose run just ended: their position among the rows and their rectangle.
+    /// Functions whose run just ended: their position among the functions and their card's
+    /// rectangle.
     pub ended: Vec<(usize, Rect)>,
 }
 
@@ -58,7 +55,6 @@ pub struct Effects {
     manager: EffectManager<Kind>,
     popups: usize,
     top: Option<Rect>,
-    running: Option<Rect>,
     /// The last frame as drawn, for a ghost to copy from.
     last: Option<Buffer>,
     ghosts: Vec<Ghost>,
@@ -71,20 +67,7 @@ impl Effects {
         self.manager.add_unique_effect(Kind::Popup, effect);
     }
 
-    /// The running panel slides in from the right over `area`.
-    fn running_in(&mut self, area: Rect, base: Color) {
-        let effect = fx::slide_in(
-            Motion::RightToLeft,
-            6,
-            0,
-            base,
-            (LENGTH_MS, Interpolation::QuadOut),
-        )
-        .with_area(area);
-        self.manager.add_unique_effect(Kind::Running, effect);
-    }
-
-    /// The row at `index` (position among the function rows) flashes once: it fades in from
+    /// The card at `index` (position among the functions) flashes once: it fades in from
     /// `base`.
     fn flash_row(&mut self, index: usize, area: Rect, base: Color) {
         let effect = fx::fade_from(base, base, (LENGTH_MS, Interpolation::SineOut)).with_area(area);
@@ -104,8 +87,7 @@ impl Effects {
     }
 
     /// Start the effects for what is new in `scene` against the frame before: a popup that
-    /// opened fades in and one that closed fades out, the running panel slides in when it
-    /// appears and out when it goes, each ended row flashes.
+    /// opened fades in and one that closed fades out, each ended function's card flashes.
     pub fn begin(&mut self, scene: &Scene, base: Color) {
         let timer = (LENGTH_MS, Interpolation::QuadOut);
         if scene.popups > self.popups
@@ -118,19 +100,11 @@ impl Effects {
         {
             self.ghost(gone, fx::fade_to(base, base, timer));
         }
-        match (scene.running, self.running) {
-            (Some(running), None) => self.running_in(running, base),
-            (None, Some(gone)) => {
-                self.ghost(gone, fx::slide_out(Motion::LeftToRight, 6, 0, base, timer));
-            }
-            _ => {}
-        }
         for (index, area) in &scene.ended {
             self.flash_row(*index, *area, base);
         }
         self.popups = scene.popups;
         self.top = scene.top;
-        self.running = scene.running;
     }
 
     /// Whether any effect is playing (what `App::animating` is set from, so the loop knows it
@@ -205,19 +179,6 @@ mod tests {
         assert!(!effects.is_running());
         // The same popup again starts nothing; the popup closing plays it out.
         effects.begin(&with_popup, Color::Black);
-        assert!(!effects.is_running());
-        effects.begin(&nothing, Color::Black);
-        assert!(effects.is_running());
-        effects.process(Duration::from_millis(200), &mut buf, area);
-        assert!(!effects.is_running());
-        let running = Scene {
-            running: Some(area),
-            ..Scene::default()
-        };
-        effects.begin(&running, Color::Black);
-        assert!(effects.is_running());
-        effects.process(Duration::from_millis(200), &mut buf, area);
-        effects.begin(&running, Color::Black);
         assert!(!effects.is_running());
         effects.begin(&nothing, Color::Black);
         assert!(effects.is_running());

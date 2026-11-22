@@ -347,7 +347,7 @@ impl App {
 
     /// Ask the owner to quit while a function runs; otherwise quit now.
     fn quit(&mut self) -> Vec<Cmd> {
-        if self.shows_running_panel() {
+        if self.anything_runs() {
             if !matches!(self.top(), Some(Popup::Confirm(Confirm::Quit, _))) {
                 self.popups.push(Popup::ask(Confirm::Quit));
             }

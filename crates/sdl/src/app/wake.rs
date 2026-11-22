@@ -15,8 +15,8 @@ pub const SPINNER: Duration = Duration::from_millis(100);
 /// How long until the next wake, or `None` when no timer is needed.
 ///
 /// * an effect is playing (`App::animating`): [`FRAME`];
-/// * a spinner is on screen: [`SPINNER`]. That is a running function while the running panel
-///   shows its detail (it spins beside the name; the same wake reads the time estimate again),
+/// * a spinner is on screen: [`SPINNER`]. That is a running function while cards
+///   show their detail (it spins beside the name; the same wake reads the time estimate again),
 ///   or a popup with a spinner (a form that is busy, a waiting popup);
 /// * otherwise `None`: no timer exists.
 ///
@@ -24,12 +24,12 @@ pub const SPINNER: Duration = Duration::from_millis(100);
 /// progress event arrives.
 #[must_use]
 pub fn next_wake(app: &App) -> Option<Duration> {
-    let detail = app.shows_detail() && app.shows_running_panel();
-    let spinner_in_panel = detail && app.running().any(super::FunctionView::shows_spinner);
+    let detail = app.shows_detail() && app.anything_runs();
+    let spinner_in_card = detail && app.running().any(super::FunctionView::shows_spinner);
     let spinner_in_popup = app.top().is_some_and(super::Popup::shows_spinner);
     [
         app.animating.then_some(FRAME),
-        (spinner_in_panel || spinner_in_popup).then_some(SPINNER),
+        (spinner_in_card || spinner_in_popup).then_some(SPINNER),
     ]
     .into_iter()
     .flatten()
