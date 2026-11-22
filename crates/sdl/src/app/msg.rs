@@ -35,6 +35,9 @@ pub enum Msg {
         /// Why the install failed, in plain words.
         error: Option<String>,
     },
+    /// The terminal hung up or the process was told to terminate: quit at once with everything
+    /// stopped, as quitting does (F11).
+    Signal,
     /// A timer the app asked for ([`crate::app::wake::next_wake`]) fired: spinners advance and the
     /// elapsed time is read again. Carries no state of its own.
     Wake,

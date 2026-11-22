@@ -7,15 +7,16 @@
 use std::io::ErrorKind;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::PoisonError;
+use std::sync::{Arc, PoisonError};
 
 use sdl_core::landing::{self, Landed, Landing};
 use sdl_core::place::device_music_dir;
 use sdl_core::playlist::PLAYLIST_EXTENSION;
-use sdl_core::run::{CancellationToken, Outcome, Run};
+use sdl_core::run::{CancellationToken, Outcome, Run, Tally};
 use sdl_core::{Attention, Counts, Direction, EventKind, EventSender};
 use sdl_library::converter::{Converted, convert_file, parallelism};
 use sdl_library::{LibraryError, playlists};
+use tokio::sync::RwLock;
 
 use crate::DevicesError;
 use crate::paths::{existing_in_any_format, stays_inside};
@@ -46,7 +47,7 @@ pub async fn run(
     stop: &CancellationToken,
 ) -> Result<Counts, DevicesError> {
     let to_device = plan.choice.direction == Direction::ToDevice;
-    let job = Job { plan };
+    let job = Job::new(plan);
     events.send(EventKind::Headline(job.headline()));
 
     // Copies go one at a time (one USB device); conversions as many as the Mac has cores.
@@ -65,14 +66,7 @@ pub async fn run(
     for (src, dest) in &plan.jobs {
         jobs.push(job.file(src, dest));
     }
-    let tally = Run {
-        limit,
-        events,
-        stop,
-        settled: Vec::new(),
-    }
-    .drive(jobs)
-    .await?;
+    let tally = job.drive(limit, events, stop, jobs).await?;
     let mut counts = tally.counts();
     if to_device && !stop.is_cancelled() {
         events.send(EventKind::Headline("Writing playlists".to_owned()));
@@ -84,6 +78,18 @@ pub async fn run(
 
 struct Job<'a> {
     plan: &'a DevicePlan,
+    /// Held (shared) by every copy on a blocking thread until it has ended, so the run can wait
+    /// for them: dropping a job does not stop its blocking thread.
+    copies: Arc<RwLock<()>>,
+}
+
+impl<'a> Job<'a> {
+    fn new(plan: &'a DevicePlan) -> Self {
+        Self {
+            plan,
+            copies: Arc::default(),
+        }
+    }
 }
 
 impl Job<'_> {
@@ -96,6 +102,31 @@ impl Job<'_> {
                 format!("Converting to {} for {name}", format.label())
             }
         }
+    }
+
+    /// Drive `jobs` (`sdl_core::run::Run`), then wait for every copy still on a blocking thread
+    /// (a job's error drops the jobs in hand, not their threads), so nothing writes once this
+    /// returns and every file that landed is in [`DevicePlan::written`].
+    async fn drive<F>(
+        &self,
+        limit: NonZeroUsize,
+        events: &EventSender,
+        stop: &CancellationToken,
+        jobs: Vec<F>,
+    ) -> Result<Tally, DevicesError>
+    where
+        F: Future<Output = Result<Outcome, DevicesError>>,
+    {
+        let driven = Run {
+            limit,
+            events,
+            stop,
+            settled: Vec::new(),
+        }
+        .drive(jobs)
+        .await;
+        drop(self.copies.write().await);
+        driven
     }
 
     /// Note `paths` as written by this run.
@@ -119,7 +150,8 @@ impl Job<'_> {
             return Ok(Outcome::Skipped);
         };
         let made = missing_folders(folder, &self.plan.device.mount_point);
-        if let Err(source) = tokio::fs::create_dir_all(folder).await {
+        // In this thread, not `tokio::fs`: a dropped job must leave nothing making folders.
+        if let Err(source) = std::fs::create_dir_all(folder) {
             return self.failed(src, dest, &source);
         }
         // Folders this run made are its own too: clean-up may remove the `._` file macOS leaves
@@ -139,16 +171,26 @@ impl Job<'_> {
                     Landing::Library
                 };
                 let (from, to) = (src.to_path_buf(), dest.to_path_buf());
-                let copied = tokio::task::spawn_blocking(move || copy_in(&from, &to, landing))
-                    .await
-                    .map_err(|error| {
-                        DevicesError::Library(LibraryError::Task(error.to_string()))
-                    })?;
-                match copied {
-                    Ok(Landed::Written) => {
-                        self.record([dest.to_path_buf()]);
-                        Ok(Outcome::Added)
+                let (copying, written) = (
+                    Arc::clone(&self.copies).read_owned().await,
+                    Arc::clone(&self.plan.written),
+                );
+                // Recorded on the thread itself: it lands even when this job is dropped.
+                let copied = tokio::task::spawn_blocking(move || {
+                    let landed = copy_in(&from, &to, landing);
+                    if matches!(landed, Ok(Landed::Written)) {
+                        written
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(to);
                     }
+                    drop(copying);
+                    landed
+                })
+                .await
+                .map_err(|error| DevicesError::Library(LibraryError::Task(error.to_string())))?;
+                match copied {
+                    Ok(Landed::Written) => Ok(Outcome::Added),
                     Ok(Landed::Existed) => Ok(Outcome::Skipped),
                     Err(source) => self.failed(src, dest, &source),
                 }
@@ -212,14 +254,15 @@ impl Job<'_> {
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let artist = if to_device {
-            src.parent()
-                .and_then(Path::parent)
-                .and_then(Path::file_name)
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        } else {
-            String::new()
+        // The artist folder of an `<artist>/<album>/<file>` place; a file at another depth (F7)
+        // has none.
+        let artist = match src.strip_prefix(self.plan.library.root()) {
+            Ok(relative) if to_device && relative.components().count() == 3 => relative
+                .components()
+                .next()
+                .map(|name| name.as_os_str().to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            _ => String::new(),
         };
         Ok(Outcome::Failed(Attention::failed(
             title,
@@ -527,7 +570,7 @@ mod tests {
         let dev = tempfile::tempdir()?;
         touch(&root.path().join("A/Al/one.opus"), b"one")?;
         let plan = plan(&lib(root.path()), &device(dev.path()), &choice(&[])).await?;
-        let job = Job { plan: &plan };
+        let job = Job::new(&plan);
         let (src, dest) = (
             root.path().join("A/Al/one.opus"),
             dev.path().join("one.mp3"),
@@ -540,6 +583,113 @@ mod tests {
             "{full:?}"
         );
         assert_eq!(plan.written(), Vec::<PathBuf>::new());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_copy_in_hand_when_the_run_ends_on_an_error_lands_before_it_returns_and_is_recorded()
+    -> TestResult {
+        use futures::future::Either;
+        let root = tempfile::tempdir()?;
+        let dev = tempfile::tempdir()?;
+        // Already MP3, so with MP3 chosen it is copied as it is, on a blocking thread.
+        let big = vec![7_u8; 67_108_864];
+        touch(&root.path().join("A/Al/big.mp3"), &big)?;
+        let choice = DeviceChoice {
+            format: Some(sdl_core::Format::Mp3),
+            ..choice(&[])
+        };
+        let plan = plan(&lib(root.path()), &device(dev.path()), &choice).await?;
+        let (src, dest) = plan.jobs.first().cloned().ok_or("no job")?;
+        let folder = dest.parent().ok_or("no folder")?.to_path_buf();
+        let job = Job::new(&plan);
+        // A conversion that finds the device full, once the copy is under way.
+        let full = async {
+            while !dest.exists() && walk_names(&folder).iter().all(|name| !is_part(name)) {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            Err(DevicesError::Full {
+                device: "TESTDEV".into(),
+            })
+        };
+        let jobs = vec![Either::Left(job.file(&src, &dest)), Either::Right(full)];
+        let (events, _rx) = sender();
+        let limit = NonZeroUsize::new(2).ok_or("zero")?;
+        let ended = job
+            .drive(limit, &events, &CancellationToken::new(), jobs)
+            .await;
+        assert!(matches!(ended, Err(DevicesError::Full { .. })), "{ended:?}");
+        let parts: Vec<_> = walk_names(&folder)
+            .into_iter()
+            .filter(|name| is_part(name))
+            .collect();
+        assert!(
+            parts.is_empty(),
+            "still writing after the run returned: {parts:?}"
+        );
+        assert_eq!(std::fs::read(&dest)?.len(), big.len());
+        assert!(plan.written().contains(&dest), "{:?}", plan.written());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_file_names_an_artist_only_from_an_artist_album_file_place() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let dev = tempfile::tempdir()?;
+        let plan = plan(&lib(root.path()), &device(dev.path()), &choice(&[])).await?;
+        let job = Job::new(&plan);
+        let why = std::io::Error::other("no");
+        let artist = |relative: &str| -> Result<String, Box<dyn std::error::Error>> {
+            match job.failed(&root.path().join(relative), dev.path(), &why)? {
+                Outcome::Failed(item) => Ok(item.artist),
+                other => Err(format!("{other:?}").into()),
+            }
+        };
+        assert_eq!(artist("A/Al/one.opus")?, "A");
+        assert_eq!(artist("Unsorted/Old/sub/two.mp3")?, "");
+        assert_eq!(artist("loose.opus")?, "");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_song_at_another_depth_goes_to_the_same_path_on_the_device_and_back() -> TestResult {
+        use crate::testing::mp3;
+        let root = tempfile::tempdir()?;
+        let dev = tempfile::tempdir()?;
+        let untagged = mp3(None, None, None);
+        touch(&root.path().join("Unsorted/Old/sub/x.mp3"), &untagged)?;
+        touch(&root.path().join("A/Al/one.opus"), b"one")?;
+        let device = device(dev.path());
+        let to = plan(&lib(root.path()), &device, &choice(&[])).await?;
+        let (events, _rx) = sender();
+        let report = run(&to, &events, &CancellationToken::new()).await?;
+        assert_eq!((report.added, report.failed), (2, 0));
+        let music = dev.path().join("Music");
+        assert_eq!(
+            std::fs::read(music.join("Unsorted/Old/sub/x.mp3"))?,
+            untagged
+        );
+        let again = plan(&lib(root.path()), &device, &choice(&[])).await?;
+        assert_eq!((again.summary().files, again.summary().already), (0, 2));
+        // Back from the device: the untagged file's place is `Unsorted/Music/...`, a new place.
+        let from = DeviceChoice {
+            direction: Direction::FromDevice,
+            from_folders: vec!["Music".into()],
+            ..DeviceChoice::default()
+        };
+        let back = plan(&lib(root.path()), &device, &from).await?;
+        let dests: Vec<_> = back.jobs.iter().map(|(_, dest)| dest.clone()).collect();
+        assert!(
+            dests.contains(&root.path().join("Unsorted/Music/Unsorted/Old/sub/x.mp3")),
+            "{dests:?}"
+        );
+        run(&back, &events, &CancellationToken::new()).await?;
+        let twice = plan(&lib(root.path()), &device, &from).await?;
+        assert_eq!(
+            twice.summary().files,
+            0,
+            "a second From device run copies nothing"
+        );
         Ok(())
     }
 

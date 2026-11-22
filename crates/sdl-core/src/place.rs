@@ -188,17 +188,17 @@ impl Place {
     }
 }
 
-/// The files of `library`: every `.opus`, `.mp3` and `.m4a` file exactly at
-/// `<library folder>/<folder>/<folder>/<file>`, skipping any folder whose name starts with a dot,
-/// sorted by path. Files elsewhere are not the app's. A missing library folder is an empty
-/// library.
+/// The files of `library` (F7): every `.opus`, `.mp3` and `.m4a` file under the library's folder
+/// at any depth, skipping any file or folder whose name starts with a dot, sorted by path.
+/// Symbolic links inside the library are not followed; the library's folder itself may be one. A
+/// missing library folder is an empty library.
 ///
 /// # Errors
 /// A folder that exists but cannot be read.
 pub fn library_files(library: &Library) -> std::io::Result<Vec<PathBuf>> {
+    // `follow_root_links` is on by default: a linked library folder is still walked.
     let walk = WalkDir::new(library.root())
-        .follow_links(true)
-        .max_depth(3)
+        .follow_links(false)
         .into_iter()
         .filter_entry(|entry| {
             entry.depth() == 0 || !entry.file_name().to_string_lossy().starts_with('.')
@@ -215,7 +215,7 @@ pub fn library_files(library: &Library) -> std::io::Result<Vec<PathBuf>> {
                 return Err(io);
             }
         };
-        if entry.depth() == 3 && entry.file_type().is_file() && is_audio_file(entry.path()) {
+        if entry.file_type().is_file() && is_audio_file(entry.path()) {
             files.push(entry.into_path());
         }
     }
@@ -420,40 +420,80 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_library_is_exactly_three_levels_and_skips_dot_folders() -> TestResult {
-        let root = tempfile::tempdir()?;
-        let write = |rel: &str| -> TestResult {
-            let path = root.path().join(rel);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(path, b"x")?;
-            Ok(())
-        };
-        write("A/Al/one.opus")?;
-        write("A/Al/two.MP3")?;
-        write("B/Singles/three.m4a")?;
-        write("A/Al/cover.jpg")?;
-        write("A/loose.opus")?;
-        write("loose.opus")?;
-        write("A/Al/deeper/four.opus")?;
-        write(".sdl-tmp/x/y.opus")?;
-        write("A/.hidden/five.opus")?;
-        write("Old/Spotify/Liked/six.mp3")?;
-        write("Liked Songs.m3u8")?;
-        let found: Vec<PathBuf> = library_files(&lib(root.path()))?
+    /// Write `b"x"` at `rel` under `root`, making its folders.
+    fn write_under(root: &Path, rel: &str) -> TestResult {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, b"x")?;
+        Ok(())
+    }
+
+    /// `library_files` of a library at `root`, relative to `root`.
+    fn found_under(root: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+        Ok(library_files(&lib(root))?
             .into_iter()
-            .filter_map(|path| path.strip_prefix(root.path()).ok().map(Path::to_path_buf))
-            .collect();
+            .filter_map(|path| path.strip_prefix(root).ok().map(Path::to_path_buf))
+            .collect())
+    }
+
+    #[test]
+    fn the_library_is_every_audio_file_at_any_depth_without_dot_names() -> TestResult {
+        let root = tempfile::tempdir()?;
+        for rel in [
+            "A/Al/one.opus",
+            "A/Al/two.MP3",
+            "B/Singles/three.m4a",
+            "A/Al/cover.jpg",
+            "A/loose.opus",
+            "loose.opus",
+            "A/Al/deeper/four.opus",
+            "Unsorted/Old/sub/untagged.mp3",
+            ".sdl-tmp/x/y.opus",
+            "A/.hidden/five.opus",
+            "A/Al/.six.opus",
+            ".seven.opus",
+            "Liked Songs.m3u8",
+        ] {
+            write_under(root.path(), rel)?;
+        }
         assert_eq!(
-            found,
-            ["A/Al/one.opus", "A/Al/two.MP3", "B/Singles/three.m4a"].map(PathBuf::from)
+            found_under(root.path())?,
+            [
+                "A/Al/deeper/four.opus",
+                "A/Al/one.opus",
+                "A/Al/two.MP3",
+                "A/loose.opus",
+                "B/Singles/three.m4a",
+                "Unsorted/Old/sub/untagged.mp3",
+                "loose.opus",
+            ]
+            .map(PathBuf::from)
         );
         assert_eq!(
             library_files(&lib(&root.path().join("missing")))?,
             Vec::<PathBuf>::new()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn links_inside_the_library_are_not_followed_but_a_linked_library_folder_is_walked()
+    -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let real = dir.path().join("real");
+        let elsewhere = dir.path().join("elsewhere");
+        write_under(&real, "A/Al/one.opus")?;
+        write_under(&elsewhere, "Al/two.opus")?;
+        write_under(&elsewhere, "three.opus")?;
+        std::os::unix::fs::symlink(&elsewhere, real.join("Linked"))?;
+        std::os::unix::fs::symlink(elsewhere.join("three.opus"), real.join("A/Al/three.opus"))?;
+        assert_eq!(found_under(&real)?, [PathBuf::from("A/Al/one.opus")]);
+        // The library's own folder may be a link: it is walked, its contents by their link path.
+        let linked_root = dir.path().join("Me");
+        std::os::unix::fs::symlink(&real, &linked_root)?;
+        assert_eq!(found_under(&linked_root)?, [PathBuf::from("A/Al/one.opus")]);
         Ok(())
     }
 

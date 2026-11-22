@@ -27,7 +27,9 @@ use ratatui::layout::Size;
 use sdl_core::{Config, ErrorInfo, EventReceiver, TaskId, channel};
 use sdl_tasks::Runner;
 use sdl_tasks::tools::{install_tools, missing_tools};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+use tokio::task::JoinHandle;
 
 use crate::app::wake::next_wake;
 use crate::app::{App, Clock, Cmd, Hits, MainTarget, Msg, Settings};
@@ -121,6 +123,12 @@ async fn event_loop(
     let (tools_tx, mut tools) = unbounded_channel::<Msg>();
     let (eject_tx, mut ejected): (_, UnboundedReceiver<Result<(), ErrorInfo>>) =
         unbounded_channel();
+    // The terminal closed or the process was told to end: the same path as quitting (F11), so
+    // every tool is stopped by its drop guard.
+    let mut hangup = signal(SignalKind::hangup())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    // The eject and the tools install the app started; quitting waits for them.
+    let mut outside: Vec<JoinHandle<()>> = Vec::new();
     let mut last_frame = Instant::now();
     let mut dirty = true;
 
@@ -154,15 +162,24 @@ async fn event_loop(
             }
             Some(result) = ejected.recv() => vec![Msg::Ejected(result)],
             Some(msg) = tools.recv() => vec![msg],
+            Some(()) = hangup.recv() => vec![Msg::Signal],
+            Some(()) = terminate.recv() => vec![Msg::Signal],
             () = timer(next_wake(&app)) => vec![Msg::Wake],
         };
         for msg in msgs {
             dirty = true;
             for cmd in app.update(msg, now()) {
                 if matches!(cmd, Cmd::Quit) {
+                    // A Convert or Sync device that was asked to stop finishes the file in hand
+                    // and saves its line; an eject or an install ends (F11).
+                    runner.wait_all().await;
+                    for handle in outside {
+                        let _ = handle.await;
+                    }
                     return Ok(());
                 }
-                run_cmd(&mut runner, cmd, &eject_tx, &tools_tx).await;
+                outside.retain(|handle| !handle.is_finished());
+                outside.extend(run_cmd(&mut runner, cmd, &eject_tx, &tools_tx).await);
             }
         }
         if app.quit {
@@ -222,13 +239,13 @@ fn draw(
     Ok(())
 }
 
-/// Run one command against the runner.
+/// Run one command against the runner; an eject or an install comes back as its task.
 async fn run_cmd(
     runner: &mut Runner,
     cmd: Cmd,
     eject: &tokio::sync::mpsc::UnboundedSender<Result<(), ErrorInfo>>,
     tools: &tokio::sync::mpsc::UnboundedSender<Msg>,
-) {
+) -> Option<JoinHandle<()>> {
     match cmd {
         Cmd::Start(task) => {
             // Starting a function that is already running changes nothing; the app does not ask.
@@ -244,21 +261,21 @@ async fn run_cmd(
         Cmd::Eject => {
             let future = runner.eject_device();
             let eject = eject.clone();
-            tokio::spawn(async move {
+            return Some(tokio::spawn(async move {
                 // The receiver is gone only when the app is closing.
                 let _ = eject.send(future.await);
-            });
+            }));
         }
         Cmd::InstallTools(names) => {
             let tools = tools.clone();
-            tokio::spawn(async move {
+            return Some(tokio::spawn(async move {
                 let error = install_tools(&names).await.err();
                 // The receiver is gone only when the app is closing.
                 let _ = tools.send(Msg::Tools {
                     missing: missing_tools(),
                     error,
                 });
-            });
+            }));
         }
         Cmd::Open(url) => {
             // A browser that cannot be opened is not worth an error popup here.
@@ -266,6 +283,7 @@ async fn run_cmd(
         }
         Cmd::Quit => {}
     }
+    None
 }
 
 #[cfg(test)]

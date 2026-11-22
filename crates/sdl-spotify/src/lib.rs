@@ -20,7 +20,7 @@ use rspotify::Token;
 use rspotify::clients::pagination::Paginator;
 use rspotify::clients::{BaseClient, OAuthClient};
 use rspotify::http::HttpError;
-use rspotify::model::{FullTrack, PlayableItem, PlaylistId};
+use rspotify::model::{FullTrack, PlayableItem, PlaylistId, PlaylistItem};
 use rspotify::prelude::Id;
 use rspotify::scopes;
 use rspotify::{AuthCodePkceSpotify, ClientError, ClientResult};
@@ -397,7 +397,12 @@ async fn wait_for_code(
                 let (stream, _) = accepted.map_err(SpotifyError::Listen)?;
                 readers.spawn(read_request_target(stream));
             }
-            Some(Ok(Some((mut stream, target)))) = readers.join_next() => {
+            // Matched whole, then unpacked: a pattern that fails to match would disable this
+            // branch for the rest of the `select!`, leaving a later redirect unread.
+            Some(joined) = readers.join_next() => {
+                let Ok(Some((mut stream, target))) = joined else {
+                    continue;
+                };
                 let url = format!("http://{LISTEN_ADDR}{target}");
                 // A failed reply below only means the tab went away; the outcome is already known.
                 if let Some(code) = client.parse_response_code(&url) {
@@ -516,6 +521,32 @@ fn to_song(track: &FullTrack) -> Option<WantedSong> {
     })
 }
 
+/// What one listed entry is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Entry {
+    /// A song (boxed: it is far larger than the other variants).
+    Song(Box<WantedSong>),
+    /// Not a song: a local file, an episode, or a removed song (no item).
+    NotASong,
+    /// Spotify sent it, but it could not be read as a track or an episode.
+    Unreadable,
+}
+
+impl From<Option<WantedSong>> for Entry {
+    fn from(song: Option<WantedSong>) -> Self {
+        song.map_or(Self::NotASong, |song| Self::Song(Box::new(song)))
+    }
+}
+
+/// What one playlist entry is.
+fn playlist_entry(entry: PlaylistItem) -> Entry {
+    match entry.item {
+        Some(PlayableItem::Track(track)) => to_song(&track).into(),
+        Some(PlayableItem::Unknown(_)) => Entry::Unreadable,
+        Some(PlayableItem::Episode(_)) | None => Entry::NotASong,
+    }
+}
+
 /// The songs of one ticked list, in list order (a song named twice appears twice).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedSongs {
@@ -523,15 +554,18 @@ pub struct ListedSongs {
     pub list: ListChoice,
     /// Its songs. Local files and episodes are left out.
     pub songs: Vec<WantedSong>,
+    /// Entries Spotify sent that could not be read as songs; they are not in `songs`.
+    pub unreadable: usize,
 }
 
-/// Drain one paginated listing into `tracks`, sending a headline per page received.
+/// Drain one paginated listing into `tracks`, counting the entries that could not be read in
+/// `unreadable`, and sending a headline per page received.
 async fn drain<T>(
     items: Paginator<'_, ClientResult<T>>,
     list: &ListChoice,
     events: &EventSender,
-    tracks: &mut Vec<WantedSong>,
-    to_row: impl Fn(T) -> Option<WantedSong>,
+    (tracks, unreadable): (&mut Vec<WantedSong>, &mut usize),
+    to_row: impl Fn(T) -> Entry,
 ) -> Result<(), SpotifyError> {
     let mut pages = items.try_chunks(PAGE);
     events.send(EventKind::Headline(format!(
@@ -545,7 +579,13 @@ async fn drain<T>(
             Ok(None) => break,
             Err(error) => return Err(classify(error.1).await),
         };
-        tracks.extend(page.into_iter().filter_map(&to_row));
+        for row in page.into_iter().map(&to_row) {
+            match row {
+                Entry::Song(song) => tracks.push(*song),
+                Entry::NotASong => {}
+                Entry::Unreadable => *unreadable = unreadable.saturating_add(1),
+            }
+        }
         events.send(EventKind::Headline(format!(
             "Listing {} ({} so far)",
             list.name,
@@ -570,13 +610,14 @@ pub async fn list_songs(
     let mut listed = Vec::with_capacity(chosen.len());
     for list in chosen {
         let mut songs = Vec::new();
+        let mut unreadable = 0;
         if list.id == LIKED_SONGS_ID {
             drain(
                 client.current_user_saved_tracks(None),
                 list,
                 events,
-                &mut songs,
-                |saved| to_song(&saved.track),
+                (&mut songs, &mut unreadable),
+                |saved| to_song(&saved.track).into(),
             )
             .await?;
         } else {
@@ -586,17 +627,15 @@ pub async fn list_songs(
                 client.playlist_items(id, None, None),
                 list,
                 events,
-                &mut songs,
-                |entry| match entry.item {
-                    Some(PlayableItem::Track(track)) => to_song(&track),
-                    _ => None,
-                },
+                (&mut songs, &mut unreadable),
+                playlist_entry,
             )
             .await?;
         }
         listed.push(ListedSongs {
             list: list.clone(),
             songs,
+            unreadable,
         });
     }
     Ok(listed)
@@ -788,6 +827,48 @@ mod tests {
     #[test]
     fn a_refusal_is_a_400_or_401_from_the_token_call_only() {
         assert!(!is_refusal(&ClientError::InvalidToken));
+    }
+
+    #[test]
+    fn only_an_entry_that_cannot_be_read_counts_as_unreadable() {
+        let entry = |item| {
+            playlist_entry(PlaylistItem {
+                item,
+                ..PlaylistItem::default()
+            })
+        };
+        let unreadable = PlayableItem::Unknown(serde_json::json!({"name": "no external_ids"}));
+        assert_eq!(entry(Some(unreadable)), Entry::Unreadable);
+        assert_eq!(entry(None), Entry::NotASong, "a removed song");
+    }
+
+    #[tokio::test]
+    async fn a_connection_closed_empty_does_not_hide_the_redirect_behind_it() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (client, _problem) = new_client("client", Arc::new(Memory::default()));
+        let state = client.get_oauth().state.clone();
+        // Both connections wait in the backlog before the listener runs; the first closes with no
+        // request, the second carries the redirect a moment later.
+        let empty = TcpStream::connect(addr).await?;
+        let mut real = TcpStream::connect(addr).await?;
+        let browser = async move {
+            drop(empty);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let request = format!("GET /?code=the-code&state={state} HTTP/1.1\r\n\r\n");
+            real.write_all(request.as_bytes()).await?;
+            let mut reply = Vec::new();
+            real.read_to_end(&mut reply).await?;
+            Ok::<_, std::io::Error>(reply)
+        };
+        let waited = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(wait_for_code(&listener, &client), browser)
+        })
+        .await;
+        let (code, reply) = waited.map_err(|_| "the redirect was never read")?;
+        assert_eq!(code?, "the-code");
+        assert!(String::from_utf8_lossy(&reply?).starts_with("HTTP/1.1 200 OK"));
+        Ok(())
     }
 
     #[test]

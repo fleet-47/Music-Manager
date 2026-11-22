@@ -298,7 +298,12 @@ mod tests {
         make_song(&root.join("A/Al/a.opus"), 1, "a")?;
         make_song(&root.join("A/Al/b.opus"), 1, "b")?;
         make_song(&root.join("A/Al/c.mp3"), 1, "c")?;
-        playlists::write(&lib(root), "Mix", "i", &[song("1", "a"), song("3", "c")])?;
+        playlists::write(
+            &lib(root),
+            "Mix",
+            "Mix.m3u8",
+            &[song("1", "a"), song("3", "c")],
+        )?;
         Ok(())
     }
 
@@ -388,7 +393,7 @@ mod tests {
         let me = root.path().join("Me");
         let out = tempfile::tempdir()?;
         make_song(&me.join("A/Al/Mr. Brightside.opus"), 1, "Mr. Brightside")?;
-        playlists::write(&lib(&me), "Dot", "i", &[song("1", "Mr. Brightside")])?;
+        playlists::write(&lib(&me), "Dot", "Dot.m3u8", &[song("1", "Mr. Brightside")])?;
         let what = Selection {
             whole_library: false,
             playlists: vec!["Dot".into()],

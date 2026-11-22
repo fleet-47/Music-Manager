@@ -75,19 +75,31 @@ pub(super) fn on_event(
             new,
             total,
             waiting,
+            unreadable,
         } => {
-            conv.plan(format!(
-                "{} new of {} · {} waiting in Review",
-                thousands(*new),
-                thousands(*total),
-                thousands(*waiting)
-            ));
+            conv.plan(summary(*new, *total, *waiting, *unreadable));
         }
         EventKind::Libraries(found) => {
             libraries::offer_others(form, &mut state.known, found, state.last.as_deref());
         }
         EventKind::Headline(text) => conv.headline(text),
         _ => {}
+    }
+}
+
+/// `N new of M · K waiting in Review`, then `· U entries could not be read` when Spotify sent
+/// entries that could not be read as songs.
+fn summary(new: usize, total: usize, waiting: usize, unreadable: usize) -> String {
+    let line = format!(
+        "{} new of {} · {} waiting in Review",
+        thousands(new),
+        thousands(total),
+        thousands(waiting)
+    );
+    match unreadable {
+        0 => line,
+        1 => format!("{line} · 1 entry could not be read"),
+        many => format!("{line} · {} entries could not be read", thousands(many)),
     }
 }
 
@@ -107,4 +119,25 @@ pub(super) fn answers(form: &Form, state: &State) -> Option<Answers> {
 /// A field changed: the library fields follow the toggle and the dropdown.
 pub(super) fn changed(form: &mut Form, state: &State) {
     libraries::follow(form, &state.known);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summary;
+
+    #[test]
+    fn the_summary_says_how_many_entries_could_not_be_read() {
+        assert_eq!(
+            summary(412, 2117, 3, 0),
+            "412 new of 2,117 · 3 waiting in Review"
+        );
+        assert_eq!(
+            summary(1, 5, 0, 1),
+            "1 new of 5 · 0 waiting in Review · 1 entry could not be read"
+        );
+        assert_eq!(
+            summary(0, 5, 0, 1200),
+            "0 new of 5 · 0 waiting in Review · 1,200 entries could not be read"
+        );
+    }
 }

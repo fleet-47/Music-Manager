@@ -399,8 +399,17 @@ fn draw_text(text: &Text, area: Rect, focused: bool, buf: &mut Buffer, style: &F
         Line::styled(text.placeholder.as_str(), style.secondary).render(row, buf);
     } else {
         let width = usize::from(row.width.saturating_sub(1));
+        // `visual_scroll` counts columns, so skip characters until that many columns are gone.
         let scroll = text.input.visual_scroll(width);
-        let shown: String = value.chars().skip(scroll).collect();
+        let mut skipped = 0_usize;
+        let shown: String = value
+            .chars()
+            .skip_while(|c| {
+                let before = skipped;
+                skipped = skipped.saturating_add(Span::raw(c.to_string()).width());
+                before < scroll
+            })
+            .collect();
         Line::styled(shown, style.body).render(row, buf);
     }
     if focused {
@@ -790,6 +799,22 @@ mod tests {
             hits.area_of(&Target::Primary),
             Some(rect) if rect.bottom() == area.bottom()
         ));
+    }
+
+    #[test]
+    fn a_long_text_of_wide_characters_shows_its_end() {
+        let mut form = Form::new("F").field(Field::text("name", "Name"));
+        let wide: String = ('\u{4e00}'..='\u{4e13}').collect();
+        form.set("name", crate::Value::Text(wide.clone()));
+        let area = Rect::new(0, 0, 20, 8);
+        let mut buf = Buffer::empty(area);
+        let _ = render(&form, area, &mut buf, &FormStyle::default());
+        let row: String = (0..area.width)
+            .filter_map(|x| buf.cell((x, 1)))
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        let shown: String = row.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(!shown.is_empty() && wide.ends_with(&shown), "{row:?}");
     }
 
     #[test]

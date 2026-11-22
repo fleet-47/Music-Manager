@@ -42,15 +42,15 @@ pub fn list(library: &Library) -> Result<Vec<String>, LibraryError> {
 
 /// Write the playlist file of a synced list, rewriting it whole: `<library folder>/<name>.m3u8` with
 /// one line per song of `songs`, in list order, at the song's place whether or not its file exists
-/// yet. An existing file's real extension is used, otherwise `.opus`. `id` is the file-name
-/// fallback when `name` is empty once made safe.
+/// yet. An existing file's real extension is used, otherwise `.opus`. `file` is the list's file
+/// name, from [`Playlist::file_names`].
 ///
 /// # Errors
 /// [`LibraryError::Io`] when a place cannot be checked or the file cannot be written.
 pub fn write(
     library: &Library,
     name: &str,
-    id: &str,
+    file: &str,
     songs: &[WantedSong],
 ) -> Result<(), LibraryError> {
     let mut entries = Vec::with_capacity(songs.len());
@@ -66,7 +66,7 @@ pub fn write(
         name: name.to_owned(),
         entries,
     };
-    let path = library.root().join(Playlist::file_name(name, id));
+    let path = library.root().join(file);
     landing::write_atomic(&path, playlist.render().as_bytes()).map_err(io_err(&path))
 }
 
@@ -185,7 +185,7 @@ mod tests {
         write(
             &lib(root.path()),
             "Road: trip",
-            "id1",
+            "Road trip.m3u8",
             &[song("1", "one"), song("2", "two")],
         )?;
         let text = std::fs::read_to_string(root.path().join("Road trip.m3u8"))?;
@@ -207,10 +207,10 @@ mod tests {
         write(
             &lib(root.path()),
             "One",
-            "i",
+            "One.m3u8",
             &[song("1", "a"), song("2", "b")],
         )?;
-        write(&lib(root.path()), "Two", "i", &[song("1", "a")])?;
+        write(&lib(root.path()), "Two", "Two.m3u8", &[song("1", "a")])?;
         let place = Place::of(&lib(root.path()), &song("1", "a"));
         correct_line(
             &lib(root.path()),
@@ -229,7 +229,12 @@ mod tests {
     fn a_list_written_under_its_id_is_corrected_by_its_file_name() -> TestResult {
         let root = tempfile::tempdir()?;
         let library = lib(root.path());
-        write(&library, "???", "37i9dQZF1DX", &[song("1", "a")])?;
+        write(
+            &library,
+            "???",
+            &Playlist::file_name("???", "37i9dQZF1DX"),
+            &[song("1", "a")],
+        )?;
         assert!(root.path().join("37i9dQZF1DX.m3u8").exists());
         let place = Place::of(&library, &song("1", "a"));
         correct_line(
@@ -250,7 +255,7 @@ mod tests {
         let sam = Library::at("Sam", &root.path().join("Sam"), false);
         std::fs::create_dir_all(mine.root())?;
         std::fs::create_dir_all(sam.root())?;
-        write(&sam, "Road trip", "id", &[song("1", "a")])?;
+        write(&sam, "Road trip", "Road trip.m3u8", &[song("1", "a")])?;
         assert_eq!(list(&sam)?, ["Road trip"]);
         assert_eq!(list(&mine)?, Vec::<String>::new());
         let text = std::fs::read_to_string(sam.root().join("Road trip.m3u8"))?;
@@ -266,7 +271,7 @@ mod tests {
         write(
             &lib(root.path()),
             "Mix",
-            "i",
+            "Mix.m3u8",
             &[song("1", "a"), song("2", "b"), song("3", "c")],
         )?;
         touch(&dest.join("A/Al/a.mp3"))?;
@@ -281,7 +286,7 @@ mod tests {
         write(
             &lib(root.path()),
             "Dot",
-            "i",
+            "Dot.m3u8",
             &[song("4", "Mr. Brightside")],
         )?;
         touch(&dest.join("A/Al/Mr. Brightside.mp3"))?;
@@ -313,7 +318,7 @@ mod tests {
         songs[1].artists = vec![long.clone()];
         songs[1].album = Some(long.clone());
         songs[2].artists = vec!["#1 Dads".into()];
-        write(&lib(root.path()), "Road trip", "id", &songs)?;
+        write(&lib(root.path()), "Road trip", "Road trip.m3u8", &songs)?;
         let bytes = std::fs::read(root.path().join("Road trip.m3u8"))?;
         assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "no BOM");
         assert!(
@@ -367,8 +372,9 @@ mod tests {
         // it names the playlist after the file, which `Playlist::file_name` made safe.
         let root = tempfile::tempdir()?;
         let name = "n".repeat(400);
-        write(&lib(root.path()), &name, "id", &[song("1", "one")])?;
-        let file = root.path().join(Playlist::file_name(&name, "id"));
+        let file_name = Playlist::file_name(&name, "id");
+        write(&lib(root.path()), &name, &file_name, &[song("1", "one")])?;
+        let file = root.path().join(&file_name);
         assert!(file.exists() && file.file_name().is_some_and(|f| f.len() <= 155));
         Ok(())
     }

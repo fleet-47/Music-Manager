@@ -97,6 +97,7 @@ impl App {
             }
             Some(Popup::Confirm(Confirm::Eject { device }, _)) => {
                 if yes {
+                    self.ejecting = Some(device.clone());
                     self.popups.push(Popup::Waiting(Waiting::Eject(device)));
                     vec![Cmd::Eject]
                 } else {

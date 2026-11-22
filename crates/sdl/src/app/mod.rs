@@ -152,6 +152,9 @@ pub struct App {
     pub missing_tools: Vec<String>,
     /// What the home screen says about the tools instead: installing, or how it ended.
     pub tools_note: Option<String>,
+    /// The device of an eject the app asked for that has not ended yet, so quitting asks first
+    /// and waits.
+    pub ejecting: Option<String>,
 }
 
 impl App {
@@ -175,6 +178,7 @@ impl App {
             fresh: Vec::new(),
             missing_tools: Vec::new(),
             tools_note: None,
+            ejecting: None,
         }
     }
 

@@ -8,7 +8,7 @@
 use std::sync::{Mutex, PoisonError};
 
 use sdl_core::run::{Outcome, Run};
-use sdl_core::{Attention, EventKind, Library, WantedSong};
+use sdl_core::{Attention, EventKind, Library, Playlist, WantedSong};
 use sdl_library::playlists;
 use sdl_youtube::{LinkItem, LinkListing, list_link, read_item};
 
@@ -24,12 +24,31 @@ pub(crate) struct DownloadLink<'a> {
     answered: Option<(Vec<String>, Recipient)>,
 }
 
-/// One link of the run, listed: its items, the playlist that lists them (for a playlist link), and
-/// where its first item stands among all the run's items.
+/// One link of the run, listed: its items, the playlist that lists them (for a playlist link, set
+/// by [`name_files`]), and where its first item stands among all the run's items.
 struct Listing {
     link: LinkListing,
     from: Vec<Listed>,
     first: usize,
+}
+
+/// Give each playlist link of the run its playlist file (F7: two lists never share a file), in the
+/// order the links were given: a playlist whose file name an earlier one has is written as
+/// `<List name> (<list ID>).m3u8`.
+fn name_files(listings: &mut [Listing]) {
+    let lists: Vec<(&str, &str)> = listings
+        .iter()
+        .filter_map(|listing| listing.link.playlist.as_ref())
+        .map(|info| (info.name.as_str(), info.id.as_str()))
+        .collect();
+    let mut files = Playlist::file_names(&lists).into_iter();
+    for listing in listings {
+        if let Some(info) = &listing.link.playlist
+            && let Some(file) = files.next()
+        {
+            listing.from = vec![Listed::new(&info.name, &file)];
+        }
+    }
 }
 
 impl<'a> DownloadLink<'a> {
@@ -138,14 +157,13 @@ impl Step for DownloadLink<'_> {
             context.events.send(EventKind::Headline(headline));
             match list_link(url.trim()).await.map_err(TaskError::from) {
                 Ok(link) => {
-                    let from = link
-                        .playlist
-                        .iter()
-                        .map(|info| Listed::new(&info.name, &info.id))
-                        .collect();
                     let first = items;
                     items = items.saturating_add(link.items.len());
-                    listings.push(Listing { link, from, first });
+                    listings.push(Listing {
+                        link,
+                        from: Vec::new(),
+                        first,
+                    });
                 }
                 Err(error) if ends_the_run(&error) => return Err(error),
                 Err(error) => {
@@ -159,6 +177,7 @@ impl Step for DownloadLink<'_> {
         {
             return Err(error);
         }
+        name_files(&mut listings);
         let library = recipient.make(&context.config)?;
         context.remember_friend(&library)?;
         let read: Mutex<Vec<(usize, WantedSong)>> = Mutex::default();
@@ -190,20 +209,59 @@ impl Step for DownloadLink<'_> {
         let mut songs = read.into_inner().unwrap_or_else(PoisonError::into_inner);
         songs.sort_by_key(|(at, _)| *at);
         for listing in &listings {
-            let Some(info) = &listing.link.playlist else {
+            let (Some(info), Some(listed)) = (&listing.link.playlist, listing.from.first()) else {
                 continue;
             };
             context
                 .events
                 .send(EventKind::Headline("Writing the playlist file".to_owned()));
             let end = listing.first.saturating_add(listing.link.items.len());
-            let listed: Vec<WantedSong> = songs
+            let songs_of: Vec<WantedSong> = songs
                 .iter()
                 .filter(|(at, _)| (listing.first..end).contains(at))
                 .map(|(_, song)| song.clone())
                 .collect();
-            playlists::write(&library, &info.name, &info.id, &listed)?;
+            playlists::write(&library, &info.name, &listed.file, &songs_of)?;
         }
         Ok(Flow::done(summary_line(&tally), &tally.counts()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sdl_youtube::PlaylistInfo;
+
+    use super::*;
+
+    fn listing(playlist: Option<(&str, &str)>) -> Listing {
+        Listing {
+            link: LinkListing {
+                playlist: playlist.map(|(name, id)| PlaylistInfo {
+                    name: name.into(),
+                    id: id.into(),
+                }),
+                items: Vec::new(),
+            },
+            from: Vec::new(),
+            first: 0,
+        }
+    }
+
+    #[test]
+    fn two_pasted_playlists_never_share_a_file() {
+        let mut listings = [
+            listing(Some(("Mix", "PL1"))),
+            listing(None),
+            listing(Some(("mix", "PL2"))),
+        ];
+        name_files(&mut listings);
+        let files: Vec<Vec<&str>> = listings
+            .iter()
+            .map(|l| l.from.iter().map(|listed| listed.file.as_str()).collect())
+            .collect();
+        assert_eq!(
+            files,
+            [vec!["Mix.m3u8"], Vec::new(), vec!["mix (PL2).m3u8"]]
+        );
     }
 }

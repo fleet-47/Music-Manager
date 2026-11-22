@@ -91,6 +91,12 @@ impl Conversation {
         self.starting = true;
     }
 
+    /// When `ignored`, the `Go` sent will not start the run (the planned device went before the
+    /// task read it): the form can be answered again.
+    pub(super) fn go_ignored_if(&mut self, ignored: bool) {
+        self.starting &= !ignored;
+    }
+
     /// A field changed: nothing shown is current any more.
     pub(super) fn changed(&mut self) {
         self.stale = true;

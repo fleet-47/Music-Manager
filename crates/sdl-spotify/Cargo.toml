@@ -16,3 +16,6 @@ futures.workspace = true
 httpdate.workspace = true
 url.workspace = true
 keyring.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

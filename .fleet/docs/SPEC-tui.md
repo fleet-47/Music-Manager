@@ -151,8 +151,10 @@ report it; do not substitute another crate or hand-write the capability.
   "Sync Spotify opens your browser to sign in" with Continue and Cancel) → form: a tick list of
   Liked Songs and each playlist the user owns, with song counts, remembered → Continue lists the
   ticked lists' songs and shows `N new of M · K waiting in Review` (K counts listed songs already
-  in the review list; nothing is searched before Start) → Start. Matching happens during the run,
-  shown in the card.
+  in the review list; nothing is searched before Start) → Start. When Spotify sends playlist
+  entries that cannot be read as songs, the line ends `· N entries could not be read` (added
+  2026-11-22; local files, episodes and removed songs are left out without a count). Matching
+  happens during the run, shown in the card.
 - **Sign-in is remembered.** `rspotify` 0.16 `AuthCodePkceSpotify`, scopes `user-library-read` and
   `playlist-read-private`, redirect `http://127.0.0.1:9900/`. The refresh token is kept in the
   macOS Keychain with the `keyring` crate (service `sdl`, account `spotify`) and nowhere else. The
@@ -220,9 +222,10 @@ report it; do not substitute another crate or hand-write the capability.
 - Every path component is made FAT-safe (`sanitize-filename`), has leading dots stripped, is capped
   at 150 bytes on a character boundary (Disco reads each playlist line into a 700-byte buffer), and
   falls back to the Spotify or video ID when it would be empty.
-- **The library** is every `.opus`, `.mp3` and `.m4a` file exactly at
-  `<music_root>/<folder>/<folder>/<file>`, skipping any folder whose name starts with a dot. This is
-  what "Whole library" means in F9 and F10; files elsewhere under `music_root` are not the app's.
+- **The library** is every `.opus`, `.mp3` and `.m4a` file under the library's folder at any depth,
+  skipping any file or folder whose name starts with a dot and not following symbolic links (ruled
+  2026-11-22, replaces "exactly three levels deep": files From device puts under `Unsorted` sit at
+  other depths). This is what "Whole library" means in F9 and F10.
 - A song is **present** when a file with its stem exists at that place with extension `.opus`,
   `.mp3` or `.m4a`. Present songs are skipped before any network call.
 - A **playlist** is a pointer file `<music_root>/<List name>.m3u8` (Liked Songs: `Liked Songs`):
@@ -230,7 +233,10 @@ report it; do not substitute another crate or hand-write the capability.
   relative to the playlist file with forward slashes. Every song of the list is written at its
   place whether or not its file exists yet; an existing file's real extension is used, otherwise
   `.opus`. A playlist file is rewritten whenever its list is synced, and a song's line is corrected
-  when review (F8) lands it with another extension. Disco skips a line it cannot resolve and
+  when review (F8) lands it with another extension. Two lists never share a file (ruled
+  2026-11-22): when a list's file name is already taken by another list, compared with case
+  ignored, it is written as `<List name> (<list ID>).m3u8`, and its held songs record that name.
+  Disco skips a line it cannot resolve and
   imports the rest. Confirm against Disco's reader
   (`ui/musicdb.c` in `/Users/worf/Enterprise/engineering/Snowsky-DAC/disco-v3.6.1/src`) that this
   form imports.
@@ -320,6 +326,14 @@ report it; do not substitute another crate or hand-write the capability.
   with it, H1);
   Convert and Sync device stop cooperatively (F9, F10). The last-run line says "stopped" with the
   count finished before the stop.
+- Only one copy of `sdl` runs at a time (ruled 2026-11-22): at start it takes a lock on
+  `~/.config/sdl/lock` (the standard library's file lock, which the system releases when the
+  process ends however it ends); a second copy prints `sdl is already running` and exits before
+  touching the terminal.
+- Leaving (ruled 2026-11-22): quitting while Convert or Sync device runs waits for the file in hand
+  and the saved "stopped" line before the app closes; quitting while an eject or a tools install is
+  in progress asks first and waits for it. A hang-up or terminate signal (the terminal closed)
+  takes the same path as quitting with everything stopped, so no tool is left running.
 - `state.toml` and `review.toml` each have one writer: the task layer's runner. Tasks send it
   changes; no task writes either file itself, so two tasks can never overwrite each other's
   changes. Each write is atomic (a temp file in the same folder, then a rename), so a crash never
@@ -379,7 +393,8 @@ fixes named under H2 and H5. Each helper's interface is written out at the top o
   it printed. `tokio::process::Command` with stdin closed, output piped, `.process_group(0)` and
   `.kill_on_drop(true)`, plus a guard that kills the whole group (`rustix`) when the run is dropped,
   so a stopped task leaves no helper behind. One error type: the tool was not found (naming it), it
-  failed (the last `ERROR:` line of stderr, else the last non-empty line, else the exit code), or
+  failed (the last `ERROR:` line of stderr, else the last non-empty line of stderr, else the last
+  non-empty line of stdout, which is where `diskutil` writes its reason, else the exit code), or
   an I/O error. Used for `yt-dlp`, `ffmpeg`, `diskutil` and `mise`; `sdl-youtube/src/ytdlp.rs` and
   the spawn code in the converter, `sdl-devices` and the binary go. The tools check (F13) looks
   along `PATH` with the `which` crate and moves out of the binary into `sdl-tasks`.
@@ -387,14 +402,15 @@ fixes named under H2 and H5. Each helper's interface is written out at the top o
   never replaces a file. Two modes: the library (`tempfile`'s `persist_noclobber`) and a device or
   Convert destination (check the place is free, then rename: FAT32 refuses the first, os error
   45). Both answer "written" or "already there"; "already there" is never an error. One function
-  writes a small text file whole (`atomic-write-file`: temp file, sync, rename), used for
+  writes a small text file whole (`tempfile`: a temp file in the same folder, synced, then renamed
+  over the place; a failed write leaves no temp file), used for
   `state.toml`, `review.toml` and every playlist file. Replaces `progress::place`, `copy_in` in
   `sdl-devices`, the landing inside `convert_file`, the body of `storage::save` and the three
   `std::fs::write` calls in `playlists`. **Fix:** in a device sync that converts, a song whose place
   is taken mid-run counts as skipped, not failed.
 - **H3. Selection** (`sdl-library::selection`): one function turns "Whole library and these
   playlists" into the library's files, each once: the whole library first (F7, walked with
-  `walkdir` at depth 3, dot names skipped), then each ticked playlist's songs in list order. A
+  `walkdir` at any depth, dot names skipped, links not followed), then each ticked playlist's songs in list order. A
   playlist line counts when it is three plain path components, none starting with a dot, and a
   file with its stem exists in any format. Used by the device plan and the Convert plan; both
   plans scan on a blocking thread.
@@ -416,7 +432,7 @@ fixes named under H2 and H5. Each helper's interface is written out at the top o
   `sdl/src/screen/effects.rs`; `RowView.last` and `LastView` in `sdl/src/app/rows.rs`;
   `App::shows_running_panel` is renamed for what it asks (whether a function runs).
 - **Order of work**, each step passing the gate by itself: removals; H1; H2; H3; H5; H4.
-- **New dependencies:** `atomic-write-file`, `tokio-util`, `which`; `walkdir` is also used by
+- **New dependencies:** `tokio-util`, `which`; `walkdir` is also used by
   `sdl-core`.
 - **Not:** no change to what any function does or shows beyond the two fixes; no new formats; no
   `ffmpeg-sidecar`, `process-wrap`, `cap-std` or playlist crate (looked at 2026-11-22: none kills a

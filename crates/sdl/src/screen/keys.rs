@@ -98,9 +98,11 @@ fn selected_runs(app: &App) -> bool {
     app.view(app.selected).is_some_and(FunctionView::is_running)
 }
 
-/// Enter runs the chosen function only when it is not already open or running.
+/// Enter runs the chosen function only when it is not already open or running, and Review only
+/// while a song waits.
 fn selected_can_run(app: &App) -> bool {
-    app.view(app.selected).is_some_and(|view| !view.is_open())
+    let nothing_waits = app.selected == sdl_core::TaskId::Review && app.settings.review.is_empty();
+    app.view(app.selected).is_some_and(|view| !view.is_open()) && !nothing_waits
 }
 
 /// Whether the scrolling popup on top has more than it shows.

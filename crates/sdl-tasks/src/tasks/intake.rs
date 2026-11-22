@@ -12,8 +12,8 @@ use std::sync::{Mutex, PoisonError};
 
 use sdl_core::run::Outcome;
 use sdl_core::{
-    Attention, EventKind, Format, HeldSong, Library, MatchOutcome, Place, Playlist, Preset,
-    SongSource, WantedSong,
+    Attention, EventKind, Format, HeldSong, Library, MatchOutcome, Place, Preset, SongSource,
+    WantedSong,
 };
 use sdl_library::LibraryError;
 use sdl_library::converter::convert_file;
@@ -38,8 +38,9 @@ pub(crate) enum Route {
 }
 
 /// A playlist that lists a song: its name and the file name it is written under
-/// ([`Playlist::file_name`], with the list's ID as fallback). Held songs keep both, so a line can
-/// be corrected in the file that was written, whatever the name became once made safe.
+/// ([`sdl_core::Playlist::file_names`]: the name made safe, the list's ID when it is empty, and the
+/// `<List name> (<list ID>)` form when another list of the run has that file). Held songs keep
+/// both, so a line can be corrected in the file that was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Listed {
     pub(crate) name: String,
@@ -47,11 +48,11 @@ pub(crate) struct Listed {
 }
 
 impl Listed {
-    /// The playlist `name` with Spotify (or link) list `id`.
-    pub(crate) fn new(name: &str, id: &str) -> Self {
+    /// The playlist `name`, written under `file` (from [`sdl_core::Playlist::file_names`]).
+    pub(crate) fn new(name: &str, file: &str) -> Self {
         Self {
             name: name.to_owned(),
-            file: Playlist::file_name(name, id),
+            file: file.to_owned(),
         }
     }
 
@@ -472,9 +473,10 @@ pub(crate) mod tests {
     #[test]
     fn a_held_song_keeps_the_file_names_its_playlists_were_written_under() -> TestResult {
         // A list whose name is empty once made safe is written under its ID (F7).
+        let files = sdl_core::Playlist::file_names(&[("???", "37i9dQZF1DX"), ("Road: trip", "p1")]);
         let listed = [
-            Listed::new("???", "37i9dQZF1DX"),
-            Listed::new("Road: trip", "p1"),
+            Listed::new("???", files.first().ok_or("no file")?),
+            Listed::new("Road: trip", files.get(1).ok_or("no file")?),
         ];
         assert_eq!(listed[0].file, "37i9dQZF1DX.m3u8");
         assert_eq!(listed[1].file, "Road trip.m3u8");
@@ -494,7 +496,7 @@ pub(crate) mod tests {
         sdl_library::playlists::write(
             &library,
             "???",
-            "37i9dQZF1DX",
+            &listed[0].file,
             std::slice::from_ref(&wanted),
         )?;
         let files: Vec<String> = Listed::of_held(&held).into_iter().map(|l| l.file).collect();

@@ -7,9 +7,10 @@
 
 use std::collections::HashMap;
 
+use sdl_core::event::LIKED_SONGS_ID;
 use sdl_core::run::Run;
 use sdl_core::{
-    Attention, EventKind, Library, ListChoice, ReviewList, SignInState, State, WantedSong,
+    Attention, EventKind, Library, ListChoice, Playlist, ReviewList, SignInState, State, WantedSong,
 };
 use sdl_library::playlists;
 use sdl_spotify::{ListedSongs, Session, list_choices, list_songs, resume, sign_in_browser};
@@ -31,6 +32,35 @@ pub(crate) struct SyncSpotify<'a> {
     chosen: Vec<ListChoice>,
     /// Whose library the last answer chose.
     recipient: Recipient,
+    /// The playlist file of every offered list, by list ID ([`list_files`]).
+    files: HashMap<String, String>,
+}
+
+/// The playlist file of every list offered (F7: two lists never share a file), by list ID. Worked
+/// out over every offered list, not only the ticked ones, with Liked Songs first and then by list
+/// ID, so a list keeps its file whichever lists are ticked with it and however Spotify orders
+/// them. A list's file changes only when a list with the same file name is made, renamed or
+/// deleted in the account.
+fn list_files(offered: &[ListChoice]) -> HashMap<String, String> {
+    let mut order: Vec<&ListChoice> = offered.iter().collect();
+    order.sort_by_key(|list| (list.id != LIKED_SONGS_ID, list.id.as_str()));
+    let lists: Vec<(&str, &str)> = order
+        .iter()
+        .map(|list| (list.name.as_str(), list.id.as_str()))
+        .collect();
+    order
+        .iter()
+        .map(|list| list.id.clone())
+        .zip(Playlist::file_names(&lists))
+        .collect()
+}
+
+/// The file `list` is written under: its entry in `files`, else its plain file name.
+fn file_of(files: &HashMap<String, String>, list: &ListChoice) -> String {
+    files
+        .get(&list.id)
+        .cloned()
+        .unwrap_or_else(|| Playlist::file_name(&list.name, &list.id))
 }
 
 impl<'a> SyncSpotify<'a> {
@@ -42,6 +72,7 @@ impl<'a> SyncSpotify<'a> {
             listed: HashMap::new(),
             chosen: Vec::new(),
             recipient: Recipient::Me,
+            files: HashMap::new(),
         }
     }
 
@@ -81,6 +112,7 @@ impl<'a> SyncSpotify<'a> {
         events.send(EventKind::SignIn(SignInState::SignedIn));
         events.send(EventKind::Headline("Reading your Spotify lists".to_owned()));
         let choices = list_choices(&session).await?;
+        self.files = list_files(&choices);
         events.send(EventKind::Lists(choices));
         self.session = Some(session);
         self.note_keychain();
@@ -100,6 +132,7 @@ impl<'a> SyncSpotify<'a> {
             &self.context.review(),
             &self.context.state(),
             &listed,
+            &self.files,
         )?)
     }
 }
@@ -115,23 +148,30 @@ struct Plan {
     waiting: usize,
     /// Distinct songs in the ticked lists.
     total: usize,
+    /// Entries of the ticked lists that could not be read as songs.
+    unreadable: usize,
 }
 
 impl Plan {
     /// Count each song once by its Spotify track ID. A song is new when it is not in the library,
-    /// not held and not marked "never".
+    /// not held and not marked "never". Each list's songs record the file it is written under, from
+    /// `files` ([`file_of`]).
     fn make(
         library: &Library,
         review: &ReviewList,
         state: &State,
         listed: &[&ListedSongs],
+        files: &HashMap<String, String>,
     ) -> std::io::Result<Self> {
         let mut order: Vec<(WantedSong, Vec<Listed>)> = Vec::new();
         let mut index: HashMap<&str, usize> = HashMap::new();
+        let mut unreadable = 0_usize;
         for list in listed {
+            unreadable = unreadable.saturating_add(list.unreadable);
+            let file = file_of(files, &list.list);
             for song in &list.songs {
                 if let Some(&at) = index.get(song.key()) {
-                    let listed = Listed::new(&list.list.name, &list.list.id);
+                    let listed = Listed::new(&list.list.name, &file);
                     if let Some((_, lists)) = order.get_mut(at)
                         && !lists.contains(&listed)
                     {
@@ -139,10 +179,7 @@ impl Plan {
                     }
                 } else {
                     index.insert(song.key(), order.len());
-                    order.push((
-                        song.clone(),
-                        vec![Listed::new(&list.list.name, &list.list.id)],
-                    ));
+                    order.push((song.clone(), vec![Listed::new(&list.list.name, &file)]));
                 }
             }
         }
@@ -166,6 +203,7 @@ impl Plan {
             already,
             waiting,
             total,
+            unreadable,
         })
     }
 }
@@ -241,6 +279,7 @@ impl Step for SyncSpotify<'_> {
             new: plan.new.len(),
             total: plan.total,
             waiting: plan.waiting,
+            unreadable: plan.unreadable,
         });
         // A plan with no new song can still start: the run rewrites the playlist files.
         Ok(Answered::Waiting { can_start: true })
@@ -279,7 +318,8 @@ impl Step for SyncSpotify<'_> {
             .iter()
             .filter_map(|list| self.listed.get(&list.id))
         {
-            playlists::write(&library, &list.list.name, &list.list.id, &list.songs)?;
+            let file = file_of(&self.files, &list.list);
+            playlists::write(&library, &list.list.name, &file, &list.songs)?;
         }
         let line = summary_line(&tally.with_already(plan.already));
         Ok(Flow::done(line, &tally.counts()))
@@ -322,7 +362,62 @@ mod tests {
                 count: songs.len(),
             },
             songs,
+            unreadable: 0,
         }
+    }
+
+    fn choice(id: &str, name: &str) -> ListChoice {
+        ListChoice {
+            name: name.into(),
+            id: id.into(),
+            count: 0,
+        }
+    }
+
+    #[test]
+    fn a_list_keeps_its_file_whichever_lists_are_ticked_with_it() -> TestResult {
+        let offered = [
+            choice("liked-songs", "Liked Songs"),
+            choice("zz", "Chill"),
+            choice("aa", "chill"),
+            choice("0b", "Liked Songs"),
+            choice("cc", "Road trip"),
+        ];
+        let files = list_files(&offered);
+        let file = |id: &str| files.get(id).map(String::as_str);
+        assert_eq!(file("liked-songs"), Some("Liked Songs.m3u8"));
+        assert_eq!(file("0b"), Some("Liked Songs (0b).m3u8"));
+        assert_eq!(
+            file("aa"),
+            Some("chill.m3u8"),
+            "the lower list ID keeps the name"
+        );
+        assert_eq!(file("zz"), Some("Chill (zz).m3u8"));
+        assert_eq!(file("cc"), Some("Road trip.m3u8"));
+        // Spotify may offer the lists in another order next time; the files stay.
+        let mut reordered = offered.to_vec();
+        reordered.reverse();
+        assert_eq!(list_files(&reordered), files);
+        // Ticked alone, a list is still written under its file, and its held songs record it.
+        let root = tempfile::tempdir()?;
+        let lib = Library::at("Me", root.path(), true);
+        let mut chill = list("zz", "Chill", vec![song("a", "A")]);
+        chill.unreadable = 2;
+        let plan = Plan::make(
+            &lib,
+            &ReviewList::default(),
+            &State::default(),
+            &[&chill],
+            &files,
+        )?;
+        let recorded: Vec<&str> = plan
+            .new
+            .iter()
+            .flat_map(|(_, lists)| lists.iter().map(|l| l.file.as_str()))
+            .collect();
+        assert_eq!(recorded, ["Chill (zz).m3u8"]);
+        assert_eq!(plan.unreadable, 2);
+        Ok(())
     }
 
     #[test]
@@ -361,7 +456,7 @@ mod tests {
             ],
         );
         let road = list("p1", "Road trip", vec![song("a", "A"), song("b", "B")]);
-        let plan = Plan::make(&lib, &review, &state, &[&liked, &road])?;
+        let plan = Plan::make(&lib, &review, &state, &[&liked, &road], &HashMap::new())?;
         assert_eq!((plan.total, plan.waiting, plan.already), (5, 1, 1));
         let new: Vec<(&str, Vec<&str>)> = plan
             .new
@@ -394,6 +489,7 @@ mod tests {
                 &ReviewList::default(),
                 &State::default(),
                 &[&liked],
+                &HashMap::new(),
             )?;
             Ok((plan.new.len(), plan.already))
         };

@@ -43,6 +43,7 @@ impl App {
             Msg::Paste(text) => self.on_paste(&text),
             Msg::Mouse(event) => self.on_mouse(event),
             Msg::Ejected(result) => {
+                self.ejecting = None;
                 let mut device = None;
                 self.popups.retain(|popup| match popup {
                     Popup::Waiting(Waiting::Eject(name)) => {
@@ -70,6 +71,7 @@ impl App {
                 self.missing_tools = missing;
                 Vec::new()
             }
+            Msg::Signal => self.quit_now(),
             Msg::Wake => {
                 self.spin = self.spin.wrapping_add(1);
                 if let Some(Popup::Dialog(dialog)) = self.popups.last_mut() {
@@ -94,6 +96,11 @@ impl App {
         match kind {
             EventKind::Error(info) => {
                 self.finish(task);
+                self.popups.push(Popup::Error(info.clone()));
+                return Vec::new();
+            }
+            // After the run's ending event: said, but it ends nothing.
+            EventKind::Problem(info) => {
                 self.popups.push(Popup::Error(info.clone()));
                 return Vec::new();
             }
@@ -127,8 +134,10 @@ impl App {
         let mut commands = Vec::new();
         let mut done = false;
         for popup in &mut self.popups {
+            // A change to the review list made by another task also reaches an open Review.
+            let held = matches!(kind, EventKind::HeldCount(_));
             if let Popup::Dialog(dialog) = popup
-                && dialog.task() == task
+                && (dialog.task() == task || held && dialog.task() == TaskId::Review)
             {
                 match dialog.on_event(kind, settings) {
                     Step::Stay(more) => commands.extend(more),
@@ -273,6 +282,7 @@ impl App {
             // Offered again after a failed install; not while one is still running.
             KeyCode::Char('i')
                 if !self.missing_tools.is_empty()
+                    && !self.anything_runs()
                     && !self
                         .tools_note
                         .as_deref()
@@ -337,6 +347,10 @@ impl App {
         if self.view(task).is_none_or(FunctionView::is_open) {
             return Vec::new();
         }
+        // Review offers nothing while no song waits (F1).
+        if task == TaskId::Review && self.settings.review.is_empty() {
+            return Vec::new();
+        }
         if let Some(view) = self.view_mut(task) {
             view.begin();
         }
@@ -347,7 +361,11 @@ impl App {
 
     /// Ask the owner to quit while a function runs; otherwise quit now.
     fn quit(&mut self) -> Vec<Cmd> {
-        if self.anything_runs() {
+        let installing = self
+            .tools_note
+            .as_deref()
+            .is_some_and(|note| note.starts_with("Installing"));
+        if self.anything_runs() || self.ejecting.is_some() || installing {
             if !matches!(self.top(), Some(Popup::Confirm(Confirm::Quit, _))) {
                 self.popups.push(Popup::ask(Confirm::Quit));
             }
@@ -736,6 +754,124 @@ mod tests {
         let _ = app.update(Msg::Ejected(Err(info.clone())), clock());
         assert_eq!(app.popups.len(), 1);
         assert!(matches!(app.top(), Some(Popup::Error(shown)) if *shown == info));
+    }
+
+    #[test]
+    fn quitting_during_an_eject_or_a_tools_install_asks_first() {
+        let mut app = app();
+        app.popups.push(Popup::ask(Confirm::Eject {
+            device: "SNOWSKY".into(),
+        }));
+        let _ = app.update(key(KeyCode::Char('y')), clock());
+        // Hidden: the eject goes on.
+        let _ = app.update(key(KeyCode::Esc), clock());
+        assert_eq!(app.update(key(KeyCode::Char('q')), clock()), Vec::new());
+        assert!(matches!(app.top(), Some(Popup::Confirm(Confirm::Quit, _))));
+        assert_eq!(
+            app.update(key(KeyCode::Char('y')), clock()),
+            vec![Cmd::Quit]
+        );
+        // Once it ended, quitting needs no question.
+        let mut app = super::tests::app();
+        app.popups
+            .push(Popup::Waiting(Waiting::Eject("SNOWSKY".into())));
+        app.ejecting = Some("SNOWSKY".into());
+        let _ = app.update(Msg::Ejected(Ok(())), clock());
+        let _ = app.update(key(KeyCode::Esc), clock());
+        assert_eq!(
+            app.update(key(KeyCode::Char('q')), clock()),
+            vec![Cmd::Quit]
+        );
+        // A tools install in progress asks too.
+        let mut app = super::tests::app();
+        app.missing_tools = vec!["ffmpeg".into()];
+        let _ = app.update(key(KeyCode::Char('i')), clock());
+        assert_eq!(app.update(key(KeyCode::Char('q')), clock()), Vec::new());
+        assert!(matches!(app.top(), Some(Popup::Confirm(Confirm::Quit, _))));
+    }
+
+    #[test]
+    fn a_hang_up_quits_at_once_with_everything_stopped() {
+        let mut app = app();
+        running(&mut app, TaskId::Convert);
+        let _ = app.update(key(KeyCode::Down), clock());
+        let _ = app.update(key(KeyCode::Enter), clock());
+        let commands = app.update(Msg::Signal, clock());
+        assert_eq!(
+            commands,
+            vec![
+                Cmd::Discard(TaskId::DownloadLink),
+                Cmd::Stop(TaskId::Convert),
+                Cmd::Quit
+            ]
+        );
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn tools_are_not_installed_while_a_function_runs() {
+        let mut app = app();
+        app.missing_tools = vec!["yt-dlp".into()];
+        running(&mut app, TaskId::DownloadLink);
+        assert_eq!(app.update(key(KeyCode::Char('i')), clock()), Vec::new());
+        assert_eq!(app.tools_note, None);
+    }
+
+    #[test]
+    fn review_opens_nothing_while_no_song_waits() {
+        let mut app = app();
+        app.selected = TaskId::Review;
+        assert_eq!(app.update(key(KeyCode::Enter), clock()), Vec::new());
+        assert!(app.popups.is_empty());
+        let mut app = super::tests::app();
+        app.settings = crate::dialogs::tests::review_settings();
+        app.selected = TaskId::Review;
+        assert_eq!(
+            app.update(key(KeyCode::Enter), clock()),
+            vec![Cmd::Start(TaskId::Review)]
+        );
+    }
+
+    #[test]
+    fn songs_held_by_another_task_appear_in_an_open_review() -> Result<(), &'static str> {
+        let mut app = app();
+        app.settings = crate::dialogs::tests::review_settings();
+        app.selected = TaskId::Review;
+        let _ = app.update(key(KeyCode::Enter), clock());
+        // The list empties meanwhile (as another task's change would make it); the form follows.
+        let mut emptied = app.settings.clone();
+        emptied.review = sdl_core::ReviewList::default();
+        let _ = app.update(Msg::Settings(Box::new(emptied)), clock());
+        let _ = task(&mut app, TaskId::SyncSpotify, EventKind::HeldCount(0));
+        match app.top() {
+            Some(Popup::Dialog(dialog)) => {
+                assert!(
+                    dialog
+                        .form()
+                        .missing()
+                        .contains(&"Nothing to download".to_owned())
+                );
+                Ok(())
+            }
+            _ => Err("the Review form is open"),
+        }
+    }
+
+    #[test]
+    fn a_problem_after_a_run_ends_nothing() {
+        let mut app = app();
+        let _ = app.update(key(KeyCode::Enter), clock());
+        let problem = EventKind::Problem(ErrorInfo {
+            message: "m".into(),
+            advice: "a".into(),
+        });
+        let _ = task(&mut app, TaskId::SyncSpotify, problem);
+        assert!(matches!(app.top(), Some(Popup::Error(_))));
+        assert_eq!(app.popups.len(), 2, "the form under it stays open");
+        assert!(
+            app.view(TaskId::SyncSpotify)
+                .is_some_and(FunctionView::is_open)
+        );
     }
 
     #[test]

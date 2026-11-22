@@ -89,6 +89,49 @@ pub(crate) fn config_dir() -> Result<PathBuf, ConfigError> {
     Ok(base.home_dir().join(".config").join("sdl"))
 }
 
+/// Why the one-copy lock could not be asked for.
+#[derive(Debug, thiserror::Error)]
+pub enum LockError {
+    /// The config directory is unknown.
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    /// The lock file could not be opened or locked.
+    #[error("cannot use the lock file {}", path.display())]
+    Io {
+        /// The lock file.
+        path: PathBuf,
+        /// Underlying error.
+        source: std::io::Error,
+    },
+}
+
+/// Take the lock that lets only one copy of `sdl` run (`~/.config/sdl/lock`, F11). `Ok(None)`
+/// when another copy holds it. Keep the file for the life of the process; the system releases the
+/// lock when the process ends, however it ends.
+///
+/// # Errors
+/// [`LockError`]: no home directory, or the file could not be opened or locked.
+pub fn take_lock() -> Result<Option<std::fs::File>, LockError> {
+    let path = config_dir()?.join("lock");
+    lock_at(&path).map_err(|source| LockError::Io { path, source })
+}
+
+fn lock_at(path: &Path) -> std::io::Result<Option<std::fs::File>> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let file = std::fs::File::options()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
 impl Config {
     /// Path of the config file, `~/.config/sdl/config.toml`.
     ///
@@ -155,6 +198,21 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn only_one_holder_of_the_lock_at_a_time() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("sdl").join("lock");
+        let first = lock_at(&path)?;
+        assert!(first.is_some(), "the first copy takes it");
+        assert!(lock_at(&path)?.is_none(), "a second copy is refused");
+        drop(first);
+        assert!(
+            lock_at(&path)?.is_some(),
+            "free again once the first is gone"
+        );
+        Ok(())
+    }
 
     #[test]
     fn full_file_parses() -> TestResult {

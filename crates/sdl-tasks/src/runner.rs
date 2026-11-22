@@ -299,7 +299,7 @@ impl TaskContext {
         });
         self.events.send(event);
         if let Err(error) = saved {
-            self.events.send(EventKind::Error(state_error(&error)));
+            self.events.send(EventKind::Problem(state_error(&error)));
         }
     }
 
@@ -307,7 +307,7 @@ impl TaskContext {
     /// the owner after the run's own events.
     fn tidy(&self) {
         if let Err(error) = self.active.leave(self.task(), &self.config.music_root) {
-            self.events.send(EventKind::Error(ErrorInfo {
+            self.events.send(EventKind::Problem(ErrorInfo {
                 message: format!("The temporary folder could not be removed: {error}"),
                 advice: "Remove .sdl-tmp in the music folder by hand.".to_owned(),
             }));
@@ -571,6 +571,16 @@ impl Runner {
         }
     }
 
+    /// Wait until every task left has ended by itself, as the app closes: a Convert or Sync
+    /// device that was asked to stop finishes the file in hand and saves its "stopped" line
+    /// first (F11).
+    pub async fn wait_all(&mut self) {
+        for (_, running) in self.running.drain() {
+            // A task that ended in a panic has nothing more to save.
+            let _ = running.handle.await;
+        }
+    }
+
     async fn abort(&mut self, task: TaskId) -> Option<TaskContext> {
         let running = self.running.remove(&task)?;
         if running.handle.is_finished() {
@@ -770,6 +780,64 @@ mod tests {
             Some(("stopped after 1 of 2".to_owned(), RunOutcome::Stopped))
         );
         assert!(!runner.stop(TaskId::Review).await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn waiting_at_quit_lets_a_cooperative_stop_save_its_line() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (mut runner, _rx) = runner(dir.path());
+        runner.spawn(TaskId::Convert, |context, _commands| async move {
+            context.events.send(EventKind::Started);
+            // The file in hand takes a while to finish after the stop.
+            context.stop.cancelled().await;
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+            }
+            context.conclude(Ok(Flow::Stopped {
+                line: "stopped after 1 of 2".into(),
+            }));
+        })?;
+        tokio::task::yield_now().await;
+        assert!(runner.stop(TaskId::Convert).await);
+        runner.wait_all().await;
+        let saved = State::load_from(&dir.path().join("state.toml"))?;
+        let line = saved
+            .last_run
+            .get(&TaskId::Convert)
+            .map(|run| run.line.clone());
+        assert_eq!(line.as_deref(), Some("stopped after 1 of 2"));
+        assert!(!runner.is_running(TaskId::Convert));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_problem_after_the_run_ended_is_not_a_second_ending() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        // The state file cannot be written: its folder is a file.
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, b"")?;
+        let (tx, mut rx) = channel();
+        let mut runner = Runner::with_files(
+            runner(dir.path()).0.config.as_ref().clone(),
+            (State::default(), blocked.join("state.toml")),
+            (ReviewList::default(), dir.path().join("review.toml")),
+            tx,
+        );
+        runner.spawn(TaskId::DownloadLink, |context, _commands| async move {
+            context.conclude(Ok(Flow::Done {
+                line: "1 added".into(),
+                outcome: RunOutcome::Done,
+            }));
+        })?;
+        let ending = rx.recv().await.ok_or("no event")?;
+        assert_eq!(ending.kind, EventKind::Finished);
+        let after = rx.recv().await.ok_or("no event")?;
+        assert!(
+            matches!(after.kind, EventKind::Problem(_)),
+            "{:?}",
+            after.kind
+        );
         Ok(())
     }
 

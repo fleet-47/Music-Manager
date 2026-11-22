@@ -78,19 +78,29 @@ pub fn land(part: TempPath, dest: &Path, landing: Landing) -> std::io::Result<La
     }
 }
 
-/// Write `contents` as the whole of the file at `path`, replacing what was there in one step
-/// (`atomic-write-file`: a temp file in the same folder, synced, then renamed over `path`). The
-/// folder is made when missing.
+/// Write `contents` as the whole of the file at `path`, replacing what was there in one step: a
+/// `tempfile` named `<file name><random>.tmp` in the same folder (never a dot name, so none
+/// appears on a device even briefly), synced, then renamed over `path`. A write that fails
+/// leaves no temp file. The folder is made when missing. The new file gets the usual mode for a
+/// file the app makes (`0o666` less the umask).
 ///
 /// # Errors
 /// The folder could not be made or the file could not be written.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
-    let (folder, _) = split(path)?;
+    use std::os::unix::fs::PermissionsExt as _;
+    let (folder, name) = split(path)?;
     std::fs::create_dir_all(folder)?;
-    let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
+    let mut file = tempfile::Builder::new()
+        .prefix(name)
+        .suffix(".tmp")
+        .permissions(std::fs::Permissions::from_mode(0o666))
+        .tempfile_in(folder)?;
     file.write_all(contents)?;
-    file.commit()
+    file.as_file().sync_all()?;
+    // On failure the temp file comes back inside the error and is removed when dropped.
+    file.persist(path).map_err(|failure| failure.error)?;
+    Ok(())
 }
 
 /// The folder and file name of `path`; a bare file name sits in the current folder.
@@ -190,6 +200,18 @@ mod tests {
         write_atomic(&path, b"#EXTM3U\n")?;
         assert_eq!(std::fs::read(&path)?, b"#EXTM3U\n", "shorter content too");
         assert_eq!(names(&dir.path().join("lists"))?, ["Mix.m3u8"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_whole_file_write_that_fails_leaves_no_temp_file() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        // A folder stands where the file should go, so the final rename fails.
+        let path = dir.path().join("Mix.m3u8");
+        std::fs::create_dir(&path)?;
+        assert!(write_atomic(&path, b"#EXTM3U\n").is_err());
+        assert_eq!(names(dir.path())?, ["Mix.m3u8"]);
+        assert!(path.is_dir());
         Ok(())
     }
 }

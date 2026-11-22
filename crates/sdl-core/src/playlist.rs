@@ -36,6 +36,42 @@ impl Playlist {
         format!("{stem}.{PLAYLIST_EXTENSION}")
     }
 
+    /// The file name of each list of `lists` (`(name, list ID)`), in the same order (F7: two lists
+    /// never share a file). A list whose [`Playlist::file_name`] is already taken by a list before
+    /// it, compared with case ignored, is written as `<List name> (<list ID>).m3u8` instead. Which
+    /// list keeps the plain name follows the order given, so a caller that wants a list to keep
+    /// its file from run to run passes the same lists in the same order each time.
+    #[must_use]
+    pub fn file_names(lists: &[(&str, &str)]) -> Vec<String> {
+        let mut taken = std::collections::HashSet::new();
+        let mut names = Vec::with_capacity(lists.len());
+        for &(name, id) in lists {
+            let plain = Self::file_name(name, id);
+            let file = if taken.contains(&plain.to_lowercase()) {
+                Self::file_name_with_id(name, id)
+            } else {
+                plain
+            };
+            taken.insert(file.to_lowercase());
+            names.push(file);
+        }
+        names
+    }
+
+    /// `<List name> (<list ID>).m3u8`, made safe like a path component, with the name shortened
+    /// when needed so the ID is never cut off.
+    fn file_name_with_id(name: &str, id: &str) -> String {
+        let tail = format!(" ({})", component(id));
+        let mut head = component(name);
+        loop {
+            let stem = component(&format!("{head}{tail}"));
+            if stem.ends_with(tail.trim_start()) || head.is_empty() {
+                return format!("{stem}.{PLAYLIST_EXTENSION}");
+            }
+            head.pop();
+        }
+    }
+
     /// The file's text: `#EXTM3U`, `#PLAYLIST:<name>`, then one line per entry, each ending in a
     /// newline. A newline inside the name becomes a space.
     #[must_use]
@@ -133,6 +169,43 @@ mod tests {
             Playlist::file_name("Liked Songs", "liked-songs"),
             "Liked Songs.m3u8"
         );
+    }
+
+    #[test]
+    fn two_lists_never_share_a_file() {
+        let names = Playlist::file_names(&[
+            ("Liked Songs", "liked-songs"),
+            ("Chill", "b2"),
+            ("Liked Songs", "a1"),
+            ("chill", "c3"),
+            ("Road: trip", "d4"),
+            ("Road trip", "e5"),
+            ("Solo", "f6"),
+        ]);
+        assert_eq!(
+            names,
+            [
+                "Liked Songs.m3u8",
+                "Chill.m3u8",
+                "Liked Songs (a1).m3u8",
+                "chill (c3).m3u8",
+                "Road trip.m3u8",
+                "Road trip (e5).m3u8",
+                "Solo.m3u8",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_name_keeps_its_id_in_the_file_name() {
+        let long = "n".repeat(400);
+        let names = Playlist::file_names(&[(long.as_str(), "a1"), (long.as_str(), "b2")]);
+        assert!(
+            names
+                .get(1)
+                .is_some_and(|name| name.ends_with(" (b2).m3u8") && name.len() <= 155)
+        );
+        assert_ne!(names.first(), names.get(1));
     }
 
     #[test]

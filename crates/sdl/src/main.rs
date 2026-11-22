@@ -10,6 +10,11 @@ async fn main() -> Result<()> {
         .display_location_section(false)
         .display_env_section(false)
         .install()?;
+    // One copy at a time (F11): the lock is held until the process ends.
+    let Some(_lock) = sdl_core::config::take_lock()? else {
+        eprintln!("sdl is already running");
+        std::process::exit(1);
+    };
     // A missing or malformed config file is reported before anything else, with what to do.
     let config = Config::load().map_err(|error| {
         let advice = config_advice(&error);

@@ -189,7 +189,7 @@ fn held(key: &str, title: &str, link: bool) -> HeldSong {
     }
 }
 
-fn review_settings() -> Settings {
+pub(crate) fn review_settings() -> Settings {
     let mut review = ReviewList::default();
     review.hold(held("t1", "First", false));
     review.hold(held("https://x/y", "Second", true));
@@ -278,6 +278,7 @@ fn sync_spotify_walks_from_the_lists_to_start() {
         new: 412,
         total: 2117,
         waiting: 3,
+        unreadable: 0,
     });
     assert_eq!(rig.busy(), None);
     assert_eq!(
@@ -300,6 +301,7 @@ fn a_run_with_nothing_new_can_still_start() {
         new: 0,
         total: 5,
         waiting: 0,
+        unreadable: 0,
     });
     assert_eq!(rig.dialog.form().primary(), "Start");
     assert_eq!(rig.enter(), vec![send(TaskId::SyncSpotify, Command::Go)]);
@@ -314,6 +316,7 @@ fn changing_the_ticks_after_the_summary_goes_back_to_continue() {
         new: 1,
         total: 1,
         waiting: 0,
+        unreadable: 0,
     });
     rig.focus("lists");
     let _ = rig.press(code(crossterm::event::KeyCode::Down));
@@ -336,6 +339,7 @@ fn a_plan_that_arrives_after_a_change_is_not_shown() {
         new: 1,
         total: 1,
         waiting: 0,
+        unreadable: 0,
     });
     assert_eq!(rig.dialog.form().summary(), None);
     assert_eq!(rig.dialog.form().primary(), "Continue");
@@ -372,6 +376,7 @@ fn sync_spotify_continues_and_starts_with_the_mouse() -> TestResult {
         new: 2,
         total: 2,
         waiting: 0,
+        unreadable: 0,
     });
     let sent = commands(rig.click(&Target::Primary)?);
     assert_eq!(sent, vec![send(TaskId::SyncSpotify, Command::Go)]);
@@ -753,6 +758,32 @@ fn sync_device_follows_the_devices_and_the_remembered_choices() -> TestResult {
     assert_eq!(rig.enter(), vec![send(TaskId::SyncDevice, Command::Go)]);
     assert!(is_closed(&rig.event(&EventKind::Started)));
     Ok(())
+}
+
+#[test]
+fn a_device_that_goes_as_start_is_pressed_leaves_the_form_answerable() {
+    let (mut rig, _) = Rig::open(TaskId::SyncDevice, device_settings(Some("U1")));
+    let _ = rig.event(&EventKind::Devices(vec![device(
+        "SNOWSKY",
+        "U1",
+        12_300_000_000,
+    )]));
+    let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let _ = rig.event(&libraries(&[]));
+    let _ = rig.event(&EventKind::Plan(plan(1, 1, Some(12_300_000_000))));
+    rig.focus_primary();
+    assert_eq!(rig.enter(), vec![send(TaskId::SyncDevice, Command::Go)]);
+    assert_eq!(rig.busy(), Some("Starting"));
+    // The device goes before the run starts, so the task does not start it: the form must not
+    // wait for a `Started` that never comes.
+    let _ = rig.event(&EventKind::Devices(Vec::new()));
+    assert_eq!(rig.busy(), None);
+    let step = rig.press(code(crossterm::event::KeyCode::Esc));
+    assert!(is_closed(&step));
+    assert_eq!(
+        commands(step),
+        vec![send(TaskId::SyncDevice, Command::Cancel)]
+    );
 }
 
 #[test]

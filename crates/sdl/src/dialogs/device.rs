@@ -217,6 +217,8 @@ pub(super) fn on_event(
                 }
             }
             let chosen = chosen_device(form, state).map(|device| device.id().to_owned());
+            // With the chosen device gone, the task ignores a `Go` it has not read yet.
+            conv.go_ignored_if(chosen.is_none());
             if chosen != state.device {
                 if let Some(id) = &chosen {
                     let choice = settings.state.devices.get(id).cloned().unwrap_or_default();

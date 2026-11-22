@@ -3,14 +3,16 @@
 //!
 //! Interface, in full:
 //! * [`songs`] gives each song of `library` the selection names, once: the whole library first
-//!   when ticked (`sdl_core::library_files`, sorted by path), then each ticked playlist's songs,
+//!   when ticked (`sdl_core::library_files`: every audio file at any depth, dot names skipped,
+//!   links not followed, sorted by path), then each ticked playlist's songs,
 //!   playlist by playlist in the order given, each in list order.
 //! * A playlist is `<library folder>/<stem>.m3u8`; a missing file names nothing. A line counts
 //!   when it is exactly three plain path components (`<artist>/<album>/<file>`), none starting
 //!   with a dot, and a file with its name exists in the library in any format (the line's
 //!   extension may be out of date: review can land a song with another one). Every other line,
 //!   absolute or climbing out with `..` included, is left out without an error.
-//! * "Once" is by place: the same artist, album and file stem is one song whatever lists name it.
+//! * "Once" is by path without extension, relative to the library's folder: the same folders and
+//!   file stem are one song whatever lists name it.
 //!
 //! Plain blocking file calls; a plan calls it on a blocking thread.
 
@@ -29,7 +31,8 @@ use crate::{LibraryError, io_err};
 pub struct Song {
     /// The file in the library, with the extension it really has.
     pub file: PathBuf,
-    /// `file` relative to the library's folder: `<artist>/<album>/<file>`.
+    /// `file` relative to the library's folder: `<artist>/<album>/<file>` for a song the app
+    /// placed, any depth for a file put there otherwise (F7).
     pub relative: PathBuf,
 }
 
@@ -131,30 +134,39 @@ mod tests {
     }
 
     #[test]
-    fn the_whole_library_is_its_songs_at_artist_album_file_sorted() -> TestResult {
+    fn the_whole_library_is_its_songs_at_any_depth_sorted() -> TestResult {
         let dir = tempfile::tempdir()?;
         let root = dir.path();
         for file in [
             "B/Album/two.mp3",
             "A/Album/one.opus",
             "A/Album/three.m4a",
-            // Not the library's: wrong depth, not audio, or under a dot name.
             "A/stray.opus",
             "A/Album/deep/four.opus",
+            "Unsorted/Old/sub/untagged.mp3",
+            // Not the library's: not audio, or a dot name.
             "A/Album/cover.jpg",
             ".sdl-tmp/x/y.opus",
             "A/.hidden/z.opus",
+            "A/Album/.five.opus",
         ] {
             put(root, file)?;
         }
         let found = songs(&lib(root), &whole())?;
         assert_eq!(
             relatives(&found),
-            ["A/Album/one.opus", "A/Album/three.m4a", "B/Album/two.mp3"]
+            [
+                "A/Album/deep/four.opus",
+                "A/Album/one.opus",
+                "A/Album/three.m4a",
+                "A/stray.opus",
+                "B/Album/two.mp3",
+                "Unsorted/Old/sub/untagged.mp3",
+            ]
         );
         assert_eq!(
             found.first().map(|song| song.file.clone()),
-            Some(root.join("A/Album/one.opus"))
+            Some(root.join("A/Album/deep/four.opus"))
         );
         Ok(())
     }

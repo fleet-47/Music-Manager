@@ -21,3 +21,8 @@ Tasks waiting on a condition. Each names when it runs.
 - **When:** after the shared-helpers build has landed and Yazid has run a device sync using the "Format on device" choice (As is, MP3, M4A).
 - **What:** decide with Yazid whether more is wanted (other formats, another place for the option). A new format also changes what "already present" means (F7), so it needs a spec line first.
 - **Why:** Yazid missed the option in his first test (2026-11-22); after the build, formats sit in one table that Sync device and Convert both read, so a change is small.
+
+## Review the match rule for instrumentals and other versions
+- **When:** after the first real Spotify syncs, when Yazid has seen how often it happens.
+- **What:** decide whether the F3 match rule should stop treating "Song - Instrumental" (or a "(Karaoke Version)" bracket) as the same recording as "Song". Options from the 2026-11-22 review: refuse the title-prefix rule when the extra words are a version word (instrumental, karaoke, acapella, live), or drop only remaster, feat and edit brackets.
+- **Why:** a wanted instrumental can be matched to the vocal version with confidence when the lengths agree and YouTube Music has no instrumental in its top results. Accepted for v0.0 (ruled 2026-11-22).

@@ -152,7 +152,32 @@ fn copy_tags(src: &Path, out: &Path, preset: Preset) -> Result<(), LibraryError>
         }
     }
     tag.save_to_path(out, WriteOptions::default())
-        .map_err(|e| tag_err(out, e.to_string()))
+        .map_err(|e| tag_write_error(out, &e))
+}
+
+/// The error of a failed tag write to `out`. A destination with no room left is
+/// [`LibraryError::Io`] with that kind, so [`is_full`] recognises it; lofty keeps the I/O error in
+/// its source chain, and its own message ("failed to write to file") does not say why.
+fn tag_write_error(out: &Path, error: &(dyn std::error::Error + 'static)) -> LibraryError {
+    let mut cause = Some(error);
+    while let Some(current) = cause {
+        if let Some(io) = current.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded
+            )
+        {
+            return LibraryError::Io {
+                path: out.to_path_buf(),
+                source: std::io::Error::new(io.kind(), io.to_string()),
+            };
+        }
+        cause = current.source();
+    }
+    LibraryError::Tag {
+        path: out.to_path_buf(),
+        message: error.to_string(),
+    }
 }
 
 /// How many conversions run at once: `std::thread::available_parallelism()`, 1 when unknown.
@@ -385,6 +410,28 @@ mod tests {
         assert!(!is_full(&ffmpeg(
             "Invalid data found when processing input"
         )));
+    }
+
+    #[test]
+    fn a_full_destination_during_the_tag_write_is_recognised_as_full() {
+        let out = Path::new("/out/a.mp3.part");
+        let lofty_error = |kind: std::io::ErrorKind| {
+            lofty::error::FileEncodingError::from(std::io::Error::from(kind))
+        };
+        for kind in [
+            std::io::ErrorKind::StorageFull,
+            std::io::ErrorKind::QuotaExceeded,
+        ] {
+            assert!(
+                is_full(&tag_write_error(out, &lofty_error(kind))),
+                "{kind:?}"
+            );
+        }
+        let other = tag_write_error(out, &lofty_error(std::io::ErrorKind::InvalidData));
+        assert!(
+            matches!(&other, LibraryError::Tag { .. }) && !is_full(&other),
+            "{other:?}"
+        );
     }
 
     #[tokio::test]

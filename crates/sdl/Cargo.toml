@@ -17,7 +17,7 @@ tui-scrollview.workspace = true
 tui-scrollbar.workspace = true
 tachyonfx.workspace = true
 open.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "sync", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "signal", "sync", "time"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 color-eyre.workspace = true
 futures.workspace = true

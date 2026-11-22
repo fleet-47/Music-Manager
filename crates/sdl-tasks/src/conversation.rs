@@ -273,7 +273,10 @@ pub(crate) async fn drive(
     }
     let mut ready = false;
     loop {
+        // The inbox first: a `Go` already sent is read before something that happened by itself
+        // can make the plan stale and the `Go` ignored.
         let command = tokio::select! {
+            biased;
             command = inbox.next() => command,
             stale = step.background() => {
                 if stale? {
@@ -357,6 +360,8 @@ mod tests {
         None,
         Hang,
         Consent,
+        /// Something happens by itself all the time that makes the plan stale (a device goes).
+        Stale,
     }
 
     impl Step for Fake {
@@ -377,6 +382,14 @@ mod tests {
         fn offer(&mut self, _offer: Offer) -> impl Future<Output = Result<bool, TaskError>> {
             self.log.push("offer");
             std::future::ready(Ok(true))
+        }
+
+        async fn background(&mut self) -> Result<bool, TaskError> {
+            if self.quirk == Quirk::Stale {
+                Ok(true)
+            } else {
+                pending().await
+            }
         }
 
         async fn answer(&mut self, answers: Answers) -> Result<Answered, TaskError> {
@@ -577,6 +590,22 @@ mod tests {
         };
         assert!(run(&mut step, vec![Command::Cancel]).await?);
         assert_eq!(step.log, ["open"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_go_already_sent_is_read_before_anything_that_happens_by_itself() -> TestResult {
+        // Without the inbox first, each round picks either side at random; 30 rounds make a
+        // lost `Go` all but certain.
+        for _ in 0..30 {
+            let mut step = Fake {
+                can_start: true,
+                quirk: Quirk::Stale,
+                ..Fake::default()
+            };
+            let (cancelled, started) = drive_with(&mut step, vec![convert(), Command::Go]).await?;
+            assert!(!cancelled && started, "the Go was lost");
+        }
         Ok(())
     }
 

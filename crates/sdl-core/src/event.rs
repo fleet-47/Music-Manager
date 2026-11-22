@@ -220,6 +220,9 @@ pub enum EventKind {
         total: usize,
         /// Listed songs already in the review list.
         waiting: usize,
+        /// Entries in the ticked lists that Spotify sent but that could not be read as songs (not
+        /// local files, episodes or removed songs, which are left out silently).
+        unreadable: usize,
     },
     /// The run has started: the form is done with, and the running panel shows the task from now
     /// on. Sent once, by the task layer, before the run's first `Counts`; the UI starts the
@@ -257,6 +260,9 @@ pub enum EventKind {
     Plan(PlanSummary),
     /// The task failed.
     Error(ErrorInfo),
+    /// Something went wrong after the run's ending event (its last-run line could not be saved,
+    /// the temporary folder could not be removed): shown to the owner, but it ends nothing.
+    Problem(ErrorInfo),
     /// The task finished.
     Finished,
     /// The task was stopped.

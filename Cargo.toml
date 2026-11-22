@@ -41,7 +41,6 @@ open = "5.4.5"
 futures = "0.3.34"
 url = "2.5.8"
 tempfile = "3.27.0"
-atomic-write-file = "0.3.1"
 tokio-util = "0.7.20"
 which = "8.0.6"
 # Killing a process group (a tool and everything it started) without `unsafe`.

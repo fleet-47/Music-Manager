@@ -52,7 +52,7 @@ mod link;
 mod review;
 mod spotify;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use sdl_core::{EventKind, TaskId};
