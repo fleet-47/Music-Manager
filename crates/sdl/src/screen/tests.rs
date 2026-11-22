@@ -284,7 +284,7 @@ fn questions_name_their_keys_at_every_size() -> TestResult {
     each_size(|width, height| {
         for (question, words) in &questions {
             let mut app = app(width, height);
-            app.popups.push(Popup::Confirm(question.clone()));
+            app.popups.push(Popup::ask(question.clone()));
             let (rows, hits, _) = draw(&app, Theme::new(true))?;
             let shown = rows.join("\n");
             needs(&shown, &["[y]", "[n]"], (width, height));
@@ -371,7 +371,7 @@ fn without_colour_nothing_is_painted() -> TestResult {
 #[test]
 fn the_popup_rectangle_is_the_frame_that_was_drawn() -> TestResult {
     let mut app = app(100, 30);
-    app.popups.push(Popup::Confirm(Confirm::Quit));
+    app.popups.push(Popup::ask(Confirm::Quit));
     let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
     let mut hits = Hits::default();
     let mut frame_rect = None;
@@ -431,7 +431,7 @@ fn a_popup_keeps_its_place_when_its_content_gets_shorter() -> TestResult {
     assert_eq!((after.x, after.y), (before.x, before.y));
     // Closing it and opening another popup starts centred again, not where the form was.
     app.popups.clear();
-    app.popups.push(Popup::Confirm(Confirm::Quit));
+    app.popups.push(Popup::ask(Confirm::Quit));
     let other = draw_remembering(&mut app)?;
     assert_ne!(other.y, before.y);
     Ok(())
@@ -517,7 +517,7 @@ fn clicking_the_card_of_a_running_function_chooses_it() -> TestResult {
 #[test]
 fn buttons_answer_questions_and_a_click_outside_changes_nothing() -> TestResult {
     let mut app = app(100, 30);
-    app.popups.push(Popup::Confirm(Confirm::Browser));
+    app.popups.push(Popup::ask(Confirm::Browser));
     let (_, hits, _) = draw(&app, Theme::new(true))?;
     app.hits = hits;
     assert_eq!(click(&mut app, 0, 0), Vec::new());

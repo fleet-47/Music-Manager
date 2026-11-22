@@ -92,10 +92,10 @@ pub enum Answers {
         /// Whose library the songs go into.
         recipient: Recipient,
     },
-    /// Download link: the link. The run starts at once; no `Go` follows.
+    /// Download link: the links. The run starts at once; no `Go` follows.
     DownloadLink {
-        /// The pasted link.
-        url: String,
+        /// The pasted links, each once, in the order given.
+        urls: Vec<String>,
         /// Whose library the songs go into.
         recipient: Recipient,
     },
@@ -513,7 +513,7 @@ mod tests {
             ..Fake::default()
         };
         let other = Command::Answer(Answers::DownloadLink {
-            url: "u".into(),
+            urls: vec!["u".into()],
             recipient: Recipient::Me,
         });
         let cancelled = run(&mut step, vec![convert(), other, Command::Go]).await?;

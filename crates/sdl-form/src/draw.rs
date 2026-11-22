@@ -23,8 +23,10 @@ pub struct FormStyle {
     pub secondary: Style,
     /// The focus marker and the highlighted row's marker.
     pub emphasis: Style,
-    /// The focused field's label and the buttons when focused.
+    /// The focused field's label.
     pub focus: Style,
+    /// The button with the focus (Continue, Cancel, Browse): filled, so it cannot be missed.
+    pub button: Style,
     /// The highlighted row's background.
     pub selected: Style,
     /// Flagged parts of an option's label.
@@ -373,7 +375,7 @@ fn draw_field(
                 1,
             );
             let at = focus == &Focus::Browse(field.key);
-            Line::styled(" Browse… ", if at { style.focus } else { style.emphasis })
+            Line::styled(" Browse… ", if at { style.button } else { style.emphasis })
                 .render(browse, buf);
             hits.push(browse, Target::Browse(field.key));
         }
@@ -686,7 +688,7 @@ fn draw_buttons(
     );
     let look = |focused: bool, enabled: bool| {
         if focused {
-            style.focus
+            style.button
         } else if enabled {
             style.body
         } else {

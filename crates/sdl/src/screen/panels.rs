@@ -204,8 +204,9 @@ fn tone(theme: Theme, tone: Tone) -> Style {
     }
 }
 
-/// One card. The border tells its state apart at a glance: heavy for the chosen one, double
-/// for one that waits for the owner, coloured as running while it runs.
+/// One card. Where the keyboard is and what state the card is in are told by different things:
+/// the chosen card is filled, has a heavy border and `›` before its name; the border's colour
+/// tells the state of any card (waiting for the owner, running, or neither).
 fn draw_card(
     buf: &mut Buffer,
     rect: Rect,
@@ -216,15 +217,23 @@ fn draw_card(
 ) {
     let selected = card.task == app.selected;
     let running = card.run.is_some();
-    let (border, kind) = if selected {
-        (theme.border_focus(), BorderType::Thick)
-    } else if card.needs_you {
-        (theme.attention(), BorderType::Double)
+    let border = if card.needs_you {
+        theme.attention()
     } else if running {
-        (theme.running(), BorderType::Rounded)
+        theme.running()
+    } else if selected {
+        theme.border_focus()
     } else {
-        (theme.border(), BorderType::Rounded)
+        theme.border()
     };
+    let kind = match (selected, card.needs_you) {
+        (true, _) => BorderType::Thick,
+        (false, true) => BorderType::Double,
+        (false, false) => BorderType::Rounded,
+    };
+    if selected {
+        buf.set_style(rect, theme.selected());
+    }
     let name = if running {
         theme.running()
     } else if selected {
@@ -233,6 +242,9 @@ fn draw_card(
         theme.body()
     };
     let mut title = vec![Span::raw(" ")];
+    if selected {
+        title.push(Span::styled("› ", theme.emphasis()));
+    }
     if running {
         // The spinner moves while the function runs, so a long single song never looks hung.
         title.push(Span::styled(

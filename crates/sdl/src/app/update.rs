@@ -106,7 +106,7 @@ impl App {
                 self.finish(task);
                 if task == TaskId::SyncDevice {
                     let device = self.synced_device();
-                    self.popups.push(Popup::Confirm(Confirm::Eject { device }));
+                    self.popups.push(Popup::ask(Confirm::Eject { device }));
                 }
                 return Vec::new();
             }
@@ -150,7 +150,7 @@ impl App {
         match state {
             SignInState::NeedsBrowser => {
                 self.drop_browser_popups();
-                self.popups.push(Popup::Confirm(Confirm::Browser));
+                self.popups.push(Popup::ask(Confirm::Browser));
                 true
             }
             SignInState::WaitingForBrowser => {
@@ -178,7 +178,7 @@ impl App {
         self.popups.retain(|popup| {
             !matches!(
                 popup,
-                Popup::Confirm(Confirm::Browser) | Popup::Waiting(Waiting::Browser)
+                Popup::Confirm(Confirm::Browser, _) | Popup::Waiting(Waiting::Browser)
             )
         });
     }
@@ -262,7 +262,7 @@ impl App {
             KeyCode::Char('s') => {
                 let task = self.selected;
                 if self.view(task).is_some_and(FunctionView::is_running) {
-                    self.popups.push(Popup::Confirm(Confirm::Stop(task)));
+                    self.popups.push(Popup::ask(Confirm::Stop(task)));
                 }
                 Vec::new()
             }
@@ -348,8 +348,8 @@ impl App {
     /// Ask the owner to quit while a function runs; otherwise quit now.
     fn quit(&mut self) -> Vec<Cmd> {
         if self.shows_running_panel() {
-            if !matches!(self.top(), Some(Popup::Confirm(Confirm::Quit))) {
-                self.popups.push(Popup::Confirm(Confirm::Quit));
+            if !matches!(self.top(), Some(Popup::Confirm(Confirm::Quit, _))) {
+                self.popups.push(Popup::ask(Confirm::Quit));
             }
             return Vec::new();
         }
@@ -452,7 +452,7 @@ mod tests {
         let mut app = app();
         running(&mut app, TaskId::Convert);
         assert_eq!(app.update(key(KeyCode::Char('q')), clock()), Vec::new());
-        assert!(matches!(app.top(), Some(Popup::Confirm(Confirm::Quit))));
+        assert!(matches!(app.top(), Some(Popup::Confirm(Confirm::Quit, _))));
         assert!(!app.quit);
         // Asking again does not stack a second question.
         let _ = app.update(key(KeyCode::Char('q')), clock());
@@ -511,7 +511,7 @@ mod tests {
         let _ = app.update(key(KeyCode::Char('s')), clock());
         assert!(matches!(
             app.top(),
-            Some(Popup::Confirm(Confirm::Stop(TaskId::SyncSpotify)))
+            Some(Popup::Confirm(Confirm::Stop(TaskId::SyncSpotify), _))
         ));
         assert_eq!(
             app.update(key(KeyCode::Char('y')), clock()),
@@ -587,7 +587,10 @@ mod tests {
             TaskId::SyncSpotify,
             sign_in(SignInState::NeedsBrowser),
         );
-        assert!(matches!(app.top(), Some(Popup::Confirm(Confirm::Browser))));
+        assert!(matches!(
+            app.top(),
+            Some(Popup::Confirm(Confirm::Browser, _))
+        ));
         let go = app.update(key(KeyCode::Enter), clock());
         assert_eq!(go, vec![Cmd::send(TaskId::SyncSpotify, Command::Go)]);
         let _ = task(
@@ -686,7 +689,7 @@ mod tests {
         running(&mut app, TaskId::SyncDevice);
         let _ = task(&mut app, TaskId::SyncDevice, EventKind::Finished);
         assert_eq!(
-            app.top().map(|popup| matches!(popup, Popup::Confirm(Confirm::Eject { device }) if device == "SNOWSKY")),
+            app.top().map(|popup| matches!(popup, Popup::Confirm(Confirm::Eject { device }, _) if device == "SNOWSKY")),
             Some(true)
         );
         assert_eq!(

@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn a_waiting_popup_spins_and_a_question_does_not() {
         let mut app = app(Size::new(100, 30));
-        app.popups.push(Popup::Confirm(Confirm::Quit));
+        app.popups.push(Popup::ask(Confirm::Quit));
         assert_eq!(next_wake(&app), None);
         app.popups.push(Popup::Waiting(Waiting::Browser));
         assert_eq!(next_wake(&app), Some(SPINNER));

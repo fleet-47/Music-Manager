@@ -1,4 +1,5 @@
-//! Download link (F5): the link, then Start. There is no plan, so the one answer starts the run.
+//! Download link (F5): one or more links, then Start. There is no plan, so the one answer starts
+//! the run.
 
 use sdl_core::{EventKind, TaskId};
 use sdl_form::{Field, Form};
@@ -8,7 +9,7 @@ use super::choices::text_of;
 use super::libraries::{self, Known};
 use crate::app::Settings;
 
-/// The text field. Its value is the link.
+/// The text field. Its value is the links, separated by spaces or commas.
 pub(super) const LINK: &str = "link";
 
 /// Whether `text` is a link this function takes, in the owner's words when it is not. A Spotify
@@ -32,6 +33,34 @@ pub(super) fn check(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The links in `text`: what stands between spaces, line breaks and commas, each once, in the
+/// order given (F5).
+pub(super) fn links(text: &str) -> Vec<&str> {
+    let mut found: Vec<&str> = Vec::new();
+    for part in text.split(|c: char| c.is_whitespace() || c == ',') {
+        if !part.is_empty() && !found.contains(&part) {
+            found.push(part);
+        }
+    }
+    found
+}
+
+/// Whether every link in `text` is one this function takes. With several links the message
+/// names the one that is not.
+fn check_all(text: &str) -> Result<(), String> {
+    let found = links(text);
+    let Some(first) = found.first() else {
+        return Err("Paste a link".to_owned());
+    };
+    if found.len() == 1 {
+        return check(first);
+    }
+    for (at, link) in found.iter().enumerate() {
+        check(link).map_err(|why| format!("Link {} ({link}): {why}", at.saturating_add(1)))?;
+    }
+    Ok(())
+}
+
 /// What this dialog keeps besides its form.
 #[derive(Debug, Default)]
 pub(super) struct State {
@@ -40,12 +69,13 @@ pub(super) struct State {
     last: Option<String>,
 }
 
-/// The form: whose library, then one text field that needs a link, primary button `Start`.
+/// The form: whose library, then one text field that needs at least one link, primary button
+/// `Start`.
 pub(super) fn open(settings: &Settings) -> (Form, State) {
     let mut form = libraries::recipient_fields(Form::new("Download link")).field(
         Field::text(LINK, "Link")
-            .placeholder("Paste a YouTube, YouTube Music or SoundCloud link")
-            .validate(check)
+            .placeholder("Paste one or more links: YouTube, YouTube Music, SoundCloud")
+            .validate(check_all)
             .needs("Paste a link"),
     );
     form.set_primary("Start");
@@ -72,17 +102,42 @@ pub(super) fn changed(form: &mut Form, state: &State) {
     libraries::follow(form, &state.known);
 }
 
-/// Whose library, and the pasted link.
+/// Whose library, and the pasted links.
 pub(super) fn answers(form: &Form, state: &State) -> Option<Answers> {
     Some(Answers::DownloadLink {
-        url: text_of(form, LINK),
+        urls: links(&text_of(form, LINK))
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         recipient: libraries::recipient(form, &state.known)?,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::check;
+    use super::{check, check_all, links};
+
+    #[test]
+    fn spaces_line_breaks_and_commas_separate_links_and_a_repeat_is_taken_once() {
+        assert_eq!(
+            links(" https://a.b/1,https://a.b/2 ,\n https://a.b/1\thttps://a.b/3 "),
+            ["https://a.b/1", "https://a.b/2", "https://a.b/3"]
+        );
+        assert_eq!(links(" , "), [] as [&str; 0]);
+    }
+
+    #[test]
+    fn with_several_links_the_message_names_the_one_that_is_wrong() {
+        assert!(check_all("https://a.b/1 https://a.b/2").is_ok());
+        assert!(
+            check_all("https://a.b/1, https://open.spotify.com/track/x").is_err_and(|why| why
+                .starts_with("Link 2 (https://open.spotify.com/track/x)")
+                && why.contains("Sync Spotify"))
+        );
+        // One link keeps the short message.
+        assert!(check_all("a.b/1").is_err_and(|why| why.starts_with("That does not look")));
+        assert!(check_all(" , ").is_err());
+    }
 
     #[test]
     fn a_spotify_link_is_refused_in_plain_words() {

@@ -24,10 +24,10 @@ pub enum Confirm {
 }
 
 impl Confirm {
-    /// What Enter answers: the safe "no" where yes does damage that cannot be undone (stopping
-    /// a run, quitting while one runs, clean-up that empties the device's Trash), and "yes" to
-    /// opening the browser, which the owner asked for by choosing Sync Spotify. The screen
-    /// highlights that button, so Enter does what is shown.
+    /// The answer that has the focus when the question opens: the safe "no" where yes does damage
+    /// that cannot be undone (stopping a run, quitting while one runs, clean-up that empties the
+    /// device's Trash), and "yes" to opening the browser, which the owner asked for by choosing
+    /// Sync Spotify. Enter presses the focused button, so it does what is shown.
     #[must_use]
     pub fn enter_answers_yes(&self) -> bool {
         matches!(self, Self::Browser)
@@ -57,8 +57,9 @@ pub enum Popup {
         /// First line shown.
         scroll: usize,
     },
-    /// A yes-or-no question.
-    Confirm(Confirm),
+    /// A yes-or-no question, and whether its Yes button has the focus (Left, Right and Tab move
+    /// it; Enter presses the focused one).
+    Confirm(Confirm, bool),
     /// What went wrong and what to do.
     Error(ErrorInfo),
     /// The eject succeeded: the named device is safe to unplug. Shown even when the waiting
@@ -74,6 +75,13 @@ pub enum Popup {
 }
 
 impl Popup {
+    /// The question `confirm`, with the focus on the answer it starts on.
+    #[must_use]
+    pub fn ask(confirm: Confirm) -> Self {
+        let yes = confirm.enter_answers_yes();
+        Self::Confirm(confirm, yes)
+    }
+
     /// Whether the popup shows a spinner (so the spinner timer runs).
     #[must_use]
     pub fn shows_spinner(&self) -> bool {
@@ -81,7 +89,7 @@ impl Popup {
             Self::Dialog(dialog) => dialog.form().is_animating(),
             Self::Waiting(_) => true,
             Self::Attention { .. }
-            | Self::Confirm(_)
+            | Self::Confirm(..)
             | Self::Error(_)
             | Self::Ejected(_)
             | Self::Help { .. } => false,

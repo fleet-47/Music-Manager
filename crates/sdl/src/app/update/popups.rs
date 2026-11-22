@@ -29,15 +29,26 @@ impl App {
             return Vec::new();
         };
         match top {
-            Popup::Confirm(question) => match key.code {
-                KeyCode::Char('y' | 'Y') => self.answer(true),
-                KeyCode::Char('n' | 'N') | KeyCode::Esc => self.answer(false),
-                KeyCode::Enter => {
-                    let yes = question.enter_answers_yes();
-                    self.answer(yes)
+            Popup::Confirm(_, focused) => {
+                let focused = *focused;
+                match key.code {
+                    KeyCode::Char('y' | 'Y') => self.answer(true),
+                    KeyCode::Char('n' | 'N') | KeyCode::Esc => self.answer(false),
+                    KeyCode::Enter => self.answer(focused),
+                    // Two buttons: any of these moves the focus to the other one.
+                    KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Tab
+                    | KeyCode::BackTab
+                    | KeyCode::Char('h' | 'l') => {
+                        if let Some(Popup::Confirm(_, yes)) = self.popups.last_mut() {
+                            *yes = !focused;
+                        }
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
                 }
-                _ => Vec::new(),
-            },
+            }
             Popup::Waiting(Waiting::Browser) if key.code == KeyCode::Esc => self.answer(false),
             Popup::Waiting(Waiting::Eject(_)) if key.code == KeyCode::Esc => {
                 self.popups.pop();
@@ -70,21 +81,21 @@ impl App {
     /// the waiting popup.
     pub(super) fn answer(&mut self, yes: bool) -> Vec<Cmd> {
         match self.popups.pop() {
-            Some(Popup::Confirm(Confirm::Stop(task))) => {
+            Some(Popup::Confirm(Confirm::Stop(task), _)) => {
                 if yes {
                     vec![Cmd::Stop(task)]
                 } else {
                     Vec::new()
                 }
             }
-            Some(Popup::Confirm(Confirm::Quit)) => {
+            Some(Popup::Confirm(Confirm::Quit, _)) => {
                 if yes {
                     self.quit_now()
                 } else {
                     Vec::new()
                 }
             }
-            Some(Popup::Confirm(Confirm::Eject { device })) => {
+            Some(Popup::Confirm(Confirm::Eject { device }, _)) => {
                 if yes {
                     self.popups.push(Popup::Waiting(Waiting::Eject(device)));
                     vec![Cmd::Eject]
@@ -92,7 +103,7 @@ impl App {
                     Vec::new()
                 }
             }
-            Some(Popup::Confirm(Confirm::Browser)) => {
+            Some(Popup::Confirm(Confirm::Browser, _)) => {
                 if yes {
                     vec![Cmd::send(TaskId::SyncSpotify, Command::Go)]
                 } else {
@@ -245,11 +256,11 @@ mod tests {
                 device: "DISC".into(),
             },
         ] {
-            app.popups.push(Popup::Confirm(question));
+            app.popups.push(Popup::ask(question));
             assert_eq!(app.update(key(KeyCode::Enter), clock()), Vec::new());
             assert!(app.popups.is_empty() && !app.quit);
         }
-        app.popups.push(Popup::Confirm(Confirm::Browser));
+        app.popups.push(Popup::ask(Confirm::Browser));
         assert_eq!(
             app.update(key(KeyCode::Enter), clock()),
             vec![Cmd::send(TaskId::SyncSpotify, Command::Go)]
@@ -257,9 +268,35 @@ mod tests {
     }
 
     #[test]
+    fn the_focus_moves_between_the_two_answers_and_enter_presses_the_focused_one() {
+        let mut app = app();
+        running(&mut app, TaskId::Convert);
+        for move_focus in [
+            KeyCode::Tab,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::BackTab,
+        ] {
+            app.popups.push(Popup::ask(Confirm::Stop(TaskId::Convert)));
+            assert_eq!(app.update(key(move_focus), clock()), Vec::new());
+            assert!(matches!(app.top(), Some(Popup::Confirm(_, true))));
+            assert_eq!(
+                app.update(key(KeyCode::Enter), clock()),
+                vec![Cmd::Stop(TaskId::Convert)]
+            );
+        }
+        // Moving twice is back on the safe answer.
+        app.popups.push(Popup::ask(Confirm::Stop(TaskId::Convert)));
+        let _ = app.update(key(KeyCode::Tab), clock());
+        let _ = app.update(key(KeyCode::Tab), clock());
+        assert_eq!(app.update(key(KeyCode::Enter), clock()), Vec::new());
+        assert!(app.popups.is_empty());
+    }
+
+    #[test]
     fn a_question_ignores_other_keys_and_keeps_asking() {
         let mut app = app();
-        app.popups.push(Popup::Confirm(Confirm::Quit));
+        app.popups.push(Popup::ask(Confirm::Quit));
         assert_eq!(app.update(key(KeyCode::Char('x')), clock()), Vec::new());
         assert_eq!(app.update(key(KeyCode::Char('q')), clock()), Vec::new());
         assert_eq!(app.popups.len(), 1);

@@ -9,7 +9,7 @@ SD card. Build spec: `.fleet/docs/SPEC-tui.md`.
 - Sync adds new tracks and never deletes.
 - One Rust TUI is the whole product (ruled 2026-11-18). Every backend is a pure-Rust crate (`ratatui`, `rspotify`, `musicbrainz_rs`, `lofty`, `walkdir`), with one exception: downloads run the yt-dlp binary, called directly with tokio's process API (ruled 2026-11-19; the `yt-dlp` wrapper crate is not used, because it leaves the child's stdin open to the TUI's keyboard and does not kill children on exit). Reason for the exception: no pure-Rust crate generates YouTube's anti-bot tokens, so pure-Rust extraction depends on a workaround YouTube can close. Matching does not use yt-dlp: YouTube Music is searched with `innertube-rs` (`search_music`, songs filter), which returns title, artists, album, duration and video ID in one request. No linked bindings (no `librclone`, no ffmpeg libraries).
 - A file enters the library only when complete (ruled 2026-11-19): download to a temp file, look up, tag the temp file, rename last.
-- UI (ruled 2026-11-19): one screen. A main panel organised by function and the selection made for each (Spotify lists are ticked before a sync), and a running panel that opens while any task runs and closes when none does. Per-song work is a backend concern: only counts and an on-request attention list (unmatched, failed) surface. No tabs, no per-song table. Colourful by role: headings, body, secondary text, emphasis and status each have their own colour (spec F1).
+- UI (ruled 2026-11-19): one screen, laid out as the home screen ruled 2026-11-21 below. Per-song work is a backend concern: only counts and an on-request attention list (unmatched, failed) surface. No tabs, no per-song table. Colourful by role: headings, body, secondary text, emphasis and status each have their own colour (spec F1).
 - Spotify is asked only for the paged listing (about one call per 50 songs). Reason: per-song metadata calls through the developer app hit the dev-mode limit (24 h lockout) on the 2,117-song Liked Songs run; Spotify's batch endpoints were removed in February 2026. Genre and totals come from MusicBrainz, because Spotify's listing carries no genre and its artist `genres` field is deprecated.
 - Sign-in is PKCE (ruled 2026-11-18): the TUI uses only the client ID, which is not a secret and lives in its config file; the client secret is never given to it. Sign-in is remembered (ruled 2026-11-20, replaces "tokens in memory only"): the refresh token is stored in the macOS Keychain, encrypted at rest, and nowhere else; the browser opens only on first use or when the token stops working. The access token stays in memory. Only the scopes `user-library-read` and `playlist-read-private` are requested. fnox and Bitwarden are not used.
 - A Spotify 429 ends the run and shows the wait; there is no retry layer.
@@ -44,6 +44,9 @@ SD card. Build spec: `.fleet/docs/SPEC-tui.md`.
 - Libraries (ruled 2026-11-21): music for Yazid and music downloaded for friends never mix. Each person has a library, a folder under `music_root` (`~/Music/Me/…`, `~/Music/<Friend>/…`), with its own playlists and review entries. Download forms have a "For me" toggle; Sync device and Convert choose a library, remembered per device (spec F12).
 - Home screen (ruled 2026-11-21, replaces the main panel and running panel of 2026-11-19): large cards, one per function, with no headings; a card shows only what helps now, and its content gives way to its progress while it runs. No text that carries no information (no "not run yet"); a sync says when it last ran, a download only while fresh (spec F1).
 - Tools check (ruled 2026-11-21): the app checks for yt-dlp, ffmpeg and deno at start and offers to install missing ones with mise (spec F13).
+- Several links at once (ruled 2026-11-22): Download link takes any number of links separated by spaces, line breaks or commas, and queues each as its own download in one run (spec F5).
+- Keyboard focus is unmistakable (ruled 2026-11-22): the chosen card and the focused button are filled, so where the keyboard is never shares its cue with a status colour; every popup button can be reached and pressed by keyboard (spec F1).
+- One pathway per behaviour (ruled 2026-11-22): downloading, placing files, library management and the like each run through one shared helper, not a copy per function.
 - Cargo builds into `$SHIP_ROOT/outputs/cargo/target` (the fleet cargo config in `~/.config/cargo`, 2026-11-21), not into the repo; `cargo install` puts binaries in `$SHIP_ROOT/outputs/cargo/bin`.
 - Build standard is `fleet-47/Gen.v2`: fenix stable, the global `~/.cargo/config.toml`, and the lint flags in the spec. The repo carries no `.cargo/`, `clippy.toml`, `[lints]` table, rustflags or profile overrides.
 - mise config lives in `.mise/config.toml` and is committed. mise supplies yt-dlp, ffmpeg and deno and starts the TUI.
@@ -60,7 +63,7 @@ SD card. Build spec: `.fleet/docs/SPEC-tui.md`.
 
 ## Facts
 - Audio is sourced from YouTube Music, not Spotify. Lossy quality is accepted; files are Opus as served, not re-encoded.
-- Spotify app redirect URI: `http://127.0.0.1:9900/`. Each run opens a browser sign-in.
+- Spotify app redirect URI: `http://127.0.0.1:9900/`.
 - Spotify dev-mode apps lock out for about 24 h after too many calls.
 - If downloads break after YouTube changes, the fix arrives via a new yt-dlp release (`mise upgrade`).
 - The flow before the TUI (mise tasks, spotDL, fnox, rclone bisync) is in jj history: change `nplromuk`.

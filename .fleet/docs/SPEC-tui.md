@@ -22,9 +22,12 @@ report it; do not substitute another crate or hand-write the capability.
     is closed. Nothing is shown for a function that never ran;
   - on its last line what Enter does (`sync`, `paste a link`, `review`, `convert`); the chosen
     card shows the key. Review offers nothing while no song waits.
-  The border tells a card's state: heavy and `lavender` for the chosen one, double and `yellow`
-  for one that waits for the owner (held songs, or a last run that left something failed or
-  held), `blue` while it runs. The arrow keys (and `h j k l`) move between cards.
+  Where the keyboard is and what state a card is in are told by different things, so one never
+  hides the other. The chosen card is filled (`surface0`), has a heavy border and `›` before its
+  name. The border's colour tells the state of any card, chosen or not: `yellow` for one that
+  waits for the owner (held songs, or a last run that left something failed or held; a double
+  border when it is not the chosen one), `blue` while it runs, otherwise `lavender` when chosen
+  and `surface2` when not. The arrow keys (and `h j k l`) move between cards.
 - **Progress lives in the card.** While a function runs, its card's content gives way to its
   headline, count (`412 of 2,117`), progress bar, time estimate and `N need attention`, with a
   spinner beside its name, so a long single item never looks hung; a task with no known total
@@ -46,6 +49,8 @@ report it; do not substitute another crate or hand-write the capability.
   - *Folder field*: a text field plus a Browse action that opens `ratatui-explorer` to choose a
     folder.
   - *Buttons*: `Continue` (or `Start` on the last step) and `Cancel`, reachable by Tab and click.
+    The button with the focus is filled (`base` on `lavender`); the same holds for the buttons
+    of every other popup.
   - A summary line, and under it what is still missing when the form cannot continue. These
     lines and a field's message wrap; they are never cut off.
   - Keys: Tab and Shift+Tab move between fields; Up/Down move inside a field; Enter continues;
@@ -56,8 +61,8 @@ report it; do not substitute another crate or hand-write the capability.
   row, field, option, button, attention item); the wheel scrolls the list under it. Each drawn
   element records its `Rect`; a click is tested against those. Every mouse action has a keyboard
   equivalent.
-- **Motion** (`tachyonfx`): popups and the running panel fade or slide in and out (150 ms at most);
-  a function row flashes once when its task ends. Input is handled immediately while an effect
+- **Motion** (`tachyonfx`): popups fade in and out (150 ms at most); a card flashes once when its
+  task ends. Input is handled immediately while an effect
   plays. Config `animations = false` turns effects off.
 - **Attention list** (`a`): the held (yellow) and failed (red) items of the selected function's
   last or current run: title, artist and a plain reason that wraps. The last run's items are saved
@@ -66,11 +71,14 @@ report it; do not substitute another crate or hand-write the capability.
   error alone.
 - **Confirmations**: before stopping a task (`s`), before quitting while a task runs, before
   ejecting a device (the question says that clean-up also empties the device's Trash). Quitting
-  with nothing running needs none.
+  with nothing running needs none. A question's two answers are buttons: Left, Right and Tab move
+  the focus between them, Enter presses the focused one, and `y` and `n` answer directly. The
+  focus starts on the answer that does no damage.
 - **Colour** (`catppuccin` 2.9.1, feature `ratatui`, flavour Mocha, background painted with
   `base`), roles defined once in the `theme` module: headings and panel titles `mauve` bold; body
   `text`; secondary `subtext0`; emphasis (numbers, selection marker, key names) `peach`; borders
-  `surface2`, the focused field or popup `lavender`; selected row background `surface0`; running
+  `surface2`, the focused field or popup `lavender`; the focused button `base` on `lavender`;
+  the chosen card's and the selected row's background `surface0`; running
   `blue`, done `green`, attention / held `yellow`, failed `red` (failures only),
   skipped `overlay1`. A non-empty `NO_COLOR` disables colours, background and effects.
 - **Size**: the grid needs 72 columns and 14 rows besides the footer; a card is at most 36 columns
@@ -144,7 +152,7 @@ report it; do not substitute another crate or hand-write the capability.
   Liked Songs and each playlist the user owns, with song counts, remembered → Continue lists the
   ticked lists' songs and shows `N new of M · K waiting in Review` (K counts listed songs already
   in the review list; nothing is searched before Start) → Start. Matching happens during the run,
-  in the running panel.
+  shown in the card.
 - **Sign-in is remembered.** `rspotify` 0.16 `AuthCodePkceSpotify`, scopes `user-library-read` and
   `playlist-read-private`, redirect `http://127.0.0.1:9900/`. The refresh token is kept in the
   macOS Keychain with the `keyring` crate (service `sdl`, account `spotify`) and nowhere else. The
@@ -170,7 +178,14 @@ report it; do not substitute another crate or hand-write the capability.
   revoked from the Spotify account page).
 
 ## F5. Download link
-- Steps: choose the function → form: the link → Start.
+- Steps: choose the function → form: one or more links → Start.
+- **Several links at once**: the Link field takes any number of links separated by spaces, line
+  breaks or commas (a pasted line break is kept as a separator). Each must be an `http` or `https`
+  link that is not a Spotify link; the field's message names the link that is not. A link given
+  twice is taken once. The run reads each link in turn, then takes all their items as one run
+  with one total; the "For me" choice applies to all of them. A link that cannot be read is a
+  failed item naming the link and the run goes on; when no link can be read the run ends with
+  that error.
 - Listing: `yt-dlp --dump-single-json --flat-playlist -- <url>` gives the items and, for a
   playlist, its name and order. A flat listing can lack fields, so each item's own metadata is read
   at its turn with `yt-dlp --dump-single-json --no-playlist -- <item url>` and becomes a wanted
@@ -179,7 +194,7 @@ report it; do not substitute another crate or hand-write the capability.
   WebP). An entry the site reports as unavailable (private or removed) is a failed item with that
   reason. YouTube Music items download directly; every other item goes through
   matching and is held for review when nothing passes (F3).
-- A playlist link also writes a playlist file named after it (F7).
+- Each playlist link also writes its own playlist file, named after it (F7).
 - **Not:** no Spotify links (they are F4), no format field, no confirmation step.
 
 ## F6. Genre, totals and tags (`sdl-library`)
@@ -309,7 +324,7 @@ report it; do not substitute another crate or hand-write the capability.
   changes. Each write is atomic (a temp file in the same folder, then a rename), so a crash never
   leaves a half-written file.
 - `~/.config/sdl/state.toml`: the ticked Spotify lists, the Convert choices, per device its
-  name and choices, the last device (so the main panel names it after a restart), the "never download" songs, and each function's last-run line with its
+  name and choices, the last device (so its card names it after a restart), the "never download" songs, and each function's last-run line with its
   time, its outcome (done / needs attention / failed / stopped) and its attention items.
 - Song downloads run `download_jobs` at a time (`futures` `buffer_unordered`).
 - **Not:** no resume of half-finished files, no history beyond the last run, no queue of pending
@@ -335,7 +350,7 @@ report it; do not substitute another crate or hand-write the capability.
 - **A song another library already has is copied, not downloaded again**: when the wanted song is
   present at the same place in another library, that file is copied (`std::fs::copy`, which clones
   on APFS and so takes no extra space) to a temp file and landed as in F3. It counts as added.
-- The main panel's selection line for a function names the library when it is not the owner's own.
+- A function's card names the library it will act on when it is not the owner's own.
 - On a device, songs go to `<device>/Music/<same relative path>` with no library level: a device
   holds one person's music. Syncing two libraries to the same device merges them there, and the
   form's note says so when the device was last synced from a different library.

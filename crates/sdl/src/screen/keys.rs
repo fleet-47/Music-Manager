@@ -140,6 +140,7 @@ pub const BINDINGS: &[Binding] = &[
     bind(Scope::Notice, "Esc q Enter", "close").foot("Esc", "close"),
     bind(Scope::Question, "y", "yes"),
     bind(Scope::Question, "n, Esc", "no"),
+    bind(Scope::Question, "←→ Tab", "the other answer"),
     bind(Scope::Question, "Enter", "the highlighted one"),
     bind(Scope::Wait, "Esc", "cancel the sign-in")
         .foot("Esc", "cancel")
@@ -161,7 +162,7 @@ fn scope(app: &App) -> Scope {
         Some(Popup::Dialog(_)) => Scope::Form,
         Some(Popup::Help { .. } | Popup::Attention { .. }) => Scope::Scroll,
         Some(Popup::Error(_) | Popup::Ejected(_)) => Scope::Notice,
-        Some(Popup::Confirm(_)) => Scope::Question,
+        Some(Popup::Confirm(..)) => Scope::Question,
         Some(Popup::Waiting(_)) => Scope::Wait,
     }
 }
@@ -179,20 +180,17 @@ fn ejecting(app: &App) -> bool {
 pub fn footer(app: &App) -> Vec<Hint> {
     match app.top() {
         Some(Popup::Dialog(dialog)) => return dialog.hints(),
-        Some(Popup::Confirm(confirm)) => {
+        Some(Popup::Confirm(confirm, focused)) => {
             let words = question(confirm);
             let answer = |key, label: &str| Hint {
                 key,
                 what: label.to_lowercase().into(),
             };
-            let enter = if confirm.enter_answers_yes() {
-                words.yes
-            } else {
-                words.no
-            };
-            // Enter first: a narrow footer keeps the last two, and `y` and `n` are the ones that
-            // must never go.
+            let enter = if *focused { words.yes } else { words.no };
+            // The focus keys and Enter first: a narrow footer keeps the last two, and `y` and
+            // `n` are the ones that must never go.
             return vec![
+                Hint::new("←→", "choose"),
                 answer("Enter", enter),
                 answer("y", words.yes),
                 answer("n", words.no),
@@ -326,10 +324,15 @@ mod tests {
     #[test]
     fn each_popup_footer_says_how_to_answer_or_leave() {
         let mut app = app();
-        app.popups.push(Popup::Confirm(Confirm::Quit));
-        assert_eq!(keys(&app), ["Enter", "y", "n"]);
-        let enter = footer(&app).first().map(|hint| hint.what.to_string());
-        assert_eq!(enter.as_deref(), Some("keep going"));
+        app.popups.push(Popup::ask(Confirm::Quit));
+        assert_eq!(keys(&app), ["←→", "Enter", "y", "n"]);
+        let enter = |app: &App| footer(app).get(1).map(|hint| hint.what.to_string());
+        assert_eq!(enter(&app).as_deref(), Some("keep going"));
+        // Enter is named for the button that has the focus.
+        if let Some(Popup::Confirm(_, yes)) = app.popups.last_mut() {
+            *yes = true;
+        }
+        assert_eq!(enter(&app).as_deref(), Some("quit"));
         app.popups.push(Popup::Waiting(Waiting::Browser));
         assert_eq!(keys(&app), ["Esc"]);
         app.popups

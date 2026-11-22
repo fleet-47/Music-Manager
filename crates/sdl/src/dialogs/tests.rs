@@ -410,7 +410,7 @@ fn download_link_starts_with_a_pasted_link() {
         vec![send(
             TaskId::DownloadLink,
             Command::Answer(Answers::DownloadLink {
-                url: "https://music.youtube.com/watch?v=abc".into(),
+                urls: vec!["https://music.youtube.com/watch?v=abc".into()],
                 recipient: sdl_tasks::Recipient::Me,
             })
         )]

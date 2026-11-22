@@ -118,15 +118,29 @@ impl Theme {
         self.fg(PALETTE.mocha.colors.overlay1)
     }
 
-    /// What Enter acts on: the focused field's label, the focused or default button. `lavender`,
-    /// bold (bold alone without colour, so it still stands out).
+    /// The focused field's label: `lavender`, bold (bold alone without colour, so it still stands
+    /// out).
     #[must_use]
     pub fn focus(self) -> Style {
         self.border_focus().add_modifier(Modifier::BOLD)
     }
 
+    /// The button with the focus, the one Enter presses: filled, `base` on `lavender`, bold.
+    /// Without colour it is reversed, so it is still a filled block.
+    #[must_use]
+    pub fn button(self) -> Style {
+        if self.colour {
+            Style::new()
+                .fg(PALETTE.mocha.colors.base.into())
+                .bg(PALETTE.mocha.colors.lavender.into())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        }
+    }
+
     /// The styles a form is drawn in, from the roles here: labels `mauve`, body `text`, secondary
-    /// `subtext0`, emphasis `peach`, the focused field `lavender`, flagged parts and what is
+    /// `subtext0`, emphasis `peach`, the focused field `lavender`, the focused button filled, flagged parts and what is
     /// missing `yellow` (red is for failures only), the highlighted row on `surface0`.
     #[must_use]
     pub fn form_style(self) -> sdl_form::FormStyle {
@@ -136,6 +150,7 @@ impl Theme {
             secondary: self.secondary(),
             emphasis: self.emphasis(),
             focus: self.focus(),
+            button: self.button(),
             selected: self.selected(),
             flagged: self.attention(),
             error: self.attention(),

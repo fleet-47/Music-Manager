@@ -417,14 +417,14 @@ impl Form {
         }
     }
 
-    /// Pasted text goes into the focused text field, folder field or list filter, with line
-    /// breaks removed. Anything else ignores it.
+    /// Pasted text goes into the focused text field, folder field or list filter, on one line
+    /// ([`one_line`]). Anything else ignores it.
     #[must_use]
     pub fn paste(&mut self, text: &str) -> Reaction {
         let Focus::Field(key) = self.focus.clone() else {
             return Reaction::Ignored;
         };
-        let flat: String = text.chars().filter(|c| !c.is_control()).collect();
+        let flat = one_line(text);
         let Some(field) = self.field_mut(key) else {
             return Reaction::Ignored;
         };
@@ -986,6 +986,22 @@ fn browse_start(text: &str) -> PathBuf {
     home.unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// Pasted text as one line. Line breaks and tabs between two pieces of text become one space, so
+/// what was pasted on separate lines stays apart; those at either end, and every other control
+/// character, are dropped.
+fn one_line(text: &str) -> String {
+    text.split(['\n', '\r', '\t'])
+        .map(|piece| {
+            piece
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect::<String>()
+        })
+        .filter(|piece| !piece.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyEventState, KeyModifiers};
@@ -1091,6 +1107,13 @@ mod tests {
         assert_eq!(
             form.value("link"),
             Some(Value::Text("https://a.b/c".into()))
+        );
+        // A line break between two pieces keeps them apart: it becomes one space.
+        let mut lines = Form::new("F").field(Field::text("link", "Link"));
+        let _ = lines.paste("\r\nhttps://a.b/c\r\n\r\nhttps://d.e/f\tg\u{7}h\n");
+        assert_eq!(
+            lines.value("link"),
+            Some(Value::Text("https://a.b/c https://d.e/f gh".into()))
         );
         let mut nothing = Form::new("F");
         assert_eq!(nothing.paste("x"), Reaction::Ignored);

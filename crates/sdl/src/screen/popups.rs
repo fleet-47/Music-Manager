@@ -210,12 +210,11 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                 on_top.then_some(&mut hits.form),
                 &mut stack,
             ),
-            Popup::Confirm(confirm) => {
+            Popup::Confirm(confirm, yes) => {
                 let words = question(confirm);
-                let enter_yes = confirm.enter_answers_yes();
                 let buttons = [
-                    Button::new("y", words.yes, PopupTarget::Yes).default_if(enter_yes),
-                    Button::new("n", words.no, PopupTarget::No).default_if(!enter_yes),
+                    Button::new("y", words.yes, PopupTarget::Yes).focused_if(*yes),
+                    Button::new("n", words.no, PopupTarget::No).focused_if(!*yes),
                 ];
                 plain(
                     frame,
@@ -445,13 +444,13 @@ pub fn question(confirm: &Confirm) -> Question {
     }
 }
 
-/// A popup button: the key that does the same, its words, what a click means, and whether Enter
-/// presses it (drawn highlighted, so Enter does what is shown).
+/// A popup button: the key that does the same, its words, what a click means, and whether it
+/// has the focus (drawn filled; Enter presses it, so Enter does what is shown).
 struct Button {
     key: &'static str,
     label: &'static str,
     target: PopupTarget,
-    default: bool,
+    focused: bool,
 }
 
 impl Button {
@@ -460,17 +459,17 @@ impl Button {
             key,
             label,
             target,
-            default: false,
+            focused: false,
         }
     }
 
     /// The Close button of messages, help and the attention list; Enter closes them too.
     const fn close() -> Self {
-        Self::new("Esc", "Close", PopupTarget::Close).default_if(true)
+        Self::new("Esc", "Close", PopupTarget::Close).focused_if(true)
     }
 
-    const fn default_if(mut self, default: bool) -> Self {
-        self.default = default;
+    const fn focused_if(mut self, focused: bool) -> Self {
+        self.focused = focused;
         self
     }
 }
@@ -485,20 +484,24 @@ fn draw_buttons(
 ) {
     let mut x = row.x;
     for button in buttons {
-        let label = if button.default {
-            theme.focus()
+        // Every button has a cell of air each side, so the filled one is a block and nothing
+        // moves when the focus does.
+        let text = if button.focused {
+            Line::styled(
+                format!(" [{}] {} ", button.key, button.label),
+                theme.button(),
+            )
         } else {
-            theme.body()
+            Line::from(vec![
+                Span::styled(format!(" [{}] ", button.key), theme.emphasis()),
+                Span::styled(format!("{} ", button.label), theme.body()),
+            ])
         };
-        let text = Line::from(vec![
-            Span::styled(format!("[{}] ", button.key), theme.emphasis()),
-            Span::styled(button.label, label),
-        ]);
         let wide = u16::try_from(text.width()).unwrap_or(u16::MAX);
         let rect = Rect::new(x, row.y, wide.min(row.right().saturating_sub(x)), 1);
         text.render(rect, buf);
         drawn.push(rect, button.target);
-        x = rect.right().saturating_add(2);
+        x = rect.right().saturating_add(1);
     }
 }
 

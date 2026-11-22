@@ -3,9 +3,10 @@
 Read first, end to end: `.agents/AGENTS.md` (rulings), `.fleet/docs/SPEC-tui.md` (the build contract,
 F1 to F13), `.fleet/docs/BACKLOG.md` (tasks waiting on a condition).
 
-## Where it stands (2026-11-21, evening)
-- `sdl` is a music library manager: eight crates, one Rust TUI. Everything is committed in jj.
-- The gate passes: `cargo fmt`, `cargo clippy` with the Gen.v2 flags, 435 tests run as
+## Where it stands (2026-11-22)
+- `sdl` is a music library manager: eight crates, one Rust TUI. The work of 2026-11-22 is in the
+  jj working copy, not yet described as a commit.
+- The gate passes: `cargo fmt`, `cargo clippy` with the Gen.v2 flags, 438 tests run as
   `mise x -- cargo test --workspace --all-features --locked`.
 - Release binary: `$SHIP_ROOT/outputs/cargo/target/release/sdl`. cargo's output folder left the repo
   on 2026-11-21 (fleet cargo config in `~/.config/cargo`); `mise run tui` runs that path. The repo's own
@@ -17,31 +18,28 @@ F1 to F13), `.fleet/docs/BACKLOG.md` (tasks waiting on a condition).
 
 ## Open in the code, in order
 
-### 1. The Wi-Fi fault (not found)
+### 1. The Wi-Fi fault (provisionally resolved, 2026-11-22)
 On 2026-11-21 at 19:40 Yazid ran Download link, saw his whole Wi-Fi connection suffer, pressed Stop
 (the run was saved as "stopped after 0"), and the connection recovered only when the TUI was killed.
-- Ruled out with evidence: unlimited parallel downloads (capped at `download_jobs`, default 4, in
-  `sdl-tasks/src/tasks/{link,spotify,review}.rs`); more than one yt-dlp helper (all calls go through
-  `sdl-youtube/src/ytdlp.rs`); a retry loop in our code or a background task in `innertube-rs`; this
-  yt-dlp build running as two processes (measured: one).
-- Fixed since, because it was real whether or not it was the cause: Stop killed yt-dlp but not the
-  programs yt-dlp starts (deno, ffmpeg). yt-dlp now leads its own process group and the whole group
-  is killed (`ytdlp.rs`, with a test that fails without the fix).
-- **Not known:** what was on the network during that run. The app keeps no log.
-- Next step: get from Yazid the link he pasted and whether other devices lost Wi-Fi too. Reproduce
-  with that link in a temp HOME while recording, each second, the app's process tree, its open
-  connections (`lsof -i`) and the bytes on `en0`, before and after Stop. Do not name a cause without
-  that measurement.
+- The fix: Stop killed yt-dlp but not the programs yt-dlp starts (deno, ffmpeg). yt-dlp now leads
+  its own process group and Stop kills the whole group (`sdl-youtube/src/ytdlp.rs`, with a test
+  that fails without the fix). Every yt-dlp call goes through that one function.
+- Confirmed 2026-11-22 with the real yt-dlp (2026.10.26) on a YouTube Music link: its `deno` helper
+  runs in yt-dlp's process group, and killing the group left no yt-dlp, deno or ffmpeg process.
+- Convert and Sync device stop differently by design (spec F10): the `ffmpeg` conversions in hand
+  finish, then the run stops. They use no network.
+- The cause of the fault itself was never measured. Yazid's ruling: closed unless it happens again.
+  If it does, record the app's process tree, its connections (`lsof -i`) and the bytes on `en0`
+  before and after Stop, with the link that was pasted, before naming a cause.
 
-### 2. Bulk links in Download link (wanted by Yazid, no blocker)
-- Today the form takes one link. Yazid asked for several at once.
-- Shape: the Link field takes several links separated by spaces or line breaks; each must pass the
-  existing checks (http or https, not Spotify); the task lists each link in turn and runs all their
-  items as one run with one total; each playlist link still writes its own playlist file.
-- Watch for: a pasted line break is dropped today, which would join two links into one (it must
-  become a separator); the field's message must say which link is wrong; the "For me" choice applies
-  to the whole batch.
-- Needs a spec change in F5 before code.
+### 2. Built 2026-11-22, gate green, not yet seen on a real terminal or run against real tools
+- Several links at once (spec F5): the Link field splits on spaces, line breaks and commas
+  (`sdl/src/dialogs/link.rs`), a pasted line break becomes a space (`sdl-form/src/form.rs`,
+  `one_line`), and the run reads each link in turn and takes all items as one run
+  (`sdl-tasks/src/tasks/link.rs`). The run itself has no test: it needs yt-dlp and the network.
+- Keyboard focus (spec F1): the chosen card is filled with `›` before its name and the border
+  colour tells its state; the focused button of every form and popup is filled; a question's
+  answers take Left, Right and Tab (`Popup::Confirm` carries which answer has the focus).
 
 ### 3. Review of today's unreviewed code
 An Opus red team of the libraries change and the home-screen rebuild was planned and put on hold by

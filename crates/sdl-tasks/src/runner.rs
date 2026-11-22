@@ -391,8 +391,8 @@ struct Running {
 ///   `Answer(SyncSpotify { lists, recipient })` (ticked ids are saved): `Headline`s while listing,
 ///   `NewOfTotal`. `Go`: `Started`, `Headline`s, `Counts` (a full snapshot after every song),
 ///   `Attention`, `HeldCount`, `Finished`.
-/// * **Download link**: `Headline`. `Answer(DownloadLink { url, recipient })` starts the run at once:
-///   `Started`, `Headline`s (reading the link: no total yet), `Counts`, `Attention`, `HeldCount`,
+/// * **Download link**: `Headline`. `Answer(DownloadLink { urls, recipient })` starts the run at once:
+///   `Started`, `Headline`s (reading each link: no total yet), `Counts`, `Attention`, `HeldCount`,
 ///   `Finished`.
 /// * **Review**: `Headline`; the held songs are [`Runner::review`]. `Answer(Review { choices })`
 ///   starts the run at once: `Started`, `Headline`s, `Counts`, `Attention`, `HeldCount`,
@@ -1083,7 +1083,7 @@ mod tests {
             // The answer starts the run on another thread while this one stops it: whichever way
             // the two interleave, the run must end with `Stopped` and not carry on for ever.
             let answer = Command::Answer(crate::conversation::Answers::DownloadLink {
-                url: "u".into(),
+                urls: vec!["u".into()],
                 recipient: crate::conversation::Recipient::Me,
             });
             assert!(runner.send(TaskId::DownloadLink, answer));
