@@ -456,6 +456,7 @@ mod tests {
             volume_uuid: Some("uuid".into()),
             free_bytes: 1,
             disk_image: true,
+            not_mounted: None,
         };
         assert_eq!(
             selection_text(TaskId::SyncDevice, &state, &[image], 0),

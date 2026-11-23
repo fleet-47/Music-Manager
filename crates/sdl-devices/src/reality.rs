@@ -14,7 +14,7 @@ use sdl_core::{
 };
 
 use crate::testing::{lib, mp3, put};
-use crate::{DevicesError, clean_up_and_eject, list, plan, run, watch};
+use crate::{DevicesError, clean_up_device, eject, list, plan, run, watch};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -175,7 +175,7 @@ async fn sdl_devices_on_a_real_fat32_volume() -> TestResult {
         );
     }
 
-    // Eject: macOS items and the DS_Store go, the songs stay, and the volume unmounts.
+    // Clean-up: macOS items and the DS_Store go, the songs stay; eject then unmounts the volume.
     put(&image.mount.join(".Trashes/501/x"), b"x")?;
     put(&image.mount.join(".fseventsd/x"), b"x")?;
     put(&image.mount.join("Music/.DS_Store"), b"x")?;
@@ -192,7 +192,8 @@ async fn sdl_devices_on_a_real_fat32_volume() -> TestResult {
         ));
         assert!(!beside.exists(), "{} survived", beside.display());
     }
-    clean_up_and_eject(&device, &forced.written()).await?;
+    clean_up_device(&device, &forced.written()).await?;
+    eject(&device).await?;
     assert!(!image.mount.exists(), "still mounted");
     Ok(())
 }
@@ -212,6 +213,7 @@ async fn conversion_with_the_real_ffmpeg() -> TestResult {
         volume_uuid: None,
         free_bytes: u64::MAX,
         disk_image: false,
+        not_mounted: None,
     };
     let choice = DeviceChoice {
         what: Selection {
@@ -234,5 +236,28 @@ async fn conversion_with_the_real_ffmpeg() -> TestResult {
     let report = run(&planned, &events, &CancellationToken::new()).await?;
     assert_eq!((report.added, report.failed), (1, 0), "{report:?}");
     assert!(std::fs::metadata(dev.path().join("Music/Band/Rec/Song.m4a"))?.len() > 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "runs the real `diskutil unmount` on a folder that is not a mount point"]
+async fn eject_only_unmounts_and_cleans_nothing() -> TestResult {
+    let dev = tempfile::tempdir()?;
+    put(&dev.path().join(".Trashes/501/x"), b"x")?;
+    put(&dev.path().join("Music/.DS_Store"), b"x")?;
+    let device = sdl_core::Device {
+        name: "TESTDEV".into(),
+        mount_point: dev.path().to_path_buf(),
+        volume_uuid: None,
+        free_bytes: 0,
+        disk_image: false,
+        not_mounted: None,
+    };
+    // A plain folder is not a mount point, so `diskutil` refuses; the point is that the refusal
+    // comes from the unmount and nothing was cleaned first.
+    let refused = eject(&device).await;
+    assert!(matches!(refused, Err(DevicesError::Diskutil { .. })));
+    assert!(dev.path().join(".Trashes/501/x").exists());
+    assert!(dev.path().join("Music/.DS_Store").exists());
     Ok(())
 }

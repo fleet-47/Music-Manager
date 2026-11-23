@@ -42,7 +42,7 @@ impl DevicePlan {
 
     /// The files the last [`crate::run`] of this plan wrote and the folders it made, up to now,
     /// also when the run ended with an error (a full or vanished device) or a stop: what
-    /// [`crate::clean_up_and_eject`] needs to remove the `._` files macOS made beside them.
+    /// [`crate::clean_up_device`] needs to remove the `._` files macOS made beside them.
     #[must_use]
     pub fn written(&self) -> Vec<PathBuf> {
         self.written
@@ -295,6 +295,7 @@ mod tests {
             volume_uuid: None,
             free_bytes,
             disk_image: false,
+            not_mounted: None,
         }
     }
 

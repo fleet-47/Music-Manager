@@ -70,7 +70,7 @@ report it; do not substitute another crate or hand-write the capability.
 - **Errors**: a popup saying what went wrong and what to do, in plain words. Never a raw library
   error alone.
 - **Confirmations**: before stopping a task (`s`), before quitting while a task runs, before
-  ejecting a device (the question says that clean-up also empties the device's Trash). Quitting
+  ejecting a device (F10: this one answers itself after 30 seconds). Quitting
   with nothing running needs none. A question's two answers are buttons: Left, Right and Tab move
   the focus between them, Enter presses the focused one, and `y` and `n` answer directly. The
   focus starts on the answer that does no damage.
@@ -93,7 +93,8 @@ report it; do not substitute another crate or hand-write the capability.
   an animation frame. All queued task events are applied before one draw.
 - Timers exist only while needed: an animation timer (about 30 frames a second) while a
   `tachyonfx` effect is running; a spinner timer (100 ms) while a task runs or a form is
-  busy, which also advances the elapsed time. With nothing running and no effect playing the loop waits
+  busy, which also advances the elapsed time; a countdown timer (once a second) while the eject
+  question is the top popup (F10). With none of these the loop waits
   on input alone and no timer exists. One pure function decides the next wake from the app state
   and is unit-tested (idle → none).
 - Progress bars and counts change only when a progress event arrives.
@@ -279,7 +280,7 @@ report it; do not substitute another crate or hand-write the capability.
 
 ## F10. Sync device (`sdl-library`)
 - Steps: choose the function → form: **Device** (radio group: every mounted external or removable
-  volume with its free space; the last one synced is preselected; "No device found. Plug one
+  volume with its free space, then the not-mounted ones, named below; the last one synced is preselected; "No device found. Plug one
   in." when there is none), **Direction** (radio: To device / From device), **What** (To device: a
   tick list of Whole library and each playlist; From device: a tick list of the device's top-level
   folders), **Format on device** (To device: dropdown As is / MP3 / M4A), **Quality** and **Keep
@@ -287,7 +288,9 @@ report it; do not substitute another crate or hand-write the capability.
   which the player must support, and that a Disc shows a changed playlist as a new numbered copy
   beside the old one. Remembered per device → summary `N files, about X GB to copy · M
   already there · Y GB free on <device>`; when there is not enough room it says so in plain words
-  and Start is unavailable → Start → when done, "Clean up and eject <device>?".
+  and Start is unavailable → Start → clean-up at the end of the run → when the run completed,
+  "Eject <device>?". The form says that every sync ends with a clean-up that also empties the
+  device's Trash.
 - Devices: every entry of `/Volumes` asked with `diskutil info -plist <mount point>`
   (`tokio::process::Command`), parsed with `plist` and `serde`; kept when external or removable. A
   mounted disk image is listed with "(disk image)" after its name (confirm in real `diskutil`
@@ -310,12 +313,30 @@ report it; do not substitute another crate or hand-write the capability.
   device is full or gone ends the run with a plain message; the files already complete stay.
 - Stopping is cooperative here and in Convert: the file in hand is finished, then the run stops;
   the device stays mounted.
-- Clean up and eject: remove `.Spotlight-V100`, `.Trashes`, `.fseventsd` and `.TemporaryItems`
-  from the device root and every `.DS_Store`; remove a `._X` file only when `sdl` created the file
-  or folder `X` in this run and the `._X` file starts with the AppleDouble signature (bytes `00 05 16 07`); then
-  `diskutil unmount <mount point>`.
+- Clean-up (ruled 2026-11-23: its own step, no longer part of eject): runs as the last step of
+  every Sync device run, in either direction, whether the run completed, was stopped or failed,
+  as long as the device is still mounted; no question is asked. It removes `.Spotlight-V100`,
+  `.Trashes`, `.fseventsd` and `.TemporaryItems` from the device root and every `.DS_Store`;
+  removes a `._X` file only when `sdl` created the file or folder `X` in this run and the `._X`
+  file starts with the AppleDouble signature (bytes `00 05 16 07`). The task is still running
+  while it cleans, so the device stays busy until it is done. A clean-up that fails is reported
+  on the run's line and does not change the run's own result.
+- Eject (ruled 2026-11-23): after a completed run and its clean-up, the question "Eject
+  <device>?" shows a countdown from 30 seconds and ejects when it reaches zero; Eject answers
+  at once, Keep mounted cancels. Eject is `diskutil unmount <mount point>` and nothing else. A
+  stopped or failed run asks nothing. The countdown redraws once a second while the question
+  is on screen (F2).
+- Not-mounted drives (ruled 2026-11-23): the Device list also shows external or removable
+  volumes that are plugged in but not mounted, each with "(not mounted)" after its name, found
+  with `diskutil list -plist external` (confirm the keys in real output and in `man diskutil`;
+  partitions that hold no user file system, such as EFI, are left out). Choosing one and
+  continuing mounts it with `diskutil mount <device identifier>` (read-write, the system's
+  default); a mount that fails shows `diskutil`'s own words and the form stays open. Nothing is
+  mounted by moving through the list or by opening the form. From device: a not-mounted drive
+  has no folders to tick yet, so Continue is available without them; it mounts the drive, the
+  folders then appear, and Continue is unavailable again until one is ticked. The list is read again when `/Volumes` changes and on `r`.
 - **Not:** not a two-way merge in one run, never deletes a song on either side, removes nothing
-  from a device except the macOS items named in clean-up, does not mount or format anything, no folder-per-playlist arrangement,
+  from a device except the macOS items named in clean-up, does not format anything, no folder-per-playlist arrangement,
   no import of playlists from a device, no rclone, no DiskArbitration.
 
 ## F11. Tasks and state (`sdl`)
@@ -464,13 +485,11 @@ binary.
 - Toolchain: fenix stable. The global `~/.cargo/config.toml` supplies profiles, rustflags and the
   clippy config. The repo carries no `.cargo/`, `clippy.toml`, `rustfmt.toml`, `[lints]` table,
   rustflags or profile overrides.
-- Gate, all with `--workspace --all-targets --all-features --locked`: `cargo fmt --all`,
-  `cargo check`, `cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
-  -D clippy::disallowed_methods -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
-  -D clippy::arithmetic_side_effects -D clippy::cast_possible_truncation -D clippy::cast_possible_wrap
-  -D clippy::cast_sign_loss -F unsafe_code -D clippy::allow_attributes
-  -D clippy::allow_attributes_without_reason`, `cargo build`, and `cargo test` run as
-  `mise x -- cargo test …`, because tests use the real `ffmpeg`, which is on `PATH` only through mise.
+- Gate: `cargo fmt --all`, `cargo lint`, and
+  `mise x -- cargo test --workspace --all-targets --all-features --locked` (tests use the real
+  `ffmpeg`, which is on `PATH` only through mise). `cargo lint` is an alias in the global cargo
+  config that runs clippy over the whole workspace with the Gen.v2 lint levels; the levels are
+  defined there and are never typed on a command line.
 - No `#[allow]` or `#[expect]` anywhere. Tests return `Result` and use `?`.
 - Tests cover pure logic and file operations in temp directories. No invented API fixtures.
 

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Format, LibraryId, Preset, Quality};
 
-/// A mounted external or removable volume, as `diskutil info -plist` describes it when it is
+/// An external or removable volume, mounted or not, as `diskutil info -plist` describes it when it is
 /// listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Device {
@@ -20,14 +20,20 @@ pub struct Device {
     pub free_bytes: u64,
     /// A mounted disk image rather than a physical drive (`BusProtocol` is `Disk Image`).
     pub disk_image: bool,
+    /// The device identifier (`disk4s2`) of a volume that is plugged in but not mounted; `None`
+    /// for a mounted one. Such a device has no mount point and its free space is not known.
+    pub not_mounted: Option<String>,
 }
 
 impl Device {
     /// The name as shown to the owner: the volume name, followed by " (disk image)" for a mounted
-    /// disk image (F10). The one place this wording lives.
+    /// disk image or " (not mounted)" for a volume that is plugged in but not mounted (F10). The
+    /// one place this wording lives.
     #[must_use]
     pub fn label(&self) -> String {
-        if self.disk_image {
+        if self.not_mounted.is_some() {
+            format!("{} (not mounted)", self.name)
+        } else if self.disk_image {
             format!("{} (disk image)", self.name)
         } else {
             self.name.clone()
@@ -250,6 +256,7 @@ mod tests {
             volume_uuid: uuid.map(str::to_owned),
             free_bytes: 1,
             disk_image: false,
+            not_mounted: None,
         }
     }
 
@@ -257,6 +264,13 @@ mod tests {
     fn id_is_the_uuid_else_the_name() {
         assert_eq!(device(Some("U-1")).id(), "U-1");
         assert_eq!(device(None).id(), "SNOWSKY");
+    }
+
+    #[test]
+    fn a_volume_that_is_not_mounted_is_labelled_after_its_name() {
+        let mut unmounted = device(None);
+        unmounted.not_mounted = Some("disk4s2".into());
+        assert_eq!(unmounted.label(), "SNOWSKY (not mounted)");
     }
 
     #[test]

@@ -6,6 +6,8 @@
 //! [`extent`] is the pure half of a scrolling popup: how long its content is and how much of it
 //! shows, so keys and clicks clamp the scroll against the same numbers the drawing uses.
 
+use std::time::Instant;
+
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Position, Rect, Size};
@@ -211,7 +213,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                 &mut stack,
             ),
             Popup::Confirm(confirm, yes) => {
-                let words = question(confirm);
+                let words = question(confirm, app.clock.instant);
                 let buttons = [
                     Button::new("y", words.yes, PopupTarget::Yes).focused_if(*yes),
                     Button::new("n", words.no, PopupTarget::No).focused_if(!*yes),
@@ -239,9 +241,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                 frame,
                 theme,
                 "Ejected",
-                &[format!(
-                    "{device} is cleaned up and ejected. It is safe to unplug."
-                )],
+                &[format!("{device} is ejected. It is safe to unplug.")],
                 &[Button::close()],
                 on_top.then_some(&mut hits.popup),
                 &mut stack,
@@ -255,7 +255,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: Theme, hits: &mut Hits) -> Opti
                     ),
                     Waiting::Eject(device) => (
                         format!(
-                            "{spinner} Cleaning up and ejecting {device}. You can hide this; you will be told when it is safe to unplug."
+                            "{spinner} Ejecting {device}. You can hide this; you will be told when it is safe to unplug."
                         ),
                         vec![Button::new("Esc", "Hide", PopupTarget::Close)],
                     ),
@@ -407,9 +407,9 @@ pub struct Question {
     pub no: &'static str,
 }
 
-/// The words of `confirm`.
+/// The words of `confirm` as they read at `now` (the eject question counts down).
 #[must_use]
-pub fn question(confirm: &Confirm) -> Question {
+pub fn question(confirm: &Confirm, now: Instant) -> Question {
     let (title, text, yes, no) = match confirm {
         Confirm::Stop(task) => (
             "Stop?",
@@ -423,11 +423,14 @@ pub fn question(confirm: &Confirm) -> Question {
             "Quit",
             "Keep going",
         ),
-        Confirm::Eject { device } => (
+        Confirm::Eject { device, .. } => (
             "Eject?",
-            format!("Clean up and eject {device}? Clean-up also empties the device's Trash."),
-            "Clean up and eject",
-            "Leave it",
+            format!(
+                "Eject {device}? Ejecting by itself in {} s.",
+                confirm.seconds_left(now).unwrap_or_default()
+            ),
+            "Eject",
+            "Keep mounted",
         ),
         Confirm::Browser => (
             "Sign in",

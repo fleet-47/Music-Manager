@@ -1,4 +1,5 @@
-//! Clean up and eject (F10): remove the macOS items a Mac leaves on a device, then unmount it.
+//! Clean up and eject (F10), two separate steps: remove the macOS items a Mac leaves on a device;
+//! unmount it.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -22,24 +23,33 @@ const ROOT_ITEMS: [&str; 4] = [
 /// The first bytes of an `AppleDouble` file.
 const APPLE_DOUBLE: [u8; 4] = [0x00, 0x05, 0x16, 0x07];
 
-/// Clean up and eject (the owner has been asked, and was told it empties the device's Trash):
+/// Clean up the device after a Sync device run (the last step of every run, with no question):
 /// remove `.Spotlight-V100`, `.Trashes`, `.fseventsd` and `.TemporaryItems` from the device root
 /// and every `.DS_Store`; remove a `._X` file only when `X` is in `written` (a file this run
-/// wrote, or a folder it made: [`crate::DevicePlan::written`]) and the file starts with the `AppleDouble` signature (bytes `00 05 16 07`); then
-/// `diskutil unmount <mount point>` (`sdl_core::process::run`). Removes nothing else. A clean-up
-/// that fails stops before the unmount, so the owner is told before anything else happens.
+/// wrote, or a folder it made: [`crate::DevicePlan::written`]) and the file starts with the
+/// `AppleDouble` signature (bytes `00 05 16 07`). Removes nothing else. A device that is no
+/// longer mounted is left alone.
 ///
 /// # Errors
-/// [`DevicesError::Io`] when the device cannot be read or an item cannot be removed;
-/// [`DevicesError::Diskutil`] when the unmount is refused, with `diskutil`'s own words (for
-/// example which program is still using the device).
-pub async fn clean_up_and_eject(device: &Device, written: &[PathBuf]) -> Result<(), DevicesError> {
+/// [`DevicesError::Io`] when the device cannot be read or an item cannot be removed.
+pub async fn clean_up_device(device: &Device, written: &[PathBuf]) -> Result<(), DevicesError> {
     let (root, written) = (device.mount_point.clone(), written.to_vec());
+    if !root.is_dir() {
+        return Ok(());
+    }
     tokio::task::spawn_blocking(move || clean_up(&root, &written))
         .await
         .map_err(|error| {
             DevicesError::Library(sdl_library::LibraryError::Task(error.to_string()))
-        })??;
+        })?
+}
+
+/// Eject: `diskutil unmount <mount point>` (`sdl_core::process::run`) and nothing else.
+///
+/// # Errors
+/// [`DevicesError::Diskutil`] when the unmount is refused, with `diskutil`'s own words (for
+/// example which program is still using the device).
+pub async fn eject(device: &Device) -> Result<(), DevicesError> {
     let args = [
         OsString::from("unmount"),
         device.mount_point.as_os_str().to_owned(),
@@ -194,6 +204,40 @@ mod tests {
         put(&dev.path().join("Music/A/Al/x.opus"), b"x")?;
         clean_up(dev.path(), &[])?;
         assert!(dev.path().join("Music/A/Al/x.opus").exists());
+        Ok(())
+    }
+
+    fn device_at(path: &Path) -> Device {
+        Device {
+            name: "TESTDEV".into(),
+            mount_point: path.to_path_buf(),
+            volume_uuid: None,
+            free_bytes: 0,
+            disk_image: false,
+            not_mounted: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn clean_up_device_cleans_a_mounted_device_and_leaves_the_songs() -> TestResult {
+        let dev = tempfile::tempdir()?;
+        let root = dev.path();
+        put(&root.join(".Trashes/501/x"), b"x")?;
+        put(&root.join("Music/.DS_Store"), b"x")?;
+        put(&root.join("Music/A/song.opus"), b"audio")?;
+        clean_up_device(&device_at(root), &[]).await?;
+        assert!(!root.join(".Trashes").exists());
+        assert!(!root.join("Music/.DS_Store").exists());
+        assert!(root.join("Music/A/song.opus").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clean_up_device_skips_a_device_that_is_no_longer_mounted() -> TestResult {
+        let dev = tempfile::tempdir()?;
+        let gone = dev.path().join("unplugged");
+        clean_up_device(&device_at(&gone), &[]).await?;
+        assert!(!gone.exists(), "nothing was made or touched");
         Ok(())
     }
 }

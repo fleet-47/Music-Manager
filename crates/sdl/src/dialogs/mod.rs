@@ -18,7 +18,8 @@
 //!    (`Making the plan`, or the task's headlines). Sync device and Convert also send `Answer`
 //!    after each `Reaction::Changed` of a dropdown, radio group, tick list or toggle while nothing
 //!    is missing, and once when the form is first ready with nothing missing (the remembered
-//!    choices), so the summary follows the owner's choices; a text or folder edit only clears
+//!    choices), so the summary follows the owner's choices (not while a not-mounted drive is chosen: only
+//!    `Continue` answers then, and mounts it); a text or folder edit only clears
 //!    the summary and sets `Continue` (no plan per keystroke). Sync Spotify sends `Answer` only on
 //!    `Continue` (listing songs costs Spotify calls); a change after its summary clears the summary
 //!    and sets `Continue` again.
@@ -297,6 +298,13 @@ impl Dialog {
         let Some(answers) = self.answers() else {
             return Vec::new();
         };
+        if let Extra::SyncDevice(state) = &mut self.extra
+            && device::is_unmounted(&self.form, state)
+        {
+            // Continue on a drive that is not mounted mounts it; no plan is asked for yet.
+            device::begin_mount(state, &mut self.conv);
+            return vec![self.send(Command::Answer(answers))];
+        }
         self.conv.ask();
         vec![self.send(Command::Answer(answers))]
     }
@@ -350,6 +358,12 @@ impl Dialog {
 
     /// Ask for a new plan when the form changed, nothing is awaited and nothing is missing.
     fn replan(&mut self) -> Vec<Cmd> {
+        // Nothing is mounted by browsing: a not-mounted drive is answered only by Continue.
+        if let Extra::SyncDevice(state) = &self.extra
+            && device::is_unmounted(&self.form, state)
+        {
+            return Vec::new();
+        }
         if !self.conv.is_stale() || self.conv.is_waiting() || !self.form.missing().is_empty() {
             return Vec::new();
         }

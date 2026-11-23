@@ -4,8 +4,8 @@ Tasks waiting on a condition. Each names when it runs.
 
 ## Remove pre-existing macOS `._` files from devices (one time, by hand)
 - **When:** after the build is complete and its beta test has passed, on the next device sync.
-- **What:** with the device mounted, list every `._*` file on it that `sdl`'s eject clean-up leaves behind, review the list with Yazid, and delete the macOS ones by hand. Done once per device.
-- **Why:** eject clean-up removes a `._X` file only when `sdl` wrote `X` in that sync and the file carries the AppleDouble signature, so it can never delete a player's own files. `._` files left by earlier copies are outside that rule and stay until this task.
+- **What:** with the device mounted, list every `._*` file on it that `sdl`'s end-of-sync clean-up leaves behind, review the list with Yazid, and delete the macOS ones by hand. Done once per device.
+- **Why:** clean-up removes a `._X` file only when `sdl` wrote `X` in that sync and the file carries the AppleDouble signature, so it can never delete a player's own files. `._` files left by earlier copies are outside that rule and stay until this task.
 
 ## Delete the old-flow music files (by hand)
 - **When:** after the new build has synced Liked Songs into the `Artist/Album/Title` layout and Yazid has confirmed the library and a device sync work.

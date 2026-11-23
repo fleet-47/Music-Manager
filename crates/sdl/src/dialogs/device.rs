@@ -1,5 +1,5 @@
 //! Sync device (F10): device, direction, what, format, quality and cover, then the plan line,
-//! then Start; afterwards the app asks "Clean up and eject <device>?".
+//! then Start; afterwards the app asks "Eject <device>?".
 //!
 //! The form follows what is chosen: To device shows `What` and `Format on device`, From device
 //! shows the device's folders; `Quality` and `Cover` show only while converting. Choices are
@@ -22,7 +22,7 @@ use crate::app::{Cmd, Settings};
 use crate::fmt::bytes;
 use sdl_core::words::{files, thousands};
 
-/// Radio group of mounted external or removable volumes. Option ids are `Device::id`.
+/// Radio group of external or removable volumes, mounted or not. Option ids are `Device::id`.
 pub(super) const DEVICE: &str = "device";
 /// Radio group: To device, From device. Option ids `to` and `from`.
 pub(super) const DIRECTION: &str = "direction";
@@ -41,9 +41,11 @@ pub(super) const COVER: &str = "cover";
 const AS_IS: &str = "as-is";
 
 /// The note about playlists (F10): `.m3u8` files the player must support, and a Disc showing a
-/// changed playlist as a new numbered copy beside the old one.
+/// changed playlist as a new numbered copy beside the old one; and that every sync ends with a
+/// clean-up that also empties the device's Trash.
 pub(super) const NOTE: &str = "Playlists are written as .m3u8 files, which the player must \
-support. A Disc shows a changed playlist as a new numbered copy beside the old one.";
+support. A Disc shows a changed playlist as a new numbered copy beside the old one. Every sync \
+ends with a clean-up that also empties the device's Trash.";
 
 /// What this dialog keeps besides its form.
 #[derive(Debug, Default)]
@@ -57,6 +59,9 @@ pub(super) struct State {
     /// Whether the devices have arrived once; the form waits for them, the libraries and the
     /// playlists of the chosen library.
     devices_in: bool,
+    /// A not-mounted drive was sent to be mounted (Continue) and the devices have not shown it
+    /// mounted yet. A plan that arrives meanwhile is the task's refusal to mount.
+    mounting: bool,
     known: Known,
     follow: Follow,
 }
@@ -144,7 +149,7 @@ fn fill(form: &mut Form, choice: &DeviceChoice, known: &Known) {
         Value::Choice(Some(choice.quality.name().to_owned())),
     );
     form.set(COVER, Value::Flag(choice.keep_cover));
-    show_what_is_needed(form);
+    show_what_is_needed(form, false);
 }
 
 fn from_device(form: &Form) -> bool {
@@ -159,12 +164,13 @@ fn format_of(form: &Form) -> Option<Format> {
 }
 
 /// Show `What` and the format for To device, the folders for From device, and the quality and
-/// cover only while converting.
-fn show_what_is_needed(form: &mut Form) {
+/// cover only while converting. A device that is not mounted has no folders to tick yet, so its
+/// folders are not shown and do not stand in the way of Continue (F10).
+fn show_what_is_needed(form: &mut Form, not_mounted: bool) {
     let from = from_device(form);
     let converting = !from && format_of(form).is_some();
     form.set_visible(WHAT, !from);
-    form.set_visible(FOLDERS, from);
+    form.set_visible(FOLDERS, from && !not_mounted);
     form.set_visible(FORMAT, !from);
     form.set_visible(QUALITY, converting);
     form.set_visible(COVER, converting);
@@ -174,6 +180,35 @@ fn show_what_is_needed(form: &mut Form) {
 fn chosen_device<'a>(form: &Form, state: &'a State) -> Option<&'a Device> {
     let id = chosen_of(form, DEVICE)?;
     state.devices.iter().find(|device| device.id() == id)
+}
+
+/// Whether the device chosen now is one that is plugged in but not mounted: nothing is asked of
+/// the task for it until Continue, which mounts it (F10).
+pub(super) fn is_unmounted(form: &Form, state: &State) -> bool {
+    chosen_device(form, state).is_some_and(|device| device.not_mounted.is_some())
+}
+
+/// Continue on a device that is not mounted: the answer mounts it, and the form waits for the
+/// refreshed devices (or the refusal). No plan is expected for it.
+pub(super) fn begin_mount(state: &mut State, conv: &mut Conversation) {
+    state.mounting = true;
+    conv.wait_for(Some("Mounting the drive"));
+}
+
+/// The radio options for the devices: the label, and the free space of a mounted one (a device
+/// that is not mounted has none to tell yet).
+fn device_choices(devices: &[Device]) -> Vec<Choice> {
+    devices
+        .iter()
+        .map(|device| {
+            let choice = Choice::new(device.id().to_owned(), device.label());
+            if device.not_mounted.is_some() {
+                choice
+            } else {
+                choice.with_detail(format!("{} free", bytes(device.free_bytes)))
+            }
+        })
+        .collect()
 }
 
 /// Task events. `Devices` fills the radio group, keeps the choice, and when another device is now
@@ -190,16 +225,7 @@ pub(super) fn on_event(
     match kind {
         EventKind::Devices(devices) => {
             state.devices.clone_from(devices);
-            form.set_options(
-                DEVICE,
-                devices
-                    .iter()
-                    .map(|device| {
-                        Choice::new(device.id().to_owned(), device.label())
-                            .with_detail(format!("{} free", bytes(device.free_bytes)))
-                    })
-                    .collect(),
-            );
+            form.set_options(DEVICE, device_choices(devices));
             // Nothing chosen: the last device synced is chosen when it is there (F10). With no
             // device synced before and exactly one offered, that one is chosen, so there is
             // nothing to pick; a remembered device that is absent is never swapped for another.
@@ -217,6 +243,9 @@ pub(super) fn on_event(
                 }
             }
             let chosen = chosen_device(form, state).map(|device| device.id().to_owned());
+            if chosen_device(form, state).is_none_or(|device| device.not_mounted.is_none()) {
+                state.mounting = false;
+            }
             // With the chosen device gone, the task ignores a `Go` it has not read yet.
             conv.go_ignored_if(chosen.is_none());
             if chosen != state.device {
@@ -250,6 +279,13 @@ pub(super) fn on_event(
             );
             conv.wait_for(None);
             conv.changed();
+        }
+        EventKind::Plan(plan) if state.mounting => {
+            // The task could not mount the drive: its refusal, in `diskutil`'s own words, and the
+            // form stays open.
+            state.mounting = false;
+            conv.wait_for(None);
+            form.set_blocked(plan.refusal.clone());
         }
         EventKind::Plan(plan) => {
             // The name alone: "(disk image)" belongs in the device list, not in every sentence.
@@ -285,6 +321,7 @@ pub(super) fn on_event(
         kind,
         EventKind::Devices(_) | EventKind::Libraries(_) | EventKind::Playlists(_)
     ) && state.devices_in
+        && !state.mounting
         && state.known.is_in()
         && state.follow.is_settled()
     {
@@ -311,6 +348,11 @@ pub(super) fn changed(
                     fill(form, &choice, &state.known);
                 }
                 state.device = chosen;
+                if state.mounting {
+                    // Another device was chosen while the first was mounting.
+                    state.mounting = false;
+                    conv.wait_for(None);
+                }
             }
         }
         FORMAT => {
@@ -331,7 +373,7 @@ fn settle(
     conv: &mut Conversation,
     settings: &Settings,
 ) -> Vec<Cmd> {
-    show_what_is_needed(form);
+    show_what_is_needed(form, is_unmounted(form, state));
     form.set_notes(notes(form, state, settings));
     let mut commands = Vec::new();
     if let Some(offer) = state.follow.offer(form, &state.known) {
@@ -345,7 +387,8 @@ fn settle(
     let Some(device) = chosen_device(form, state).cloned() else {
         return commands;
     };
-    if state.folders_for.as_deref() == Some(device.id()) {
+    // A device that is not mounted has no folders to read yet (it is mounted on Continue).
+    if device.not_mounted.is_some() || state.folders_for.as_deref() == Some(device.id()) {
         return commands;
     }
     state.folders_for = Some(device.id().to_owned());

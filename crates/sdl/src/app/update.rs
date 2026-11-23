@@ -77,6 +77,14 @@ impl App {
                 if let Some(Popup::Dialog(dialog)) = self.popups.last_mut() {
                     dialog.form_mut().tick();
                 }
+                // The countdown ends the question exactly as pressing Eject does (F10).
+                let expired = matches!(
+                    self.popups.last(),
+                    Some(Popup::Confirm(confirm, _)) if confirm.expired(clock.instant)
+                );
+                if expired {
+                    return self.answer(true);
+                }
                 Vec::new()
             }
         }
@@ -113,7 +121,11 @@ impl App {
                 self.finish(task);
                 if task == TaskId::SyncDevice {
                     let device = self.synced_device();
-                    self.popups.push(Popup::ask(Confirm::Eject { device }));
+                    // A question left from an earlier run is replaced, never left to fire.
+                    self.popups
+                        .retain(|popup| !matches!(popup, Popup::Confirm(Confirm::Eject { .. }, _)));
+                    self.popups
+                        .push(Popup::ask(Confirm::eject(device, self.clock.instant)));
                 }
                 return Vec::new();
             }
@@ -697,6 +709,7 @@ mod tests {
             volume_uuid: Some("AAAA".into()),
             free_bytes: 0,
             disk_image: false,
+            not_mounted: None,
         };
         let _ = task(
             &mut app,
@@ -707,7 +720,7 @@ mod tests {
         running(&mut app, TaskId::SyncDevice);
         let _ = task(&mut app, TaskId::SyncDevice, EventKind::Finished);
         assert_eq!(
-            app.top().map(|popup| matches!(popup, Popup::Confirm(Confirm::Eject { device }, _) if device == "SNOWSKY")),
+            app.top().map(|popup| matches!(popup, Popup::Confirm(Confirm::Eject { device, .. }, _) if device == "SNOWSKY")),
             Some(true)
         );
         assert_eq!(
@@ -756,12 +769,144 @@ mod tests {
         assert!(matches!(app.top(), Some(Popup::Error(shown)) if *shown == info));
     }
 
+    fn at(clock: Clock, seconds: u64) -> Clock {
+        Clock {
+            instant: clock
+                .instant
+                .checked_add(std::time::Duration::from_secs(seconds))
+                .unwrap_or(clock.instant),
+            epoch: clock.epoch,
+        }
+    }
+
+    /// A device sync that finished at `start`, so the eject question is open.
+    fn finished_sync(start: Clock) -> App {
+        let mut app = App::new(Settings::default(), true, Size::new(100, 30), start);
+        let _ = app.update(
+            Msg::Task(Event {
+                task: TaskId::SyncDevice,
+                kind: EventKind::Started,
+            }),
+            start,
+        );
+        let _ = app.update(
+            Msg::Task(Event {
+                task: TaskId::SyncDevice,
+                kind: EventKind::Finished,
+            }),
+            start,
+        );
+        app
+    }
+
+    #[test]
+    fn the_eject_countdown_starts_at_thirty_and_a_tick_counts_down() {
+        let start = clock();
+        let mut app = finished_sync(start);
+        let seconds = |app: &App| match app.top() {
+            Some(Popup::Confirm(confirm, _)) => confirm.seconds_left(app.clock.instant),
+            _ => None,
+        };
+        assert_eq!(seconds(&app), Some(30));
+        assert_eq!(
+            crate::app::wake::next_wake(&app),
+            Some(std::time::Duration::from_secs(1))
+        );
+        assert_eq!(app.update(Msg::Wake, at(start, 1)), Vec::new());
+        assert_eq!(seconds(&app), Some(29));
+        assert_eq!(app.update(Msg::Wake, at(start, 29)), Vec::new());
+        assert_eq!(seconds(&app), Some(1));
+        assert!(matches!(app.top(), Some(Popup::Confirm(..))));
+    }
+
+    #[test]
+    fn the_countdown_reaching_zero_ejects_like_pressing_eject() {
+        let start = clock();
+        let mut by_key = finished_sync(start);
+        let pressed = by_key.update(key(KeyCode::Char('y')), start);
+        let mut by_timer = finished_sync(start);
+        assert_eq!(by_timer.update(Msg::Wake, at(start, 30)), pressed);
+        assert_eq!(pressed, vec![Cmd::Eject]);
+        assert!(matches!(
+            by_timer.top(),
+            Some(Popup::Waiting(Waiting::Eject(_)))
+        ));
+        assert_eq!(by_timer.ejecting, by_key.ejecting);
+        // Nothing more to fire afterwards.
+        assert_eq!(by_timer.update(Msg::Wake, at(start, 40)), Vec::new());
+    }
+
+    #[test]
+    fn keep_mounted_cancels_and_leaves_no_timer() {
+        let start = clock();
+        let mut app = finished_sync(start);
+        assert_eq!(app.update(key(KeyCode::Char('n')), start), Vec::new());
+        assert!(app.popups.is_empty() && app.ejecting.is_none());
+        assert_eq!(crate::app::wake::next_wake(&app), None);
+        assert_eq!(app.update(Msg::Wake, at(start, 31)), Vec::new());
+        assert!(app.popups.is_empty());
+    }
+
+    #[test]
+    fn a_stopped_or_failed_sync_asks_nothing_and_a_new_question_replaces_the_old() {
+        let start = clock();
+        for kind in [
+            EventKind::Stopped,
+            EventKind::Error(ErrorInfo {
+                message: "m".into(),
+                advice: "a".into(),
+            }),
+        ] {
+            let mut app = App::new(Settings::default(), true, Size::new(100, 30), start);
+            let _ = app.update(
+                Msg::Task(Event {
+                    task: TaskId::SyncDevice,
+                    kind: kind.clone(),
+                }),
+                start,
+            );
+            assert!(
+                !app.popups
+                    .iter()
+                    .any(|popup| matches!(popup, Popup::Confirm(Confirm::Eject { .. }, _)))
+            );
+        }
+        let mut app = finished_sync(start);
+        let later = at(start, 20);
+        let _ = app.update(
+            Msg::Task(Event {
+                task: TaskId::SyncDevice,
+                kind: EventKind::Finished,
+            }),
+            later,
+        );
+        assert_eq!(app.popups.len(), 1);
+        assert_eq!(app.update(Msg::Wake, at(start, 30)), Vec::new());
+        assert!(matches!(app.top(), Some(Popup::Confirm(..))));
+    }
+
+    #[test]
+    fn a_question_over_the_eject_question_stops_its_timer_and_quitting_never_ejects() {
+        let start = clock();
+        let mut app = finished_sync(start);
+        app.popups.push(Popup::ask(Confirm::Quit));
+        assert_eq!(crate::app::wake::next_wake(&app), None);
+        assert_eq!(app.update(Msg::Wake, at(start, 31)), Vec::new());
+        assert!(matches!(app.top(), Some(Popup::Confirm(Confirm::Quit, _))));
+        assert_eq!(
+            app.update(key(KeyCode::Char('y')), at(start, 31)),
+            vec![Cmd::Quit]
+        );
+        assert!(app.ejecting.is_none());
+    }
+
     #[test]
     fn quitting_during_an_eject_or_a_tools_install_asks_first() {
         let mut app = app();
-        app.popups.push(Popup::ask(Confirm::Eject {
-            device: "SNOWSKY".into(),
-        }));
+        app.popups.push(Popup::ask(Confirm::eject(
+            "SNOWSKY".into(),
+            clock().instant,
+        )));
         let _ = app.update(key(KeyCode::Char('y')), clock());
         // Hidden: the eject goes on.
         let _ = app.update(key(KeyCode::Esc), clock());

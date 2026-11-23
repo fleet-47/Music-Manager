@@ -95,7 +95,7 @@ impl App {
                     Vec::new()
                 }
             }
-            Some(Popup::Confirm(Confirm::Eject { device }, _)) => {
+            Some(Popup::Confirm(Confirm::Eject { device, .. }, _)) => {
                 if yes {
                     self.ejecting = Some(device.clone());
                     self.popups.push(Popup::Waiting(Waiting::Eject(device)));
@@ -253,9 +253,7 @@ mod tests {
         for question in [
             Confirm::Stop(TaskId::Convert),
             Confirm::Quit,
-            Confirm::Eject {
-                device: "DISC".into(),
-            },
+            Confirm::eject("DISC".into(), clock().instant),
         ] {
             app.popups.push(Popup::ask(question));
             assert_eq!(app.update(key(KeyCode::Enter), clock()), Vec::new());

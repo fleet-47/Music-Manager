@@ -183,7 +183,7 @@ pub fn footer(app: &App) -> Vec<Hint> {
     match app.top() {
         Some(Popup::Dialog(dialog)) => return dialog.hints(),
         Some(Popup::Confirm(confirm, focused)) => {
-            let words = question(confirm);
+            let words = question(confirm, app.clock.instant);
             let answer = |key, label: &str| Hint {
                 key,
                 what: label.to_lowercase().into(),

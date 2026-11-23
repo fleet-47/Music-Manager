@@ -1,11 +1,12 @@
-//! Devices (F10): the mounted external or removable volumes, plans for copying To and From a
-//! device, the copy runs, device playlists, and clean-up and eject.
+//! Devices (F10): the external or removable volumes (mounted, or plugged in and not mounted, which
+//! [`mount`] mounts), plans for copying To and From a device, the copy runs, device playlists, and
+//! clean-up and eject.
 //!
 //! Uses `sdl-library` through its public interface: the converter (`converter::convert_file`,
 //! `converter::parallelism`, `converter::output_size`), playlist writing
-//! (`playlists::write_for_destination`) and tag reading (`tags::place_from_tags`). Drives are found and ejected with macOS `diskutil`; nothing is
-//! mounted or formatted, and nothing is deleted except the macOS items named in
-//! [`clean_up_and_eject`].
+//! (`playlists::write_for_destination`) and tag reading (`tags::place_from_tags`). Drives are found, mounted and ejected with macOS `diskutil`; nothing
+//! is formatted, and nothing is deleted except the macOS items named in [`clean_up_device`];
+//! [`eject`] only unmounts.
 //!
 //! Names that start with a dot are never copied, in either direction.
 
@@ -19,10 +20,10 @@ mod reality;
 mod run;
 mod volumes;
 
-pub use eject::clean_up_and_eject;
+pub use eject::{clean_up_device, eject};
 pub use plan::{DevicePlan, plan};
 pub use run::run;
-pub use volumes::{DeviceWatch, folders, list, watch};
+pub use volumes::{DeviceWatch, folders, list, mount, watch};
 
 /// Errors from the devices crate. Messages are plain words fit for the error popup.
 #[derive(Debug, thiserror::Error)]

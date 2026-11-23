@@ -274,10 +274,8 @@ fn questions_name_their_keys_at_every_size() -> TestResult {
         (Confirm::Stop(TaskId::Convert), "Stop Convert?"),
         (Confirm::Quit, "Quit and stop"),
         (
-            Confirm::Eject {
-                device: "SNOWSKY".into(),
-            },
-            "empties the device's Trash",
+            Confirm::eject("SNOWSKY".into(), Instant::now()),
+            "Eject SNOWSKY?",
         ),
         (Confirm::Browser, "opens your browser"),
     ];
@@ -320,7 +318,7 @@ fn errors_and_waiting_popups_show_what_happened_and_the_way_out() -> TestResult 
         let (rows, hits, _) = draw(&app, Theme::new(true))?;
         needs(
             &rows.join("\n"),
-            &["ejecting DISC", "[Esc] Hide"],
+            &["Ejecting DISC", "[Esc] Hide"],
             (width, height),
         );
         assert!(!hits.popup.is_empty(), "Hide can be clicked while ejecting");

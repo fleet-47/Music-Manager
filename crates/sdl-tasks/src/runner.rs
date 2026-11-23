@@ -66,8 +66,8 @@ impl Flow {
 
 type SharedState = Arc<Mutex<State>>;
 type SharedReview = Arc<Mutex<ReviewList>>;
-/// The device last synced and the files that run wrote, for [`Runner::eject_device`].
-type DeviceSlot = Arc<Mutex<Option<(Device, Vec<PathBuf>)>>>;
+/// The device last synced, for [`Runner::eject_device`].
+type DeviceSlot = Arc<Mutex<Option<Device>>>;
 
 /// The tasks that are running, so the shared `.sdl-tmp` folder is removed only when none is.
 #[derive(Debug, Default)]
@@ -110,6 +110,8 @@ pub(crate) struct TaskContext {
     review: SharedReview,
     review_path: Arc<PathBuf>,
     device: DeviceSlot,
+    /// Something to add to the run's last-run line, whatever way the run ended.
+    line_note: Arc<Mutex<Option<String>>>,
     active: Arc<Active>,
 }
 
@@ -272,10 +274,17 @@ impl TaskContext {
         })
     }
 
-    /// Remember the device a sync wrote to, with the files this run wrote, so
-    /// [`Runner::eject_device`] can clean up and find it.
-    pub fn set_device(&self, synced: Option<(Device, Vec<PathBuf>)>) {
+    /// Remember the device a sync wrote to, so [`Runner::eject_device`] can find it.
+    pub fn set_device(&self, synced: Option<Device>) {
         *self.device.lock().unwrap_or_else(PoisonError::into_inner) = synced;
+    }
+
+    /// Add `note` to the last-run line the run ends with; the run's own result is not changed.
+    pub fn note_on_line(&self, note: String) {
+        *self
+            .line_note
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(note);
     }
 
     /// End the run: write the last-run line, outcome and attention items (if any), then send the
@@ -284,7 +293,16 @@ impl TaskContext {
     fn end(&self, last: Option<(String, RunOutcome)>, event: EventKind) {
         let task = self.task();
         let attention = self.events.snapshot().attention;
+        let note = self
+            .line_note
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let saved = last.map_or(Ok(()), |(line, outcome)| {
+            let line = match note {
+                Some(note) => format!("{line}; {note}"),
+                None => line,
+            };
             self.update_state(|state| {
                 state.last_run.insert(
                     task,
@@ -402,9 +420,9 @@ struct Running {
 ///   appears or goes), `Libraries(..)`, `Playlists(..)` (the owner's own library's).
 ///   `Offer::Playlists(library)`: `Playlists` of that library. `Offer::Devices`: `Devices`. `Offer::Folders(device)`:
 ///   `Folders`. `Answer(SyncDevice { device, choice })` (saved per device): `Headline`, `Plan`.
-///   `Go`: `Started`, `Headline`, `Counts`, `Attention`, `Finished`. Then the UI asks "Clean up
-///   and eject <device>?" and on yes awaits [`Runner::eject_device`], showing that it is
-///   ejecting until the future ends.
+///   `Go`: `Started`, `Headline`, `Counts`, `Attention`, `Finished`; the run ends with the
+///   device's clean-up, still inside the task. Then the UI asks "Eject <device>?" and on yes
+///   awaits [`Runner::eject_device`], showing that it is ejecting until the future ends.
 /// * **Convert**: `Headline`, `Libraries(..)`, `Playlists(..)` (the owner's own library's);
 ///   `Offer::Playlists(library)` answers as in Sync device. `Answer(Convert(choice))` (saved): `Headline`,
 ///   `Plan`; a destination inside the library comes back as a plan with a `refusal`. `Go`:
@@ -592,15 +610,15 @@ impl Runner {
         running.handle.await.err().map(|_| running.context)
     }
 
-    /// Clean up and eject the device the last Sync device run wrote to
-    /// (`sdl_devices::clean_up_and_eject`). The returned future does not borrow the runner.
+    /// Eject the device the last Sync device run wrote to (`sdl_devices::eject`; the run has
+    /// already cleaned it up). The returned future does not borrow the runner.
     ///
     /// # Errors
-    /// No device was synced, or the clean-up or unmount failed, in plain words.
+    /// No device was synced, or the unmount failed, in plain words.
     pub fn eject_device(&self) -> impl Future<Output = Result<(), ErrorInfo>> + Send + 'static {
         let slot = Arc::clone(&self.device);
         async move {
-            let (device, written) = slot
+            let device = slot
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
@@ -608,7 +626,7 @@ impl Runner {
                     message: "No device was synced by sdl.".to_owned(),
                     advice: "Run Sync device first.".to_owned(),
                 })?;
-            sdl_devices::clean_up_and_eject(&device, &written)
+            sdl_devices::eject(&device)
                 .await
                 .map_err(|error| crate::failure::error_info(&TaskError::from(error)))?;
             *slot.lock().unwrap_or_else(PoisonError::into_inner) = None;
@@ -627,6 +645,7 @@ impl Runner {
             review: Arc::clone(&self.review),
             review_path: Arc::clone(&self.review_path),
             device: Arc::clone(&self.device),
+            line_note: Arc::default(),
             active: Arc::clone(&self.active),
         }
     }
@@ -973,6 +992,7 @@ mod tests {
             volume_uuid: Some("U1".into()),
             free_bytes: 0,
             disk_image: true,
+            not_mounted: None,
         };
         runner
             .context(TaskId::SyncDevice)

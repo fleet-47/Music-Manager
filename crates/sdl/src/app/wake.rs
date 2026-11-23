@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use super::App;
+use super::{App, Popup};
 
 /// About 30 frames a second while a `tachyonfx` effect plays.
 pub const FRAME: Duration = Duration::from_millis(33);
@@ -18,6 +18,7 @@ pub const SPINNER: Duration = Duration::from_millis(100);
 /// * a spinner is on screen: [`SPINNER`]. That is a running function while cards
 ///   show their detail (it spins beside the name; the same wake reads the time estimate again),
 ///   or a popup with a spinner (a form that is busy, a waiting popup);
+/// * the eject question is on top: the time until its countdown shows the next second;
 /// * otherwise `None`: no timer exists.
 ///
 /// The shortest applies. Progress bars and counts are not timed: they change only when a
@@ -27,9 +28,15 @@ pub fn next_wake(app: &App) -> Option<Duration> {
     let detail = app.shows_detail() && app.anything_runs();
     let spinner_in_card = detail && app.running().any(super::FunctionView::shows_spinner);
     let spinner_in_popup = app.top().is_some_and(super::Popup::shows_spinner);
+    // The eject question's countdown: one wake when its number changes, only while it is on top.
+    let countdown = match app.top() {
+        Some(Popup::Confirm(confirm, _)) => confirm.next_second(app.clock.instant),
+        _ => None,
+    };
     [
         app.animating.then_some(FRAME),
         (spinner_in_card || spinner_in_popup).then_some(SPINNER),
+        countdown,
     ]
     .into_iter()
     .flatten()

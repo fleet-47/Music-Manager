@@ -451,6 +451,7 @@ mod tests {
             volume_uuid: None,
             free_bytes: 0,
             disk_image: false,
+            not_mounted: None,
         }
     }
 

@@ -206,6 +206,7 @@ fn device(name: &str, uuid: &str, free: u64) -> Device {
         volume_uuid: Some(uuid.into()),
         free_bytes: free,
         disk_image: false,
+        not_mounted: None,
     }
 }
 
@@ -726,6 +727,11 @@ fn sync_device_follows_the_devices_and_the_remembered_choices() -> TestResult {
             .iter()
             .any(|n| n.contains(".m3u8"))
     );
+    assert!(
+        rig.dialog.form().notes().iter().any(|n| {
+            n.contains("sync ends with a clean-up that also empties the device's Trash")
+        })
+    );
     // The devices arrive first, then the playlists and the libraries: one plan, asked for once
     // all are in.
     let step = rig.event(&EventKind::Devices(vec![
@@ -809,6 +815,160 @@ fn a_mounted_disk_image_is_listed_with_its_label() {
         .join("\n");
     assert!(drawn.contains("SDLTEST (disk image)"), "{drawn}");
     assert!(!drawn.contains("SNOWSKY (disk image)"));
+}
+
+#[test]
+fn a_drive_that_is_not_mounted_is_listed_with_its_label_and_stays_choosable() -> TestResult {
+    let (mut rig, _) = Rig::open(TaskId::SyncDevice, device_settings(Some("U1")));
+    let unmounted = Device {
+        mount_point: PathBuf::new(),
+        not_mounted: Some("disk4s2".into()),
+        free_bytes: 0,
+        ..device("SNOWSKY", "U1", 0)
+    };
+    let _ = rig.event(&EventKind::Devices(vec![
+        device("DISC", "U2", 9),
+        unmounted.clone(),
+    ]));
+    let area = Rect::new(0, 0, 100, 60);
+    let mut buf = Buffer::empty(area);
+    let _ = render(rig.dialog.form(), area, &mut buf, &FormStyle::default());
+    let drawn = area
+        .rows()
+        .map(|row| {
+            row.columns()
+                .filter_map(|p| buf.cell((p.x, p.y)))
+                .map(|cell| cell.symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(drawn.contains("SNOWSKY (not mounted)"), "{drawn}");
+    assert!(!drawn.contains("DISC (not mounted)"));
+    // Chosen, it is the device Continue sends for the task to mount; nothing is sent before.
+    let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let sent = commands(rig.event(&libraries(&[])));
+    assert_eq!(sent, Vec::new(), "browsing mounts nothing");
+    assert_eq!(rig.busy(), None);
+    rig.focus_primary();
+    let sent = rig.enter();
+    let (chosen, _) = answer_of(&sent).ok_or("an answer")?;
+    assert_eq!(chosen, &unmounted);
+    assert_eq!(rig.busy(), Some("Mounting the drive"));
+    Ok(())
+}
+
+/// A form open on a drive that is not mounted (the remembered device), everything arrived.
+fn unmounted_rig(settings: Settings) -> (Rig, Device) {
+    let (mut rig, _) = Rig::open(TaskId::SyncDevice, settings);
+    let unmounted = Device {
+        mount_point: PathBuf::new(),
+        not_mounted: Some("disk4s2".into()),
+        free_bytes: 0,
+        ..device("SNOWSKY", "U1", 0)
+    };
+    let _ = rig.event(&EventKind::Devices(vec![unmounted.clone()]));
+    let _ = rig.event(&EventKind::Playlists(Vec::new()));
+    let _ = rig.event(&libraries(&[]));
+    (rig, unmounted)
+}
+
+#[test]
+fn nothing_is_answered_while_a_drive_that_is_not_mounted_is_chosen() {
+    let (mut rig, unmounted) = unmounted_rig(device_settings(Some("U1")));
+    // A change that would ask for a new plan for a mounted device (the direction) asks for none.
+    let step = rig.click(&Target::Row {
+        field: "direction",
+        index: 1,
+    });
+    assert_eq!(step.map(commands).ok(), Some(Vec::new()));
+    // Arrowing through the list to the drive and past it answers nothing for the drive.
+    let _ = rig.event(&EventKind::Devices(vec![
+        device("DISC", "U2", 9),
+        unmounted,
+    ]));
+    rig.focus("device");
+    let down = rig.press(code(crossterm::event::KeyCode::Down));
+    assert!(
+        answer_of(&commands(down)).is_none(),
+        "chosen again: the drive"
+    );
+    let up = rig.press(code(crossterm::event::KeyCode::Up));
+    assert_eq!(choice_of(&rig, "device").as_deref(), Some("U2"));
+    assert!(
+        answer_of(&commands(up)).is_none(),
+        "nothing ticked for DISC"
+    );
+    let down = rig.press(code(crossterm::event::KeyCode::Down));
+    assert!(answer_of(&commands(down)).is_none());
+}
+
+#[test]
+fn a_mount_that_is_refused_says_diskutils_words_and_the_form_stays_open() {
+    let (mut rig, _) = unmounted_rig(device_settings(Some("U1")));
+    rig.focus_primary();
+    assert!(answer_of(&rig.enter()).is_some());
+    let step = rig.event(&EventKind::Plan(PlanSummary {
+        refusal: Some("diskutil mount failed: Volume is busy".into()),
+        ..plan(0, 0, None)
+    }));
+    assert!(!is_closed(&step));
+    assert_eq!(rig.busy(), None);
+    assert!(
+        rig.dialog
+            .form()
+            .missing()
+            .contains(&"diskutil mount failed: Volume is busy".to_owned())
+    );
+}
+
+#[test]
+fn a_drive_that_was_mounted_is_planned_like_any_device() -> TestResult {
+    let (mut rig, _) = unmounted_rig(device_settings(Some("U1")));
+    rig.focus_primary();
+    let _ = rig.enter();
+    // The refreshed list holds the same device, mounted: the form asks for the plan itself.
+    let step = rig.event(&EventKind::Devices(vec![device("SNOWSKY", "U1", 9)]));
+    let sent = commands(step);
+    let (chosen, _) = answer_of(&sent).ok_or("an answer")?;
+    assert!(chosen.not_mounted.is_none());
+    assert_eq!(rig.busy(), Some("Making the plan"));
+    Ok(())
+}
+
+#[test]
+fn from_device_continues_without_folders_on_a_drive_that_is_not_mounted() -> TestResult {
+    let mut settings = device_settings(Some("U1"));
+    if let Some(choice) = settings.state.devices.get_mut("U1") {
+        choice.direction = Direction::FromDevice;
+        choice.from_folders.clear();
+    }
+    let (mut rig, _) = unmounted_rig(settings);
+    // No folders to tick yet: nothing is asked of the device, and Continue is available.
+    assert!(!is_visible(&rig, "folders"));
+    assert!(rig.dialog.form().can_submit());
+    rig.focus_primary();
+    let sent = rig.enter();
+    let (chosen, choice) = answer_of(&sent).ok_or("an answer")?;
+    assert!(chosen.not_mounted.is_some());
+    assert_eq!(choice.direction, Direction::FromDevice);
+    // Mounted: its folders are read, then Continue waits for one to be ticked.
+    let step = rig.event(&EventKind::Devices(vec![device("SNOWSKY", "U1", 9)]));
+    assert!(commands(step).iter().any(|cmd| matches!(
+        sent_to(cmd, TaskId::SyncDevice),
+        Some(Command::Offer(Offer::Folders(_)))
+    )));
+    let step = rig.event(&EventKind::Folders(vec!["Music".into()]));
+    assert!(answer_of(&commands(step)).is_none(), "nothing is ticked");
+    assert!(is_visible(&rig, "folders"));
+    assert!(!rig.dialog.form().can_submit());
+    assert!(
+        rig.dialog
+            .form()
+            .missing()
+            .contains(&"Tick the folders to copy".to_owned())
+    );
+    Ok(())
 }
 
 #[test]

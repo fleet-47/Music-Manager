@@ -23,7 +23,7 @@ use crate::paths::{existing_in_any_format, stays_inside};
 use crate::plan::DevicePlan;
 
 /// Run a plan and return its counts. The files it wrote, on every way out (finished, stopped,
-/// full or gone), are [`DevicePlan::written`]: [`crate::clean_up_and_eject`] removes `._X` only
+/// full or gone), are [`DevicePlan::written`]: [`crate::clean_up_device`] removes `._X` only
 /// for an `X` listed there.
 ///
 /// To device: each file is copied to a `*.part` name and renamed, or converted first with
@@ -372,6 +372,7 @@ mod tests {
             volume_uuid: None,
             free_bytes: u64::MAX,
             disk_image: false,
+            not_mounted: None,
         }
     }
 
