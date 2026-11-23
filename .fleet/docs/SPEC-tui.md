@@ -330,9 +330,10 @@ report it; do not substitute another crate or hand-write the capability.
 - Same drive (ruled 2026-11-23): clean-up and eject act only when the volume at the mount point
   is still the device the run used, checked inside `sdl-devices` by asking
   `diskutil info -plist <mount point>` and comparing the device's identity (volume UUID,
-  falling back to its name, as in the device list). When the drive is gone or another one is
-  mounted there, clean-up does nothing and eject counts as done: the drive is already out.
-  This replaces "still mounted" above being judged by the folder existing.
+  falling back to its name, as in the device list). When the place is gone or another volume is
+  mounted there, clean-up does nothing; eject unmounts only the same volume and otherwise
+  counts as done, because the drive is already out. A plain folder that is not a volume is
+  cleaned like any folder (it holds nothing a drive owns) and is never unmounted.
 - Not-mounted drives (ruled 2026-11-23): the Device list also shows external or removable
   volumes that are plugged in but not mounted, each with "(not mounted)" after its name, found
   with `diskutil list -plist external` (confirm the keys in real output and in `man diskutil`;
