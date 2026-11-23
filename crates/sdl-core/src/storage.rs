@@ -1,4 +1,4 @@
-//! Reading and writing the two settings files (`state.toml`, `review.toml`) as TOML.
+//! Reading and writing the settings files (`state.toml`, `review.toml`, `pending_enrichment.toml`) as TOML.
 //!
 //! One implementation of "a TOML file the app owns", used by [`crate::State`] and
 //! [`crate::ReviewList`]. Every error names the file's path, so the message can say which file.

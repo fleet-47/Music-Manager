@@ -104,9 +104,10 @@ report it; do not substitute another crate or hand-write the capability.
 - Every song enters as **Opus from YouTube Music**. Input is a *wanted song*: title, artists,
   album, album artist, track and disc numbers, date, ISRC, duration, cover URL, as far as the
   source knows them. Sources: a Spotify listing entry (F4) or a link item (F5).
-- Steps per wanted song: skip if present (F7) → match (below) → download to a temp file → look up
-  and tag the temp file (F6) → land it in the library (F7). A file enters the library only when
-  complete.
+- Steps per wanted song: skip if present (F7) → match (below) → download to a temp file → tag
+  the temp file with the wanted song's own fields and cover (F6) → land it in the library (F7) →
+  queue it for enrichment (F6). A file enters the library only when complete: its audio, the
+  source's tags and its cover. No step asks MusicBrainz (ruled 2026-11-23).
 - **One file per place, never replaced.** Within a run, wanted songs with the same place (F7) are
   handled once. Landing uses `tempfile`'s `persist_noclobber`, which fails instead of replacing an
   existing file; when the place was taken meanwhile (another task landed it), the song counts as
@@ -202,21 +203,35 @@ report it; do not substitute another crate or hand-write the capability.
 
 ## F6. Genre, totals and tags (`sdl-library`)
 - `musicbrainz_rs` 0.14 (features `async`, `rate_limit`, `rustls`), one process-wide client,
-  User-Agent `sdl/<version>`. Its addresses are tried IPv4 first and IPv6 after (ruled
+  User-Agent `sdl/<version> ( <repo URL> )`, the contact MusicBrainz requires. Its addresses are tried IPv4 first and IPv6 after (ruled
   2026-11-23): the client's `ureq` agent is built with `Agent::with_parts` and a resolver that
   wraps ureq's `DefaultResolver` and puts the IPv4 addresses in front.
-- For a song with an ISRC: recording search `isrc:<code>`, a recording lookup, and one release
-  lookup per release ID per run. Genre = the recording's top genre, else its release group's, else
-  its first artist's. Track total and disc total from the release whose title matches the album.
-- `lofty` 0.25, one write to the temp file through its format-independent tag interface: title,
-  artists, album, album artist, track number and total, disc number and total, date, ISRC, genre,
-  and the cover (fetched with `reqwest`, giving up after 20 seconds) as the front cover.
-- A failed or empty lookup leaves those tags empty and the song still completes. A cover that
-  cannot be downloaded leaves the song without a cover and the song still completes. The last-run
-  line counts songs left without a genre and songs left without a cover. A failed tag write fails
-  the song.
-- **Not:** no Last.fm, no Spotify genre, no lyrics, no ReplayGain, no retagging of files already in
-  the library.
+- **At landing** (F3): `lofty` 0.25, one write to the temp file through its format-independent tag
+  interface: title, artists, album, album artist, track number, disc number, date, ISRC, and the
+  cover (fetched with `reqwest`, giving up after 20 seconds) as the front cover. A cover that
+  cannot be downloaded leaves the song without a cover and the song still completes; the last-run
+  line counts songs left without a cover. A failed tag write fails the song.
+- **Enrichment queue** (ruled 2026-11-23): every song a download lands that has an ISRC is added
+  to `~/.config/sdl/pending_enrichment.toml` (`serde` + `toml`): its library and the wanted song,
+  once per library and song (F8's identity). The file's place is worked out from those (F7); no
+  path is stored. The runner is its only writer (F11).
+- **Enrichment worker** (ruled 2026-11-23): one background task, started with the app, alive as
+  long as the app runs and ended with it; it is not one of the five functions and shows nothing
+  on screen. It takes the queue's songs one at a time, in order, woken when a song is queued:
+  - asks MusicBrainz: recording search `isrc:<code>`, a recording lookup, and one release lookup
+    per release ID while the app runs. Genre = the recording's top genre, else its release
+    group's, else its first artist's. Track total and disc total from the release whose title
+    matches the album;
+  - adds genre, track total and disc total to the song's file in the library: read into memory,
+    tagged with `lofty`, and written back whole with H2's atomic write, so a crash leaves the old
+    file or the new one. No other tag, the cover and the audio are not changed;
+  - MusicBrainz answered, with or without data: the song leaves the queue. Its file is no longer
+    in the library: it leaves the queue. The request or the write failed: it stays, and the
+    worker tries again after 60 seconds.
+- **Not:** no Last.fm, no Spotify genre, no lyrics, no ReplayGain; no MusicBrainz call inside a
+  run; no enrichment of songs without an ISRC, of songs copied from another library (F12) or of
+  songs that were in the library before 2026-11-23; no parallel lookups; no retry limit; no
+  record of what was enriched.
 
 ## F7. Library layout and playlists (`sdl-core` path rules, `sdl-library` playlist files)
 - A song lives at `<music_root>/<Album artist>/<Album>/<Title>.<ext>`: one file however many lists
@@ -373,6 +388,10 @@ report it; do not substitute another crate or hand-write the capability.
   name and choices, the last device (so its card names it after a restart), the "never download" songs, and each function's last-run line with its
   time, its outcome (done / needs attention / failed / stopped) and its attention items.
 - Song downloads run `download_jobs` at a time (`futures` `buffer_unordered`).
+- `pending_enrichment.toml` (F6) is written by the runner alone, like the two files above: a
+  download task sends it the song to queue, the enrichment worker the song to remove.
+- Nothing outlasts the app (ruled 2026-11-24): the enrichment worker is aborted when the runner
+  is dropped, and it starts no outside tool.
 - **Not:** no resume of half-finished files, no history beyond the last run, no queue of pending
   functions.
 

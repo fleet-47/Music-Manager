@@ -10,6 +10,7 @@ pub mod format;
 pub mod landing;
 pub mod library;
 pub mod matching;
+pub mod pending;
 pub mod place;
 pub mod playlist;
 pub mod preset;
@@ -31,6 +32,7 @@ pub use event::{
 pub use format::Format;
 pub use library::{Library, LibraryId, NewLibraryError};
 pub use matching::{Candidate, MatchOutcome};
+pub use pending::{PendingEnrichment, PendingSong};
 pub use place::{Place, library_files};
 pub use playlist::Playlist;
 pub use preset::{Preset, Quality};

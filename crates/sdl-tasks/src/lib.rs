@@ -1,5 +1,6 @@
 //! The runner and the five functions' tasks (F11): Sync Spotify (F4), Download link (F5), Review
-//! (F8), Sync device (F10) and Convert (F9). The only writer of `state.toml` and `review.toml`.
+//! (F8), Sync device (F10) and Convert (F9), and the enrichment worker (F6). The only writer of
+//! `state.toml`, `review.toml` and `pending_enrichment.toml`.
 //!
 //! The interface layer drives tasks only through [`Runner`]: it starts a function with
 //! [`Runner::start`], answers what the function asks with [`Runner::send`] and a [`Command`]
@@ -14,6 +15,7 @@
 //! and Review differ only in which songs they take and by which route.
 
 mod conversation;
+mod enrich;
 mod failure;
 mod progress;
 mod runner;

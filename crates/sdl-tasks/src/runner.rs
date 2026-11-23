@@ -1,4 +1,5 @@
-//! The [`Runner`]: starts, feeds and stops one task per function, and is the only writer of
+//! The [`Runner`]: starts, feeds and stops one task per function, keeps the enrichment worker
+//! (F6) alive, and is the only writer of `pending_enrichment.toml`,
 //! `state.toml` and `review.toml` (F11).
 
 use std::collections::{HashMap, HashSet};
@@ -10,12 +11,15 @@ use sdl_core::place::remove_tmp_dir_if_empty;
 use sdl_core::run::CancellationToken;
 use sdl_core::{
     Config, ConvertChoice, Device, DeviceChoice, ErrorInfo, Event, EventKind, EventSender,
-    HeldSong, LastRun, Library, LibraryId, Never, ReviewList, RunOutcome, State, TaskId,
+    HeldSong, LastRun, Library, LibraryId, Never, PendingEnrichment, ReviewList, RunOutcome, State,
+    TaskId, WantedSong,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::conversation::drive;
+use crate::enrich::{Queue, work};
 use crate::failure::{failure_event, failure_line};
 use crate::progress::stopped_line;
 use crate::tasks::{convert, device, link, review, spotify};
@@ -109,6 +113,7 @@ pub(crate) struct TaskContext {
     state_path: Arc<PathBuf>,
     review: SharedReview,
     review_path: Arc<PathBuf>,
+    queue: Queue,
     device: DeviceSlot,
     /// Something to add to the run's last-run line, whatever way the run ended.
     line_note: Arc<Mutex<Option<String>>>,
@@ -189,6 +194,15 @@ impl TaskContext {
     /// As [`TaskContext::update_review`].
     pub fn hold(&self, song: HeldSong) -> Result<(), StoreError> {
         self.update_review(|review| review.hold(song))
+    }
+
+    /// Queue a song that has just landed in `library` for enrichment (F6): the background worker
+    /// adds its genre and totals later.
+    ///
+    /// # Errors
+    /// The queue file could not be written; the song is queued in memory all the same.
+    pub fn queue_enrichment(&self, library: LibraryId, song: WantedSong) -> Result<(), StoreError> {
+        self.queue.add(library, song)
     }
 
     /// Remember the ticked Spotify lists.
@@ -441,30 +455,39 @@ pub struct Runner {
     review: SharedReview,
     review_path: Arc<PathBuf>,
     events: UnboundedSender<Event>,
+    queue: Queue,
+    /// The enrichment worker (F6), aborted when the runner is dropped so nothing outlasts the
+    /// app. `None` in a runner made without one.
+    enricher: Option<AbortOnDropHandle<()>>,
     device: DeviceSlot,
     active: Arc<Active>,
     running: HashMap<TaskId, Running>,
 }
 
 impl Runner {
-    /// A runner that reads `~/.config/sdl/state.toml` and `review.toml` (a missing file is empty).
+    /// A runner that reads `~/.config/sdl/state.toml`, `review.toml` and
+    /// `pending_enrichment.toml` (a missing file is empty), and starts the enrichment worker
+    /// (F6), which lives until the runner is dropped. Call it inside the tokio runtime.
     ///
     /// # Errors
     /// A file that exists but cannot be read or parsed, naming its path.
     pub fn new(config: Config, events: UnboundedSender<Event>) -> Result<Self, StoreError> {
         let state_path = State::path()?;
         let review_path = ReviewList::path()?;
+        let pending_path = PendingEnrichment::path()?;
         let state = State::load_from(&state_path)?;
         let review = ReviewList::load_from(&review_path)?;
-        Ok(Self::with_files(
-            config,
-            (state, state_path),
-            (review, review_path),
-            events,
-        ))
+        let pending = PendingEnrichment::load_from(&pending_path)?;
+        let mut runner =
+            Self::with_files(config, (state, state_path), (review, review_path), events);
+        runner.queue = Queue::new(pending, pending_path);
+        let worker = work(runner.queue.clone(), Arc::clone(&runner.config));
+        runner.enricher = Some(AbortOnDropHandle::new(tokio::spawn(worker)));
+        Ok(runner)
     }
 
-    /// A runner over the given state and review (and where each is saved).
+    /// A runner over the given state and review (and where each is saved), with an empty
+    /// enrichment queue saved beside the state file and no enrichment worker.
     #[must_use]
     pub(crate) fn with_files(
         config: Config,
@@ -472,8 +495,11 @@ impl Runner {
         review: (ReviewList, PathBuf),
         events: UnboundedSender<Event>,
     ) -> Self {
+        let pending_path = state.1.with_file_name("pending_enrichment.toml");
         Self {
             config: Arc::new(config),
+            queue: Queue::new(PendingEnrichment::default(), pending_path),
+            enricher: None,
             state: Arc::new(Mutex::new(state.0)),
             state_path: Arc::new(state.1),
             review: Arc::new(Mutex::new(review.0)),
@@ -644,6 +670,7 @@ impl Runner {
             state_path: Arc::clone(&self.state_path),
             review: Arc::clone(&self.review),
             review_path: Arc::clone(&self.review_path),
+            queue: self.queue.clone(),
             device: Arc::clone(&self.device),
             line_note: Arc::default(),
             active: Arc::clone(&self.active),

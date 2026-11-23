@@ -1,8 +1,8 @@
 //! Intake (F3): one wanted song into the library. Sync Spotify, Download link and Review all end
 //! here; each decides only which songs to take and by which [`Route`].
 //!
-//! Steps: skip if present, claim the place, match (or go direct), download, look up and tag the
-//! temp file, land it. A song that cannot be taken is a failed item with a plain reason; only a
+//! Steps: skip if present, claim the place, match (or go direct), download, tag the temp file
+//! with the song's own fields, land it, queue it for enrichment (F6). A song that cannot be taken is a failed item with a plain reason; only a
 //! failure that would repeat for every song (a missing tool, a settings file that cannot be
 //! saved) ends the run.
 
@@ -18,7 +18,7 @@ use sdl_core::{
 use sdl_library::LibraryError;
 use sdl_library::converter::convert_file;
 use sdl_library::playlists::correct_line;
-use sdl_library::tags::{Cover, Enrichment, ReleaseCache, lookup, write_tags};
+use sdl_library::tags::{Cover, write_tags};
 use sdl_youtube::{Matcher, YoutubeError, download_opus, download_own_audio};
 use tokio::sync::OnceCell;
 
@@ -74,7 +74,6 @@ impl Listed {
 pub(crate) struct Intake<'a> {
     context: &'a TaskContext,
     matcher: OnceCell<Matcher>,
-    cache: ReleaseCache,
     claimed: Mutex<HashSet<Place>>,
 }
 
@@ -85,7 +84,6 @@ impl<'a> Intake<'a> {
             // Made at the first song that needs a search, so a run that never searches (review,
             // direct links) never starts the client.
             matcher: OnceCell::new(),
-            cache: ReleaseCache::default(),
             claimed: Mutex::default(),
         }
     }
@@ -211,25 +209,27 @@ impl<'a> Intake<'a> {
             convert_file(downloaded.file(), &out, Preset::OPUS).await?;
             (out, Format::Opus)
         };
-        let enrichment = if song.isrc.is_some() {
-            // A failed or empty lookup leaves those tags empty; the song still completes (F6).
-            lookup(song, &self.cache).await.unwrap_or_default()
-        } else {
-            Enrichment::default()
-        };
-        let cover = write_tags(&file, song, &enrichment).await?;
+        let cover = write_tags(&file, song).await?;
         // Another task may have landed the song while this one worked, in any format.
         if place.present()?.is_some() {
             return Ok(Outcome::Skipped);
         }
         let landed = land_in_library(&file, &place.path(format))?;
-        if landed == Outcome::Added && format != Format::Opus {
+        if landed != Outcome::Added {
+            return Ok(landed);
+        }
+        if format != Format::Opus {
             let files: Vec<String> = from.iter().map(|list| list.file.clone()).collect();
             correct_line(library, &files, &place, format)?;
         }
-        Ok(match landed {
-            Outcome::Added => added(enrichment.genre.is_none(), cover == Cover::Missing),
-            other => other,
+        // Genre and totals come later, from the enrichment worker (F6); `MusicBrainz` looks a
+        // song up by its ISRC, so a song without one has nothing to wait for.
+        if song.isrc.is_some() {
+            self.context.queue_enrichment(library.id(), song.clone())?;
+        }
+        Ok(match cover {
+            Cover::Stored => Outcome::Added,
+            Cover::Missing => Outcome::AddedWithoutCover,
         })
     }
 
@@ -250,18 +250,6 @@ impl<'a> Intake<'a> {
     async fn find(&self, song: &WantedSong) -> Result<MatchOutcome, TaskError> {
         let matcher = self.matcher.get_or_try_init(Matcher::new).await?;
         Ok(matcher.find(song).await)
-    }
-}
-
-/// A song that landed: plain [`Outcome::Added`] unless it has no genre or no cover.
-fn added(without_genre: bool, without_cover: bool) -> Outcome {
-    if without_genre || without_cover {
-        Outcome::AddedMissing {
-            genre: without_genre,
-            cover: without_cover,
-        }
-    } else {
-        Outcome::Added
     }
 }
 

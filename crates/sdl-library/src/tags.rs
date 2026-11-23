@@ -1,15 +1,17 @@
-//! Genre, totals and tags (F6): `MusicBrainz` lookup and one `lofty` write to the temp file.
+//! Genre, totals and tags (F6): one `lofty` write of the song's own tags to the temp file before
+//! it lands, the `MusicBrainz` lookup, and adding what it found to the file in the library.
 
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::io::{Cursor, Seek as _};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use lofty::config::WriteOptions;
-use lofty::file::TaggedFileExt;
+use lofty::file::{AudioFile as _, TaggedFileExt};
 use lofty::picture::{Picture, PictureType};
+use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, Tag, TagExt};
 use musicbrainz_rs::api_bindium::ApiClient;
 use musicbrainz_rs::api_bindium::ureq::config::Config;
@@ -24,6 +26,7 @@ use musicbrainz_rs::entity::genre::Genre;
 use musicbrainz_rs::entity::recording::{Recording, RecordingSearchQuery};
 use musicbrainz_rs::entity::release::Release;
 use musicbrainz_rs::prelude::*;
+use sdl_core::landing::write_atomic;
 use sdl_core::{Library, Place, WantedSong};
 use tokio::sync::OnceCell;
 
@@ -63,7 +66,7 @@ impl ReleaseCache {
 }
 
 /// Look up genre and totals by ISRC. Uses one process-wide `MusicBrainzClient` with a generic
-/// User-Agent (`sdl/<version>`), so its `rate_limit` limiter is shared by every concurrent song.
+/// User-Agent ([`USER_AGENT`]), so its `rate_limit` limiter is shared by every concurrent song.
 ///
 /// `MusicBrainz` calls per song with an ISRC: one recording search (`isrc:<code>`), one recording
 /// lookup (`inc=genres+artists+releases+media`; the response carries the genres of the recording
@@ -212,17 +215,14 @@ async fn fetch_cover(url: &str) -> Result<Picture, Box<dyn std::error::Error + S
     Ok(picture)
 }
 
-/// Write all tags and the cover (downloaded from `song.cover_url`, giving up after 20 seconds) to
-/// `file` in one write. A cover that cannot be downloaded or stored leaves the song without one
-/// ([`Cover::Missing`]); the other tags are still written.
+/// Write the song's own tags and its cover (downloaded from `song.cover_url`, giving up after 20
+/// seconds) to the temp `file` in one write, before it lands. Genre and totals are not written
+/// here: they come later ([`add_enrichment`]). A cover that cannot be downloaded or stored leaves
+/// the song without one ([`Cover::Missing`]); the other tags are still written.
 ///
 /// # Errors
 /// The file cannot be read or written.
-pub async fn write_tags(
-    file: &Path,
-    song: &WantedSong,
-    enrichment: &Enrichment,
-) -> Result<Cover, LibraryError> {
+pub async fn write_tags(file: &Path, song: &WantedSong) -> Result<Cover, LibraryError> {
     let picture = match &song.cover_url {
         Some(url) => fetch_cover(url).await.ok(),
         None => None,
@@ -239,7 +239,7 @@ pub async fn write_tags(
     let tag = tagged
         .primary_tag_mut()
         .ok_or_else(|| tag_err("no writable tag".to_owned()))?;
-    fill_tag(tag, song, enrichment);
+    fill_tag(tag, song);
     let cover = if let Some(picture) = picture {
         tag.remove_picture_type(PictureType::CoverFront);
         tag.push_picture(picture);
@@ -252,14 +252,61 @@ pub async fn write_tags(
     Ok(cover)
 }
 
+/// Add genre, track total and disc total to a song's `file` in the library (F6). The file is
+/// read into memory, tagged there and written back whole ([`write_atomic`]), so a crash leaves
+/// the old file or the new one. Every other tag, the cover and the audio stay as they are; a
+/// value `enrichment` does not have leaves its tag as it is, and with none the file is not
+/// touched. Blocking: call it from a blocking thread.
+///
+/// # Errors
+/// The file cannot be read, tagged or written.
+pub fn add_enrichment(file: &Path, enrichment: &Enrichment) -> Result<(), LibraryError> {
+    if *enrichment == Enrichment::default() {
+        return Ok(());
+    }
+    let tag_err = |message: String| LibraryError::Tag {
+        path: file.to_path_buf(),
+        message,
+    };
+    let mut bytes = Cursor::new(std::fs::read(file).map_err(|e| tag_err(e.to_string()))?);
+    let mut tagged = Probe::new(&mut bytes)
+        .guess_file_type()
+        .map_err(|e| tag_err(e.to_string()))?
+        .read()
+        .map_err(|e| tag_err(e.to_string()))?;
+    let tag = tagged
+        .primary_tag_mut()
+        .ok_or_else(|| tag_err("no tag to add to".to_owned()))?;
+    if let Some(genre) = &enrichment.genre {
+        tag.set_genre(genre.clone());
+    }
+    if let Some(n) = enrichment.track_total {
+        tag.set_track_total(n);
+    }
+    if let Some(n) = enrichment.disc_total {
+        tag.set_disk_total(n);
+    }
+    bytes.rewind().map_err(|e| tag_err(e.to_string()))?;
+    tagged
+        .save_to(&mut bytes, WriteOptions::default())
+        .map_err(|e| tag_err(e.to_string()))?;
+    write_atomic(file, bytes.get_ref()).map_err(|e| tag_err(e.to_string()))
+}
+
+/// What every `MusicBrainz` request says it comes from: the app, its version and where its
+/// maintainer can be reached, as `MusicBrainz` requires (F6).
+const USER_AGENT: &str = concat!(
+    "sdl/",
+    env!("CARGO_PKG_VERSION"),
+    " ( https://github.com/fleet-47/Music-Manager )"
+);
+
 /// The one process-wide client: the rate limiter lives inside it. Its agent tries a host's IPv4
 /// addresses before its IPv6 ones ([`Ipv4First`]).
 fn mb_client() -> &'static MusicBrainzClient {
     static CLIENT: OnceLock<MusicBrainzClient> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        let config = Config::builder()
-            .user_agent(concat!("sdl/", env!("CARGO_PKG_VERSION")))
-            .build();
+        let config = Config::builder().user_agent(USER_AGENT).build();
         let agent = Agent::with_parts(config, DefaultConnector::default(), Ipv4First::default());
         MusicBrainzClient::builder()
             .api_client(ApiClient::builder().agent(agent).build())
@@ -292,8 +339,8 @@ fn ipv4_first(addrs: &mut [SocketAddr]) {
     addrs.sort_by_key(SocketAddr::is_ipv6);
 }
 
-/// Set every spec field on `tag`; empty enrichment values leave their tag unset.
-fn fill_tag(tag: &mut Tag, song: &WantedSong, enrichment: &Enrichment) {
+/// Set the song's own fields on `tag` (F6, at landing); a field the song lacks leaves its tag unset.
+fn fill_tag(tag: &mut Tag, song: &WantedSong) {
     tag.set_title(song.title.clone());
     if let Some(album) = &song.album {
         tag.set_album(album.clone());
@@ -314,20 +361,11 @@ fn fill_tag(tag: &mut Tag, song: &WantedSong, enrichment: &Enrichment) {
     if let Some(number) = song.disc_number {
         tag.set_disk(number);
     }
-    if let Some(n) = enrichment.disc_total {
-        tag.set_disk_total(n);
-    }
-    if let Some(n) = enrichment.track_total {
-        tag.set_track_total(n);
-    }
     if let Some(date) = &song.date {
         tag.insert_text(ItemKey::RecordingDate, date.clone());
     }
     if let Some(isrc) = &song.isrc {
         tag.insert_text(ItemKey::Isrc, isrc.clone());
-    }
-    if let Some(genre) = &enrichment.genre {
-        tag.set_genre(genre.clone());
     }
 }
 
@@ -490,18 +528,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_spotify_song_gets_every_tag_and_its_cover() -> TestResult {
+    async fn a_spotify_song_lands_with_its_own_tags_and_cover_and_no_genre() -> TestResult {
         let dir = tempfile::tempdir()?;
         let file = dir.path().join("t.opus");
         make_audio(&file, 1)?;
         let mut song = spotify();
         song.cover_url = Some(serve_once(make_cover(&dir.path().join("c.png"))?)?);
-        let enrichment = Enrichment {
-            genre: Some("Jazz".into()),
-            track_total: Some(5),
-            disc_total: Some(1),
-        };
-        assert_eq!(write_tags(&file, &song, &enrichment).await?, Cover::Stored);
+        assert_eq!(write_tags(&file, &song).await?, Cover::Stored);
         let tag = read_tag(&file)?;
         assert_eq!(tag.title().as_deref(), Some("Blue in Green"));
         assert_eq!(
@@ -510,10 +543,8 @@ mod tests {
         );
         assert_eq!(tag.album().as_deref(), Some("Kind of Blue"));
         assert_eq!(tag.get_string(ItemKey::AlbumArtist), Some("Miles Davis"));
-        assert_eq!((tag.track(), tag.track_total()), (Some(3), Some(5)));
-        assert_eq!((tag.disk(), tag.disk_total()), (Some(1), Some(1)));
+        assert_eq!((tag.track(), tag.disk()), (Some(3), Some(1)));
         assert_eq!(tag.get_string(ItemKey::Isrc), Some("USSM15900001"));
-        assert_eq!(tag.genre().as_deref(), Some("Jazz"));
         assert!(
             tag.get_string(ItemKey::RecordingDate)
                 .is_some_and(|d| d.starts_with("1959"))
@@ -523,6 +554,110 @@ mod tests {
                 .map(|p| p.data().is_empty()),
             Some(false)
         );
+        // What MusicBrainz supplies comes later.
+        assert_eq!(
+            (tag.genre(), tag.track_total(), tag.disk_total()),
+            (None, None, None)
+        );
+        Ok(())
+    }
+
+    /// The pictures of a file as (type, size), to tell that a cover is untouched. An M4A cover
+    /// has no type and reads as `Other`.
+    fn pictures(file: &Path) -> Result<Vec<(PictureType, usize)>, Box<dyn std::error::Error>> {
+        Ok(read_tag(file)?
+            .pictures()
+            .iter()
+            .map(|picture| (picture.pic_type(), picture.data().len()))
+            .collect())
+    }
+
+    /// The names in `dir`, sorted.
+    fn names(dir: &Path) -> Result<Vec<String>, std::io::Error> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            found.push(entry?.file_name().to_string_lossy().into_owned());
+        }
+        found.sort();
+        Ok(found)
+    }
+
+    #[tokio::test]
+    async fn genre_and_totals_are_added_to_a_landed_song_and_nothing_else_changes() -> TestResult {
+        for ext in ["opus", "m4a", "mp3"] {
+            let dir = tempfile::tempdir()?;
+            let file = dir.path().join(format!("t.{ext}"));
+            make_audio(&file, 1)?;
+            let mut song = spotify();
+            song.cover_url = Some(serve_once(make_cover(&dir.path().join("c.png"))?)?);
+            assert_eq!(write_tags(&file, &song).await?, Cover::Stored, "{ext}");
+            let cover_before = pictures(&file)?;
+            let stream_before = crate::testkit::probe(&file)?;
+            let found = Enrichment {
+                genre: Some("Jazz".into()),
+                track_total: Some(5),
+                disc_total: Some(1),
+            };
+            add_enrichment(&file, &found)?;
+            let tag = read_tag(&file)?;
+            assert_eq!(tag.genre().as_deref(), Some("Jazz"), "{ext}");
+            assert_eq!(
+                (tag.track(), tag.track_total()),
+                (Some(3), Some(5)),
+                "{ext}"
+            );
+            assert_eq!((tag.disk(), tag.disk_total()), (Some(1), Some(1)), "{ext}");
+            assert_eq!(tag.title().as_deref(), Some("Blue in Green"), "{ext}");
+            assert_eq!(tag.album().as_deref(), Some("Kind of Blue"), "{ext}");
+            assert_eq!(tag.get_string(ItemKey::Isrc), Some("USSM15900001"), "{ext}");
+            assert_eq!(tag.get_strings(ItemKey::TrackArtist).count(), 2, "{ext}");
+            assert_eq!(
+                pictures(&file)?,
+                cover_before,
+                "{ext}: the cover is untouched"
+            );
+            assert_eq!(cover_before.len(), 1, "{ext}");
+            let stream_after = crate::testkit::probe(&file)?;
+            for key in ["codec_name", "sample_rate", "channels"] {
+                assert_eq!(
+                    stream_before.get(key),
+                    stream_after.get(key),
+                    "{ext}: {key}"
+                );
+            }
+            assert_eq!(
+                names(dir.path())?,
+                ["c.png".to_owned(), format!("t.{ext}")],
+                "{ext}: no temp file is left"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_empty_answer_leaves_the_file_as_it_is_and_a_missing_value_its_tag() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("t.opus");
+        make_audio(&file, 1)?;
+        write_tags(&file, &spotify()).await?;
+        let bytes = std::fs::read(&file)?;
+        add_enrichment(&file, &Enrichment::default())?;
+        assert_eq!(std::fs::read(&file)?, bytes, "nothing found: not rewritten");
+        let only_genre = Enrichment {
+            genre: Some("Jazz".into()),
+            ..Enrichment::default()
+        };
+        add_enrichment(&file, &only_genre)?;
+        let tag = read_tag(&file)?;
+        assert_eq!(tag.genre().as_deref(), Some("Jazz"));
+        assert_eq!((tag.track_total(), tag.disk_total()), (None, None));
+        // A file that is not there is an error naming it, not a new file.
+        let gone = dir.path().join("gone.opus");
+        assert!(matches!(
+            add_enrichment(&gone, &only_genre),
+            Err(LibraryError::Tag { .. })
+        ));
+        assert!(!gone.exists());
         Ok(())
     }
 
@@ -535,7 +670,7 @@ mod tests {
         // No ISRC: nothing is asked of MusicBrainz, so nothing can fail and nothing is found.
         let found = lookup(&song, &ReleaseCache::default()).await?;
         assert_eq!(found, Enrichment::default());
-        assert_eq!(write_tags(&file, &song, &found).await?, Cover::Missing);
+        assert_eq!(write_tags(&file, &song).await?, Cover::Missing);
         let tag = read_tag(&file)?;
         assert_eq!(tag.title().as_deref(), Some("Blue in Green"));
         assert_eq!(tag.album().as_deref(), Some("Kind of Blue"));
@@ -553,7 +688,7 @@ mod tests {
         make_audio(&file, 1)?;
         let mut song = link();
         song.cover_url = Some("http://127.0.0.1:1/none.png".into());
-        let cover = write_tags(&file, &song, &Enrichment::default()).await?;
+        let cover = write_tags(&file, &song).await?;
         assert_eq!(cover, Cover::Missing);
         let tag = read_tag(&file)?;
         assert_eq!(tag.title().as_deref(), Some("Blue in Green"));
@@ -569,7 +704,7 @@ mod tests {
         make_audio(&file, 1)?;
         let mut song = link();
         song.cover_url = Some(serve_once(b"not an image".to_vec())?);
-        let cover = write_tags(&file, &song, &Enrichment::default()).await?;
+        let cover = write_tags(&file, &song).await?;
         assert_eq!(cover, Cover::Missing);
         assert_eq!(read_tag(&file)?.title().as_deref(), Some("Blue in Green"));
         Ok(())
@@ -585,7 +720,7 @@ mod tests {
         song.album_artist = None;
         let tagged = lofty::read_from_path(&file)?;
         let mut tag = Tag::new(tagged.primary_tag_type());
-        fill_tag(&mut tag, &song, &Enrichment::default());
+        fill_tag(&mut tag, &song);
         tag.save_to_path(&file, WriteOptions::default())?;
         let place = place_from_tags(&file, &lib(&root))?.ok_or("no place")?;
         // No album artist tag: the first artist.

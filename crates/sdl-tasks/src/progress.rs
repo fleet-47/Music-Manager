@@ -65,21 +65,14 @@ pub fn written_line(counts: &Counts, verb: &str) -> String {
     line
 }
 
-/// The last-run line of a download run: `412 added, 12 already there, 30 without a genre, 2
-/// without a cover, 3 need attention`. A part that is zero is left out, except the number added.
+/// The last-run line of a download run: `412 added, 12 already there, 2 without a cover, 3 need
+/// attention`. A part that is zero is left out, except the number added.
 #[must_use]
 pub fn summary_line(tally: &Tally) -> String {
     let counts = tally.counts();
     let mut line = format!("{} added", thousands(counts.added));
     if counts.skipped > 0 {
         let _ = write!(line, ", {} already there", thousands(counts.skipped));
-    }
-    if tally.without_genre() > 0 {
-        let _ = write!(
-            line,
-            ", {} without a genre",
-            thousands(tally.without_genre())
-        );
     }
     if tally.without_cover() > 0 {
         let _ = write!(
@@ -143,12 +136,9 @@ mod tests {
     fn songs_left_out_before_the_run_count_as_skipped_in_its_line() {
         let mut tally = Tally::new(2);
         tally.record(Outcome::Added);
-        tally.record(Outcome::AddedMissing {
-            genre: true,
-            cover: false,
-        });
+        tally.record(Outcome::AddedWithoutCover);
         let line = summary_line(&tally.with_already(10));
-        assert_eq!(line, "2 added, 10 already there, 1 without a genre");
+        assert_eq!(line, "2 added, 10 already there, 1 without a cover");
     }
 
     #[test]
@@ -156,18 +146,9 @@ mod tests {
         let mut tally = Tally::new(3);
         tally.record(Outcome::Added);
         assert_eq!(summary_line(&tally), "1 added");
-        tally.record(Outcome::AddedMissing {
-            genre: false,
-            cover: true,
-        });
-        tally.record(Outcome::AddedMissing {
-            genre: true,
-            cover: true,
-        });
-        assert_eq!(
-            summary_line(&tally),
-            "3 added, 1 without a genre, 2 without a cover"
-        );
+        tally.record(Outcome::AddedWithoutCover);
+        tally.record(Outcome::AddedWithoutCover);
+        assert_eq!(summary_line(&tally), "3 added, 2 without a cover");
     }
 
     #[test]

@@ -50,14 +50,9 @@ fn report(tally: &mut Tally, outcome: Outcome, events: &EventSender) {
 pub enum Outcome {
     /// Downloaded and placed in the library, or converted, or copied.
     Added,
-    /// Placed in the library, but left without a genre and/or a cover (F6): counted as added,
-    /// and in the last-run line's "without a genre" and "without a cover".
-    AddedMissing {
-        /// `MusicBrainz` gave no genre.
-        genre: bool,
-        /// The cover could not be downloaded or stored.
-        cover: bool,
-    },
+    /// Placed in the library, but its cover could not be downloaded or stored (F6): counted as
+    /// added, and in the last-run line's "without a cover".
+    AddedWithoutCover,
     /// Already there; nothing was written.
     Skipped,
     /// Held for review: no confident match.
@@ -66,12 +61,11 @@ pub enum Outcome {
     Failed(Attention),
 }
 
-/// The counts of one run: what the UI keeps ([`Counts`]) and the songs added without a genre or
-/// without a cover, which only the last-run line uses (F6).
+/// The counts of one run: what the UI keeps ([`Counts`]) and the songs added without a cover,
+/// which only the last-run line uses (F6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tally {
     counts: Counts,
-    without_genre: usize,
     without_cover: usize,
 }
 
@@ -84,7 +78,6 @@ impl Tally {
                 total: Some(total),
                 ..Counts::default()
             },
-            without_genre: 0,
             without_cover: 0,
         }
     }
@@ -93,12 +86,6 @@ impl Tally {
     #[must_use]
     pub fn counts(&self) -> Counts {
         self.counts
-    }
-
-    /// Songs added without a genre.
-    #[must_use]
-    pub fn without_genre(&self) -> usize {
-        self.without_genre
     }
 
     /// Songs added without a cover.
@@ -128,14 +115,9 @@ impl Tally {
                 self.counts.added = self.counts.added.saturating_add(1);
                 None
             }
-            Outcome::AddedMissing { genre, cover } => {
+            Outcome::AddedWithoutCover => {
                 self.counts.added = self.counts.added.saturating_add(1);
-                if genre {
-                    self.without_genre = self.without_genre.saturating_add(1);
-                }
-                if cover {
-                    self.without_cover = self.without_cover.saturating_add(1);
-                }
+                self.without_cover = self.without_cover.saturating_add(1);
                 None
             }
             Outcome::Skipped => {
@@ -269,10 +251,7 @@ mod tests {
             std::future::ready(Ok::<_, String>(Outcome::Added)),
             std::future::ready(Ok(Outcome::Skipped)),
             std::future::ready(Ok(Outcome::Held(item("held")))),
-            std::future::ready(Ok(Outcome::AddedMissing {
-                genre: true,
-                cover: false,
-            })),
+            std::future::ready(Ok(Outcome::AddedWithoutCover)),
         ];
         let tally = run.drive(jobs).await?;
         let expected = Counts {
@@ -284,7 +263,7 @@ mod tests {
             failed: 1,
         };
         assert_eq!(tally.counts(), expected);
-        assert_eq!((tally.without_genre(), tally.without_cover()), (1, 0));
+        assert_eq!(tally.without_cover(), 1);
         let kinds = sent(&mut rx);
         // Nothing done yet, with the whole total: the bar starts at once.
         assert_eq!(
@@ -442,12 +421,8 @@ mod tests {
         assert_eq!(tally.record(Outcome::Skipped), None);
         assert_eq!(tally.record(Outcome::Held(item("u"))), Some(item("u")));
         assert_eq!(tally.record(Outcome::Failed(item("f"))), Some(item("f")));
-        let missing = Outcome::AddedMissing {
-            genre: true,
-            cover: false,
-        };
-        assert_eq!(tally.record(missing), None);
-        assert_eq!((tally.without_genre(), tally.without_cover()), (1, 0));
+        assert_eq!(tally.record(Outcome::AddedWithoutCover), None);
+        assert_eq!(tally.without_cover(), 1);
         assert_eq!(
             tally.counts(),
             Counts {
