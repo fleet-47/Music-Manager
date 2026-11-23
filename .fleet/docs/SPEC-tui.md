@@ -482,14 +482,15 @@ and its update logic are free of drawing code. Errors: `thiserror` in libraries,
 binary.
 
 ## Build standard (`fleet-47/Gen.v2`)
-- Toolchain: fenix stable. The global `~/.cargo/config.toml` supplies profiles, rustflags and the
-  clippy config. The repo carries no `.cargo/`, `clippy.toml`, `rustfmt.toml`, `[lints]` table,
-  rustflags or profile overrides.
+- Toolchain: fenix stable. The global cargo config (`~/.config/cargo/config.toml`) supplies the
+  profiles, the rustflags, the lint levels (inside `build.rustflags`, so every build enforces
+  them) and the clippy config. The repo's `.cargo/config.toml` and `.cargo/clippy/clippy.toml`
+  are a copy of it without the paths that name one machine, so a clone stands alone; the two
+  are kept the same. No `rustfmt.toml`, no `[lints]` table, no other overrides.
 - Gate: `cargo fmt --all`, `cargo lint`, and
   `mise x -- cargo test --workspace --all-targets --all-features --locked` (tests use the real
-  `ffmpeg`, which is on `PATH` only through mise). `cargo lint` is an alias in the global cargo
-  config that runs clippy over the whole workspace with the Gen.v2 lint levels; the levels are
-  defined there and are never typed on a command line.
+  `ffmpeg`, which is on `PATH` only through mise). `cargo lint` is an alias in the cargo config
+  that runs clippy over the whole workspace; no lint flag is typed on a command line.
 - No `#[allow]` or `#[expect]` anywhere. Tests return `Result` and use `?`.
 - Tests cover pure logic and file operations in temp directories. No invented API fixtures.
 

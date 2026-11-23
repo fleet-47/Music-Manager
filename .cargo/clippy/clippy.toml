@@ -1,0 +1,3 @@
+[[disallowed-methods]]
+path = "std::panic::catch_unwind"
+reason = "Expected failures use typed return paths; panic recovery requires an explicit architectural exception."

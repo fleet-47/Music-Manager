@@ -1,0 +1,171 @@
+# The repo's own copy of the Fleet cargo standard (fleet-47/Gen.v2), so a clone builds and
+# gates the same way without the machine's global cargo config. Copied 2026-11-23 from
+# ~/.config/cargo/config.toml; keep the two the same.
+# Left out because they name one machine's folders: build.target-dir, install.root, and the
+# linker and SDK rustflags. On the owner's Mac the global config still supplies them.
+
+[env]
+# Relative to the folder that holds .cargo/ (the repo root).
+CLIPPY_CONF_DIR = { value = ".cargo/clippy", relative = true }
+
+# The Fleet lint gate: `cargo lint`. The lint levels themselves are in build.rustflags below,
+# so they apply to every build, check, test and clippy run. A plain build enforces the rustc
+# ones (warnings, unsafe_code); the clippy:: ones are checked whenever clippy runs, which
+# cargo cannot do as part of `cargo build`.
+# A string, not a list: cargo joins lists from several config files, which would repeat the
+# command when a repo carries its own copy of this file.
+[alias]
+lint = "clippy --workspace --all-targets --all-features --locked"
+
+[build]
+incremental = false
+rustflags = [
+  "-C", "target-cpu=native",
+  # Lint levels: Gen.v2's _clippy-flags.nix. clippy.toml cannot hold them (it configures
+  # lints, it does not set levels). Dependencies from registries are not affected: cargo
+  # caps their lints.
+  "-D", "warnings",
+  "-D", "clippy::all",
+  "-D", "clippy::pedantic",
+  "-D", "clippy::disallowed_methods",
+  "-D", "clippy::unwrap_used",
+  "-D", "clippy::expect_used",
+  "-D", "clippy::panic",
+  "-D", "clippy::arithmetic_side_effects",
+  "-D", "clippy::cast_possible_truncation",
+  "-D", "clippy::cast_possible_wrap",
+  "-D", "clippy::cast_sign_loss",
+  "-F", "unsafe_code",
+  "-D", "clippy::allow_attributes",
+  "-D", "clippy::allow_attributes_without_reason",
+]
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = "none"
+split-debuginfo = "off"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+lto = "thin"
+panic = "abort"
+rpath = false
+
+[profile.release.package."*"]
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = "none"
+split-debuginfo = "off"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+
+[profile.release.build-override]
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = "none"
+split-debuginfo = "off"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev]
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = "none"
+split-debuginfo = "off"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+lto = "thin"
+panic = "abort"
+rpath = false
+
+[profile.dev.package."*"]
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = "none"
+split-debuginfo = "off"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.build-override]
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = "none"
+split-debuginfo = "off"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+
+[profile.test]
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = "none"
+split-debuginfo = "off"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+lto = "thin"
+rpath = false
+
+[profile.test.package."*"]
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = "none"
+split-debuginfo = "off"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+
+[profile.test.build-override]
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = "none"
+split-debuginfo = "off"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+
+[profile.bench]
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = "none"
+split-debuginfo = "off"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+lto = "thin"
+rpath = false
+
+[profile.bench.package."*"]
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = "none"
+split-debuginfo = "off"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+
+[profile.bench.build-override]
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = "none"
+split-debuginfo = "off"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
