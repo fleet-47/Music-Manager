@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
@@ -10,6 +11,14 @@ use lofty::config::WriteOptions;
 use lofty::file::TaggedFileExt;
 use lofty::picture::{Picture, PictureType};
 use lofty::tag::{Accessor, ItemKey, Tag, TagExt};
+use musicbrainz_rs::api_bindium::ApiClient;
+use musicbrainz_rs::api_bindium::ureq::config::Config;
+use musicbrainz_rs::api_bindium::ureq::http::Uri;
+use musicbrainz_rs::api_bindium::ureq::unversioned::resolver::{
+    DefaultResolver, ResolvedSocketAddrs, Resolver,
+};
+use musicbrainz_rs::api_bindium::ureq::unversioned::transport::{DefaultConnector, NextTimeout};
+use musicbrainz_rs::api_bindium::ureq::{self, Agent};
 use musicbrainz_rs::client::MusicBrainzClient;
 use musicbrainz_rs::entity::genre::Genre;
 use musicbrainz_rs::entity::recording::{Recording, RecordingSearchQuery};
@@ -243,10 +252,44 @@ pub async fn write_tags(
     Ok(cover)
 }
 
-/// The one process-wide client: the rate limiter lives inside it.
+/// The one process-wide client: the rate limiter lives inside it. Its agent tries a host's IPv4
+/// addresses before its IPv6 ones ([`Ipv4First`]).
 fn mb_client() -> &'static MusicBrainzClient {
     static CLIENT: OnceLock<MusicBrainzClient> = OnceLock::new();
-    CLIENT.get_or_init(|| MusicBrainzClient::new(concat!("sdl/", env!("CARGO_PKG_VERSION"))))
+    CLIENT.get_or_init(|| {
+        let config = Config::builder()
+            .user_agent(concat!("sdl/", env!("CARGO_PKG_VERSION")))
+            .build();
+        let agent = Agent::with_parts(config, DefaultConnector::default(), Ipv4First::default());
+        MusicBrainzClient::builder()
+            .api_client(ApiClient::builder().agent(agent).build())
+            .build()
+    })
+}
+
+/// ureq's own resolver with the IPv4 addresses moved to the front (F6). ureq connects to the
+/// addresses in order and has no connect timeout by default, so an IPv6 address that does not
+/// answer costs the system's 75 seconds before IPv4 is tried; IPv6 is still used when no IPv4
+/// address is there or none connects.
+#[derive(Debug, Default)]
+struct Ipv4First(DefaultResolver);
+
+impl Resolver for Ipv4First {
+    fn resolve(
+        &self,
+        uri: &Uri,
+        config: &Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let mut addrs = self.0.resolve(uri, config, timeout)?;
+        ipv4_first(&mut addrs);
+        Ok(addrs)
+    }
+}
+
+/// IPv4 addresses first, each family in the order it came (the sort is stable).
+fn ipv4_first(addrs: &mut [SocketAddr]) {
+    addrs.sort_by_key(SocketAddr::is_ipv6);
 }
 
 /// Set every spec field on `tag`; empty enrichment values leave their tag unset.
@@ -330,6 +373,32 @@ pub fn place_from_tags(file: &Path, library: &Library) -> Result<Option<Place>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv4_addresses_are_tried_before_ipv6_ones() -> Result<(), std::net::AddrParseError> {
+        let mut addrs: Vec<SocketAddr> = vec![
+            "[2a01:4f8:c011:f68::1]:443".parse()?,
+            "142.132.241.153:443".parse()?,
+            "[2a01:4f8:c011:f68::2]:443".parse()?,
+            "142.132.241.154:443".parse()?,
+        ];
+        ipv4_first(&mut addrs);
+        let shown: Vec<String> = addrs.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            shown,
+            [
+                "142.132.241.153:443",
+                "142.132.241.154:443",
+                "[2a01:4f8:c011:f68::1]:443",
+                "[2a01:4f8:c011:f68::2]:443",
+            ]
+        );
+        // IPv6 alone is kept: it is the fallback when a host has no IPv4 address.
+        let mut only_v6: Vec<SocketAddr> = vec!["[2a01:4f8:c011:f68::1]:443".parse()?];
+        ipv4_first(&mut only_v6);
+        assert_eq!(only_v6.len(), 1);
+        Ok(())
+    }
 
     fn genre(name: &str, count: Option<u32>) -> Genre {
         Genre {

@@ -202,7 +202,9 @@ report it; do not substitute another crate or hand-write the capability.
 
 ## F6. Genre, totals and tags (`sdl-library`)
 - `musicbrainz_rs` 0.14 (features `async`, `rate_limit`, `rustls`), one process-wide client,
-  User-Agent `sdl/<version>`.
+  User-Agent `sdl/<version>`. Its addresses are tried IPv4 first and IPv6 after (ruled
+  2026-11-23): the client's `ureq` agent is built with `Agent::with_parts` and a resolver that
+  wraps ureq's `DefaultResolver` and puts the IPv4 addresses in front.
 - For a song with an ISRC: recording search `isrc:<code>`, a recording lookup, and one release
   lookup per release ID per run. Genre = the recording's top genre, else its release group's, else
   its first artist's. Track total and disc total from the release whose title matches the album.
