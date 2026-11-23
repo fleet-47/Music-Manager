@@ -325,7 +325,14 @@ report it; do not substitute another crate or hand-write the capability.
   <device>?" shows a countdown from 30 seconds and ejects when it reaches zero; Eject answers
   at once, Keep mounted cancels. Eject is `diskutil unmount <mount point>` and nothing else. A
   stopped or failed run asks nothing. The countdown redraws once a second while the question
-  is on screen (F2).
+  is on screen (F2). When another popup covers the question, the countdown starts again from
+  30 seconds once the question is back on top (ruled 2026-11-23).
+- Same drive (ruled 2026-11-23): clean-up and eject act only when the volume at the mount point
+  is still the device the run used, checked inside `sdl-devices` by asking
+  `diskutil info -plist <mount point>` and comparing the device's identity (volume UUID,
+  falling back to its name, as in the device list). When the drive is gone or another one is
+  mounted there, clean-up does nothing and eject counts as done: the drive is already out.
+  This replaces "still mounted" above being judged by the folder existing.
 - Not-mounted drives (ruled 2026-11-23): the Device list also shows external or removable
   volumes that are plugged in but not mounted, each with "(not mounted)" after its name, found
   with `diskutil list -plist external` (confirm the keys in real output and in `man diskutil`;

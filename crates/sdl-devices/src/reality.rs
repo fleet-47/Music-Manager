@@ -238,26 +238,3 @@ async fn conversion_with_the_real_ffmpeg() -> TestResult {
     assert!(std::fs::metadata(dev.path().join("Music/Band/Rec/Song.m4a"))?.len() > 0);
     Ok(())
 }
-
-#[tokio::test]
-#[ignore = "runs the real `diskutil unmount` on a folder that is not a mount point"]
-async fn eject_only_unmounts_and_cleans_nothing() -> TestResult {
-    let dev = tempfile::tempdir()?;
-    put(&dev.path().join(".Trashes/501/x"), b"x")?;
-    put(&dev.path().join("Music/.DS_Store"), b"x")?;
-    let device = sdl_core::Device {
-        name: "TESTDEV".into(),
-        mount_point: dev.path().to_path_buf(),
-        volume_uuid: None,
-        free_bytes: 0,
-        disk_image: false,
-        not_mounted: None,
-    };
-    // A plain folder is not a mount point, so `diskutil` refuses; the point is that the refusal
-    // comes from the unmount and nothing was cleaned first.
-    let refused = eject(&device).await;
-    assert!(matches!(refused, Err(DevicesError::Diskutil { .. })));
-    assert!(dev.path().join(".Trashes/501/x").exists());
-    assert!(dev.path().join("Music/.DS_Store").exists());
-    Ok(())
-}

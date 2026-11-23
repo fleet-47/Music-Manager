@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 
 use crate::DevicesError;
 use crate::paths::io_err;
+use crate::volumes::{Presence, presence};
 
 /// Folders macOS makes in a volume's root.
 const ROOT_ITEMS: [&str; 4] = [
@@ -27,14 +28,16 @@ const APPLE_DOUBLE: [u8; 4] = [0x00, 0x05, 0x16, 0x07];
 /// remove `.Spotlight-V100`, `.Trashes`, `.fseventsd` and `.TemporaryItems` from the device root
 /// and every `.DS_Store`; remove a `._X` file only when `X` is in `written` (a file this run
 /// wrote, or a folder it made: [`crate::DevicePlan::written`]) and the file starts with the
-/// `AppleDouble` signature (bytes `00 05 16 07`). Removes nothing else. A device that is no
-/// longer mounted is left alone.
+/// `AppleDouble` signature (bytes `00 05 16 07`). Removes nothing else. Nothing is touched when
+/// the place is gone or another volume is mounted there now (F10 "Same drive"); a plain folder
+/// that is not a volume holds nothing a drive owns and is cleaned like any other.
 ///
 /// # Errors
-/// [`DevicesError::Io`] when the device cannot be read or an item cannot be removed.
+/// [`DevicesError::Io`] when the device cannot be read or an item cannot be removed;
+/// [`DevicesError::Diskutil`] when `diskutil` cannot be asked what is mounted there.
 pub async fn clean_up_device(device: &Device, written: &[PathBuf]) -> Result<(), DevicesError> {
     let (root, written) = (device.mount_point.clone(), written.to_vec());
-    if !root.is_dir() {
+    if !root.is_dir() || presence(device).await? == Presence::Other {
         return Ok(());
     }
     tokio::task::spawn_blocking(move || clean_up(&root, &written))
@@ -44,12 +47,18 @@ pub async fn clean_up_device(device: &Device, written: &[PathBuf]) -> Result<(),
         })?
 }
 
-/// Eject: `diskutil unmount <mount point>` (`sdl_core::process::run`) and nothing else.
+/// Eject: `diskutil unmount <mount point>` (`sdl_core::process::run`) and nothing else. When the
+/// device is no longer what is mounted there (ejected in Finder, or another drive has taken its
+/// place), nothing is unmounted and the eject counts as done: the drive is already out (F10
+/// "Same drive").
 ///
 /// # Errors
 /// [`DevicesError::Diskutil`] when the unmount is refused, with `diskutil`'s own words (for
 /// example which program is still using the device).
 pub async fn eject(device: &Device) -> Result<(), DevicesError> {
+    if presence(device).await? != Presence::Same {
+        return Ok(());
+    }
     let args = [
         OsString::from("unmount"),
         device.mount_point.as_os_str().to_owned(),
@@ -238,6 +247,18 @@ mod tests {
         let gone = dev.path().join("unplugged");
         clean_up_device(&device_at(&gone), &[]).await?;
         assert!(!gone.exists(), "nothing was made or touched");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn eject_of_a_place_where_the_device_is_not_mounted_is_done_and_cleans_nothing()
+    -> TestResult {
+        let dev = tempfile::tempdir()?;
+        put(&dev.path().join(".Trashes/501/x"), b"x")?;
+        // A plain folder is not the device's volume: nothing is unmounted, and nothing is cleaned.
+        eject(&device_at(dev.path())).await?;
+        assert!(dev.path().join(".Trashes/501/x").exists());
+        eject(&device_at(&dev.path().join("unplugged"))).await?;
         Ok(())
     }
 }

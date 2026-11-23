@@ -28,6 +28,26 @@ use crate::fmt::duration_text;
 impl App {
     /// Apply one message at time `clock`; the commands are for the loop to run, in order.
     pub fn update(&mut self, msg: Msg, clock: Clock) -> Vec<Cmd> {
+        let was_on_top = self.eject_question_on_top();
+        let commands = self.apply(msg, clock);
+        // Back on top after being covered by another popup: the countdown starts again, so the
+        // drive never ejects without the full countdown having been on screen (F10).
+        if !was_on_top
+            && let Some(Popup::Confirm(Confirm::Eject { deadline, .. }, _)) = self.popups.last_mut()
+        {
+            *deadline = super::popup::deadline_from(clock.instant);
+        }
+        commands
+    }
+
+    fn eject_question_on_top(&self) -> bool {
+        matches!(
+            self.popups.last(),
+            Some(Popup::Confirm(Confirm::Eject { .. }, _))
+        )
+    }
+
+    fn apply(&mut self, msg: Msg, clock: Clock) -> Vec<Cmd> {
         self.clock = clock;
         match msg {
             Msg::Resize(size) => {
@@ -898,6 +918,25 @@ mod tests {
             vec![Cmd::Quit]
         );
         assert!(app.ejecting.is_none());
+    }
+
+    #[test]
+    fn a_covered_eject_question_starts_its_countdown_again_when_it_is_back_on_top() {
+        let start = clock();
+        let mut app = finished_sync(start);
+        app.popups.push(Popup::ask(Confirm::Quit));
+        // Uncovered 40 seconds in, past the first deadline: nothing ejects.
+        assert_eq!(
+            app.update(key(KeyCode::Char('n')), at(start, 40)),
+            Vec::new()
+        );
+        let left = match app.top() {
+            Some(Popup::Confirm(question, _)) => question.seconds_left(at(start, 40).instant),
+            _ => None,
+        };
+        assert_eq!(left, Some(30), "the eject question is back on top");
+        assert_eq!(app.update(Msg::Wake, at(start, 69)), Vec::new());
+        assert_eq!(app.update(Msg::Wake, at(start, 70)), vec![Cmd::Eject]);
     }
 
     #[test]

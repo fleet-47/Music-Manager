@@ -130,6 +130,39 @@ async fn device_at(mount_point: &Path) -> Result<Option<Device>, DevicesError> {
     Ok(Some(device_of(info, mount_point.to_path_buf(), None)))
 }
 
+/// What is at a device's mount point now, compared with the device a run used (F10 "Same drive").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Presence {
+    /// The same volume is still mounted there.
+    Same,
+    /// Another volume is mounted there.
+    Other,
+    /// No volume is mounted there: the drive is out, or the place is a plain folder.
+    NotAVolume,
+}
+
+/// Ask `diskutil` what is at `device`'s mount point now.
+pub(crate) async fn presence(device: &Device) -> Result<Presence, DevicesError> {
+    let info = info_of(device.mount_point.as_os_str()).await?;
+    Ok(presence_of(info, device))
+}
+
+/// [`presence`] from `diskutil`'s answer. Identity is the one the device list uses
+/// ([`Device::id`]: the volume UUID, falling back to the name).
+fn presence_of(info: Option<VolumeInfo>, device: &Device) -> Presence {
+    let Some(info) = info else {
+        return Presence::NotAVolume;
+    };
+    if info.mount_point.as_deref() != Some(device.mount_point.as_path()) {
+        return Presence::NotAVolume;
+    }
+    if device_of(info, device.mount_point.clone(), None).id() == device.id() {
+        Presence::Same
+    } else {
+        Presence::Other
+    }
+}
+
 /// The device `info` describes. `fallback_mount` is used when `info` has no `MountPoint`, and
 /// names the device when it has no `VolumeName`.
 fn device_of(info: VolumeInfo, fallback_mount: PathBuf, not_mounted: Option<String>) -> Device {
@@ -438,6 +471,27 @@ mod tests {
 	<string>D1206E50-7C38-3AAE-B4DB-0B5104478293</string>
 </dict>
 </plist>"#;
+
+    #[test]
+    fn what_is_at_the_mount_point_is_the_same_drive_another_one_or_no_volume() -> TestResult {
+        let info = || plist::from_bytes::<VolumeInfo>(DISK_IMAGE_PLIST.as_bytes());
+        let used = device_of(info()?, PathBuf::from("/Volumes/SDLTEST"), None);
+        assert_eq!(presence_of(Some(info()?), &used), Presence::Same);
+        // Another drive mounted at the same place: same name, another volume UUID.
+        let other = Device {
+            volume_uuid: Some("00000000-0000-0000-0000-000000000000".into()),
+            ..used.clone()
+        };
+        assert_eq!(presence_of(Some(info()?), &other), Presence::Other);
+        // `diskutil` does not know the place, or answers for the volume that holds a plain folder.
+        assert_eq!(presence_of(None, &used), Presence::NotAVolume);
+        let folder = Device {
+            mount_point: PathBuf::from("/Volumes/SDLTEST/Music"),
+            ..used
+        };
+        assert_eq!(presence_of(Some(info()?), &folder), Presence::NotAVolume);
+        Ok(())
+    }
 
     /// Trimmed from real `diskutil info -plist /` output (macOS 27.2).
     const INTERNAL_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>

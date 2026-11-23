@@ -30,13 +30,19 @@ pub enum Confirm {
 /// How long the eject question waits before it ejects by itself (F10).
 pub const EJECT_COUNTDOWN: Duration = Duration::from_secs(30);
 
+/// When a countdown that starts at `now` ends.
+#[must_use]
+pub fn deadline_from(now: Instant) -> Instant {
+    now.checked_add(EJECT_COUNTDOWN).unwrap_or(now)
+}
+
 impl Confirm {
     /// The eject question for `device`, asked at `now`.
     #[must_use]
     pub fn eject(device: String, now: Instant) -> Self {
         Self::Eject {
             device,
-            deadline: now.checked_add(EJECT_COUNTDOWN).unwrap_or(now),
+            deadline: deadline_from(now),
         }
     }
 
