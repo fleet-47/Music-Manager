@@ -62,7 +62,7 @@ SD card. Build spec: `.fleet/docs/SPEC-tui.md`.
 - mise config lives in `.mise/config.toml` and is committed. mise supplies yt-dlp, ffmpeg and deno and starts the TUI.
 
 ## Layout
-- `Cargo.toml`, `crates/`: the workspace. `sdl-core` (shared types, config, state and review files, path rules), `sdl-spotify`, `sdl-youtube`, `sdl-library` (genre, tags, playlists, converter), `sdl-devices`, `sdl-tasks` (the runner and the five functions), `sdl-form` (the form module), `sdl` (binary: screen and dialogs).
+- `Cargo.toml`, `crates/`: the workspace. `sdl-core` (shared types, config, state, review and enrichment-queue files, path rules), `sdl-spotify`, `sdl-youtube`, `sdl-library` (genre, tags, playlists, converter), `sdl-devices`, `sdl-tasks` (the runner, the five functions and the enrichment worker), `sdl-form` (the form module), `sdl` (binary: screen and dialogs).
 - `config.example.toml`: copy to `~/.config/sdl/config.toml`.
 - `.mise/config.toml`: tools and the `tui` task.
 - `.fleet/docs/`: `SPEC-tui.md` (the build contract), `BACKLOG.md` (tasks waiting on a condition), `HANDOFF.md`.

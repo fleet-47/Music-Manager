@@ -12,10 +12,11 @@ F1 to F13), `.fleet/docs/BACKLOG.md` (tasks waiting on a condition).
   `sdl-devices/src/reality.rs`).
 - The release binary at `$SHIP_ROOT/outputs/cargo/target/release/sdl` was built on 2026-11-24
   from the committed code, after Yazid's Liked Songs sync finished (1,881 songs in `~/Music/Me`).
-  It has not been started yet.
-- **IPv6 is off on this Mac's Wi-Fi** (`networksetup -setv6off Wi-Fi`, 2026-11-23, with Yazid's
-  approval). The new binary no longer needs that; turn it back on with
-  `networksetup -setv6automatic Wi-Fi` after asking Yazid.
+  It has not been started yet. No `sdl` is running.
+- IPv6 on this Mac's Wi-Fi is back on Automatic (it was off from 2026-11-23 19:26 to 2026-11-24,
+  as the workaround for the fault below). On 2026-11-24 MusicBrainz answered over IPv6 again, so
+  the fault of 2026-11-23 cannot be reproduced now; why its IPv6 route failed that day was not
+  found.
 
 ## What moved on 2026-11-23 and 24
 - Fault found: MusicBrainz's IPv6 address did not answer from Yazid's network, and `ureq` (inside

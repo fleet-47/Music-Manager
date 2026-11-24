@@ -466,7 +466,8 @@ fixes named under H2 and H5. Each helper's interface is written out at the top o
   45). Both answer "written" or "already there"; "already there" is never an error. One function
   writes a small text file whole (`tempfile`: a temp file in the same folder, synced, then renamed
   over the place; a failed write leaves no temp file), used for
-  `state.toml`, `review.toml` and every playlist file. Replaces `progress::place`, `copy_in` in
+  `state.toml`, `review.toml`, `pending_enrichment.toml`, every playlist file and a song file
+  rewritten with its genre and totals (F6). Replaces `progress::place`, `copy_in` in
   `sdl-devices`, the landing inside `convert_file`, the body of `storage::save` and the three
   `std::fs::write` calls in `playlists`. **Fix:** in a device sync that converts, a song whose place
   is taken mid-run counts as skipped, not failed.
@@ -510,11 +511,12 @@ root.
 ## Workspace
 Cargo workspace at the repo root, edition 2024, `resolver = "3"`. Crates, each one deep module with
 a small interface, split so that each can be built and tested by itself:
-- `sdl-core`: shared types, config, state and review files, path rules.
+- `sdl-core`: shared types, config, state, review and enrichment-queue files, path rules.
 - `sdl-spotify`: sign-in and listing. `sdl-youtube`: matching, link listing, downloads.
 - `sdl-library`: MusicBrainz, tags, playlist files, the converter and Convert.
 - `sdl-devices`: device list, plans, copy runs, clean-up and eject (uses `sdl-library`).
-- `sdl-tasks`: the runner and the five functions' tasks; the only writer of the settings files.
+- `sdl-tasks`: the runner, the five functions' tasks and the enrichment worker (F6); the only
+  writer of the settings files.
 - `sdl-form`: the form module (F1), free of any knowledge of this app.
 - `sdl`: the binary: screen, dialogs, event loop.
 Library crates depend only on `sdl-core` (and `sdl-devices` on `sdl-library`); `sdl-tasks` depends
