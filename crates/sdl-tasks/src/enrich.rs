@@ -1,17 +1,25 @@
-//! Enrichment (F6): the queue of landed songs that wait for genre and totals, and the background
-//! worker that asks `MusicBrainz` for them and adds them to the files in the library.
+//! Enrichment (F6): the queue of songs in the library that are missing a genre, and the
+//! background worker that asks `MusicBrainz` for genre and totals and adds them to the files.
 //!
 //! Interface, in full:
-//! * [`Queue`] is the only writer of `pending_enrichment.toml` (F11). A download adds a landed
-//!   song through `TaskContext::queue_enrichment`; nobody else adds, and only the worker removes.
-//! * [`work`] is the worker: one song at a time, oldest first, at the pace of the `MusicBrainz`
-//!   client's own limiter. It sleeps while the queue is empty and wakes when a song is added. It
-//!   never ends by itself: the runner aborts it when the app closes, which is safe at any point,
-//!   because a file is replaced whole or not at all (`sdl_library::tags::add_enrichment`) and it
-//!   starts no outside tool.
-//! * A song leaves the queue when `MusicBrainz` answered (with or without data) or its file is no
-//!   longer in the library. When the request or the write failed it stays and is tried again
-//!   after [`RETRY`].
+//! * [`Queue`] is the only writer of `pending_enrichment.toml` (F11). A download adds every song
+//!   it lands through `TaskContext::queue_enrichment`; nobody else adds. A song stays until its
+//!   file has a genre, so the queue is the list of songs missing one: *waiting* (the worker will
+//!   take it) or *asked* (`MusicBrainz` gave no genre; left alone).
+//! * [`Queue::ask_again`] makes every asked song wait again and wakes the worker, and
+//!   [`Queue::counts`] says how many stand where. The runner hands both out
+//!   (`Runner::ask_enrichment_again`, `Runner::enrichment_counts`) as the connection point for an
+//!   enrichment command; nothing in the app calls them yet.
+//! * [`work`] is the worker: one waiting song at a time, oldest first, at the pace of the
+//!   `MusicBrainz` client's own limiter. It sleeps while nothing waits and wakes when a song is
+//!   added or asked again. It never ends by itself: the runner aborts it when the app closes,
+//!   which is safe at any point, because a file is replaced whole or not at all
+//!   (`sdl_library::tags::add_enrichment`) and it starts no outside tool.
+//! * One song's turn ([`Turn`]): its file is gone, or has a genre already: it leaves the queue,
+//!   with no request. `MusicBrainz` gave a genre and it was written: it leaves. `MusicBrainz`
+//!   answered without a genre (or the song has no ISRC): what it gave is written and the song
+//!   stays, asked. The request or the write failed: it stays waiting and is tried again after
+//!   [`RETRY`].
 //!
 //! The worker is not one of the five functions: it has no card, sends no events and is never
 //! stopped by the owner.
@@ -21,10 +29,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use sdl_core::{
-    Config, Library, LibraryId, PendingEnrichment, PendingSong, Place, StoreError, WantedSong,
+    Config, EnrichmentCounts, Library, LibraryId, PendingEnrichment, PendingSong, Place,
+    StoreError, WantedSong,
 };
 use sdl_library::LibraryError;
-use sdl_library::tags::{Enrichment, ReleaseCache, add_enrichment, lookup};
+use sdl_library::tags::{Enrichment, ReleaseCache, add_enrichment, has_genre, lookup};
 use tokio::sync::Notify;
 
 /// How long the worker waits before it tries again a song whose request or write failed.
@@ -49,22 +58,50 @@ impl Queue {
         }
     }
 
-    /// Queue a landed song, save, and wake the worker. The song is queued in memory even when
-    /// the save fails.
+    /// Change the queue and save it, holding the lock so saves cannot land out of order. The
+    /// change stays in memory even when the save fails.
+    fn update<T>(&self, change: impl FnOnce(&mut PendingEnrichment) -> T) -> Result<T, StoreError> {
+        let mut songs = self.songs.lock().unwrap_or_else(PoisonError::into_inner);
+        let changed = change(&mut songs);
+        songs.save_to(&self.path).map(|()| changed)
+    }
+
+    /// Queue a landed song as waiting, save, and wake the worker.
     ///
     /// # Errors
-    /// The queue file could not be written.
+    /// The queue file could not be written; the song is queued in memory all the same.
     pub(crate) fn add(&self, library: LibraryId, song: WantedSong) -> Result<(), StoreError> {
-        let saved = {
-            let mut songs = self.songs.lock().unwrap_or_else(PoisonError::into_inner);
-            songs.add(PendingSong { library, song });
-            songs.save_to(&self.path)
-        };
+        let saved = self.update(|songs| {
+            songs.add(PendingSong {
+                library,
+                asked: false,
+                song,
+            });
+        });
         self.wake.notify_one();
         saved
     }
 
-    /// The song that has waited longest.
+    /// Make every asked song wait again, save, and wake the worker: the connection point for an
+    /// enrichment command. Returns how many songs will be asked for again.
+    ///
+    /// # Errors
+    /// The queue file could not be written; the songs wait again in memory all the same.
+    pub(crate) fn ask_again(&self) -> Result<usize, StoreError> {
+        let again = self.update(PendingEnrichment::ask_again);
+        self.wake.notify_one();
+        again
+    }
+
+    /// How many songs are waiting and how many were asked.
+    pub(crate) fn counts(&self) -> EnrichmentCounts {
+        self.songs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .counts()
+    }
+
+    /// The waiting song that has been in the queue longest.
     fn next(&self) -> Option<PendingSong> {
         self.songs
             .lock()
@@ -73,74 +110,85 @@ impl Queue {
             .cloned()
     }
 
-    /// Take `done` out of the queue and save. It is out of the queue in memory even when the
-    /// save fails; the file then still lists it, and the next start of the app asks again.
-    fn remove(&self, done: &PendingSong) -> Result<(), StoreError> {
-        let mut songs = self.songs.lock().unwrap_or_else(PoisonError::into_inner);
-        songs.remove(&done.library, done.song.key());
-        songs.save_to(&self.path)
-    }
-
-    /// How many songs wait.
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.songs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
+    /// Record how `song`'s turn ended. A failed save is left at that: the change holds in memory
+    /// for as long as the app runs, and the file then still lists the song as waiting, so the
+    /// next start of the app takes its turn again.
+    fn settle(&self, song: &PendingSong, turn: Turn) {
+        let key = song.song.key();
+        let _saved = match turn {
+            Turn::Leaves => self.update(|songs| songs.remove(&song.library, key)),
+            Turn::Asked => self.update(|songs| songs.mark_asked(&song.library, key)),
+            Turn::Later => return,
+        };
     }
 }
 
 /// How one song's turn ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Turn {
-    /// It leaves the queue.
-    Done,
-    /// It stays; try again after [`RETRY`].
+    /// It leaves the queue: its file has a genre, or is no longer in the library.
+    Leaves,
+    /// It stays, marked as asked: `MusicBrainz` answered without a genre.
+    Asked,
+    /// It stays waiting; try again after [`RETRY`].
     Later,
 }
 
-/// The worker: enrich the queue's songs one at a time for as long as the app runs.
+/// The worker: enrich the queue's waiting songs one at a time for as long as the app runs.
 pub(crate) async fn work(queue: Queue, config: Arc<Config>) {
     // One release lookup per release while the app runs, across every run's songs.
     let cache = ReleaseCache::default();
     loop {
         let Some(next) = queue.next() else {
-            // `add` leaves a wake-up behind when nobody waits yet, so none is missed.
+            // `add` and `ask_again` leave a wake-up behind when nobody waits yet, so none is
+            // missed.
             queue.wake.notified().await;
             continue;
         };
-        let found = lookup(&next.song, &cache).await;
-        match settle(&config, &next, found).await {
-            Turn::Done => {
-                // A failed save is covered by `Queue::remove`: nothing to do here.
-                let _ = queue.remove(&next);
+        let turn = match missing_genre(&config, &next).await {
+            Ok(Some(file)) => {
+                let found = lookup(&next.song, &cache).await;
+                write_found(file, found).await
             }
-            Turn::Later => tokio::time::sleep(RETRY).await,
+            Ok(None) => Turn::Leaves,
+            Err(()) => Turn::Later,
+        };
+        queue.settle(&next, turn);
+        if turn == Turn::Later {
+            tokio::time::sleep(RETRY).await;
         }
     }
 }
 
-/// What to do with `next` now that `MusicBrainz` answered `found`: add what was found to its
-/// file in the library.
-async fn settle(
-    config: &Config,
-    next: &PendingSong,
-    found: Result<Enrichment, LibraryError>,
-) -> Turn {
+/// The file of `next`'s song when it is in the library and has no genre; `None` when there is
+/// nothing to do for it (the file is gone, or has a genre already). `Err` when that could not be
+/// told (the folder or the file cannot be read).
+async fn missing_genre(config: &Config, next: &PendingSong) -> Result<Option<PathBuf>, ()> {
+    let place = Place::of(&Library::resolve(config, &next.library), &next.song);
+    let looked = tokio::task::spawn_blocking(move || {
+        let Some(format) = place.present().map_err(|_| ())? else {
+            return Ok(None);
+        };
+        let file = place.path(format);
+        match has_genre(&file) {
+            Ok(true) => Ok(None),
+            Ok(false) => Ok(Some(file)),
+            Err(_) => Err(()),
+        }
+    });
+    looked.await.map_err(|_| ())?
+}
+
+/// Add what `MusicBrainz` answered to `file`, and say how the song's turn ended.
+async fn write_found(file: PathBuf, found: Result<Enrichment, LibraryError>) -> Turn {
     let Ok(found) = found else {
         return Turn::Later;
     };
-    let place = Place::of(&Library::resolve(config, &next.library), &next.song);
-    let file = match place.present() {
-        Ok(Some(format)) => place.path(format),
-        // The song was taken out of the library: nothing to enrich.
-        Ok(None) => return Turn::Done,
-        Err(_) => return Turn::Later,
-    };
+    let has_genre = found.genre.is_some();
     let written = tokio::task::spawn_blocking(move || add_enrichment(&file, &found)).await;
     match written {
-        Ok(Ok(())) => Turn::Done,
+        Ok(Ok(())) if has_genre => Turn::Leaves,
+        Ok(Ok(())) => Turn::Asked,
         Ok(Err(_)) | Err(_) => Turn::Later,
     }
 }
@@ -167,6 +215,7 @@ mod tests {
     fn waiting(id: &str) -> PendingSong {
         PendingSong {
             library: LibraryId::Own,
+            asked: false,
             song: song(id, &format!("Song {id}")),
         }
     }
@@ -187,70 +236,149 @@ mod tests {
         Ok(file)
     }
 
+    fn queue(dir: &std::path::Path) -> (Queue, PathBuf) {
+        let path = dir.join("pending_enrichment.toml");
+        (Queue::new(PendingEnrichment::default(), path.clone()), path)
+    }
+
     #[tokio::test]
     async fn a_queued_song_is_saved_at_once_and_wakes_the_worker() -> TestResult {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("pending_enrichment.toml");
-        let queue = Queue::new(PendingEnrichment::default(), path.clone());
+        let (queue, path) = queue(dir.path());
         assert_eq!(queue.next(), None);
         queue.add(LibraryId::Own, song("a", "First"))?;
         queue.add(LibraryId::Own, song("b", "Second"))?;
         queue.add(LibraryId::Own, song("a", "First"))?;
-        assert_eq!(queue.len(), 2, "a song waits once");
+        assert_eq!(queue.counts().waiting, 2, "a song is queued once");
         assert_eq!(PendingEnrichment::load_from(&path)?.len(), 2);
         // The wake-up left by `add` is there for a worker that starts waiting only now.
         tokio::time::timeout(Duration::from_secs(5), queue.wake.notified()).await?;
-        let first = queue.next().ok_or("nothing waits")?;
-        assert_eq!(first.song.key(), "a");
-        queue.remove(&first)?;
         assert_eq!(
             queue.next().map(|next| next.song.key().to_owned()),
-            Some("b".into())
+            Some("a".into())
         );
-        assert_eq!(PendingEnrichment::load_from(&path)?.len(), 1);
         Ok(())
     }
 
     #[tokio::test]
-    async fn a_failed_request_keeps_the_song_for_later() -> TestResult {
+    async fn a_turn_ends_with_the_song_gone_asked_or_still_waiting() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (queue, path) = queue(dir.path());
+        for id in ["a", "b", "c"] {
+            queue.add(LibraryId::Own, song(id, id))?;
+        }
+        queue.settle(&waiting("a"), Turn::Leaves);
+        queue.settle(&waiting("b"), Turn::Asked);
+        queue.settle(&waiting("c"), Turn::Later);
+        let counts = queue.counts();
+        assert_eq!((counts.waiting, counts.asked), (1, 1));
+        assert_eq!(
+            queue.next().map(|next| next.song.key().to_owned()),
+            Some("c".into())
+        );
+        // What is on disk is what a restart finds.
+        let saved = PendingEnrichment::load_from(&path)?;
+        assert_eq!((saved.counts().waiting, saved.counts().asked), (1, 1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn asking_again_makes_asked_songs_wait_and_wakes_the_worker() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (queue, path) = queue(dir.path());
+        queue.add(LibraryId::Own, song("a", "First"))?;
+        queue.settle(&waiting("a"), Turn::Asked);
+        assert_eq!(queue.next(), None, "an asked song is left alone");
+        // Use up the wake-up `add` left, so the next one can only come from `ask_again`.
+        tokio::time::timeout(Duration::from_secs(5), queue.wake.notified()).await?;
+        assert_eq!(queue.ask_again()?, 1);
+        tokio::time::timeout(Duration::from_secs(5), queue.wake.notified()).await?;
+        assert_eq!(
+            queue.next().map(|next| next.song.key().to_owned()),
+            Some("a".into())
+        );
+        assert_eq!(PendingEnrichment::load_from(&path)?.counts().waiting, 1);
+        assert_eq!(queue.ask_again()?, 0, "nothing is asked: nothing changes");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_song_no_longer_in_the_library_has_nothing_to_do() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let config = config(dir.path());
+        assert_eq!(missing_genre(&config, &waiting("a")).await, Ok(None));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_file_that_cannot_be_read_is_tried_again_later() -> TestResult {
         let dir = tempfile::tempdir()?;
         let config = config(dir.path());
         let next = waiting("a");
-        let file = put(&config, &next, b"audio")?;
+        let file = put(&config, &next, b"not audio at all")?;
+        assert_eq!(missing_genre(&config, &next).await, Err(()));
+        assert_eq!(write_found(file.clone(), Ok(jazz())).await, Turn::Later);
+        assert_eq!(std::fs::read(&file)?, b"not audio at all");
+        Ok(())
+    }
+
+    /// One second of real Opus audio where `next`'s song lives (needs `ffmpeg`, as the gate has).
+    fn put_audio(
+        config: &Config,
+        next: &PendingSong,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let file = put(config, next, b"")?;
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=duration=1"])
+            .arg(&file)
+            .output()?;
+        if !made.status.success() {
+            return Err(String::from_utf8_lossy(&made.stderr).into_owned().into());
+        }
+        Ok(file)
+    }
+
+    #[tokio::test]
+    async fn a_song_leaves_the_queue_only_once_its_file_has_a_genre() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let config = config(dir.path());
+        let next = waiting("a");
+        let file = put_audio(&config, &next)?;
+        // In the library with no genre: this is the file to enrich.
+        assert_eq!(missing_genre(&config, &next).await, Ok(Some(file.clone())));
+        // Totals but no genre: written, and the song stays, asked.
+        let totals = Enrichment {
+            track_total: Some(9),
+            ..Enrichment::default()
+        };
+        assert_eq!(write_found(file.clone(), Ok(totals)).await, Turn::Asked);
+        assert_eq!(missing_genre(&config, &next).await, Ok(Some(file.clone())));
+        // A genre: written, and the song leaves; a later turn finds nothing to do.
+        assert_eq!(write_found(file.clone(), Ok(jazz())).await, Turn::Leaves);
+        assert_eq!(missing_genre(&config, &next).await, Ok(None));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_keeps_the_song_waiting_and_the_file_as_it_is() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("song.opus");
+        std::fs::write(&file, b"audio")?;
         let failed = Err(LibraryError::MusicBrainz("no route to host".into()));
-        assert_eq!(settle(&config, &next, failed).await, Turn::Later);
-        assert_eq!(std::fs::read(&file)?, b"audio", "the file is not touched");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn a_song_no_longer_in_the_library_leaves_the_queue() -> TestResult {
-        let dir = tempfile::tempdir()?;
-        let config = config(dir.path());
-        assert_eq!(settle(&config, &waiting("a"), Ok(jazz())).await, Turn::Done);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn an_answer_with_nothing_in_it_leaves_the_queue_and_the_file_alone() -> TestResult {
-        let dir = tempfile::tempdir()?;
-        let config = config(dir.path());
-        let next = waiting("a");
-        let file = put(&config, &next, b"audio")?;
-        let nothing = Ok(Enrichment::default());
-        assert_eq!(settle(&config, &next, nothing).await, Turn::Done);
+        assert_eq!(write_found(file.clone(), failed).await, Turn::Later);
         assert_eq!(std::fs::read(&file)?, b"audio");
         Ok(())
     }
 
     #[tokio::test]
-    async fn a_file_that_cannot_be_tagged_stays_as_it_is_and_is_tried_again() -> TestResult {
+    async fn an_answer_without_a_genre_leaves_the_song_asked() -> TestResult {
         let dir = tempfile::tempdir()?;
-        let config = config(dir.path());
-        let next = waiting("a");
-        let file = put(&config, &next, b"not audio at all")?;
-        assert_eq!(settle(&config, &next, Ok(jazz())).await, Turn::Later);
-        assert_eq!(std::fs::read(&file)?, b"not audio at all");
+        let file = dir.path().join("song.opus");
+        std::fs::write(&file, b"audio")?;
+        // Nothing at all came back (as for a song with no ISRC): nothing is written.
+        let nothing = Ok(Enrichment::default());
+        assert_eq!(write_found(file.clone(), nothing).await, Turn::Asked);
+        assert_eq!(std::fs::read(&file)?, b"audio");
         Ok(())
     }
 }

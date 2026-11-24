@@ -32,7 +32,7 @@ pub use event::{
 pub use format::Format;
 pub use library::{Library, LibraryId, NewLibraryError};
 pub use matching::{Candidate, MatchOutcome};
-pub use pending::{PendingEnrichment, PendingSong};
+pub use pending::{EnrichmentCounts, PendingEnrichment, PendingSong};
 pub use place::{Place, library_files};
 pub use playlist::Playlist;
 pub use preset::{Preset, Quality};

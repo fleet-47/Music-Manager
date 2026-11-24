@@ -10,9 +10,9 @@ use sdl_core::StoreError;
 use sdl_core::place::remove_tmp_dir_if_empty;
 use sdl_core::run::CancellationToken;
 use sdl_core::{
-    Config, ConvertChoice, Device, DeviceChoice, ErrorInfo, Event, EventKind, EventSender,
-    HeldSong, LastRun, Library, LibraryId, Never, PendingEnrichment, ReviewList, RunOutcome, State,
-    TaskId, WantedSong,
+    Config, ConvertChoice, Device, DeviceChoice, EnrichmentCounts, ErrorInfo, Event, EventKind,
+    EventSender, HeldSong, LastRun, Library, LibraryId, Never, PendingEnrichment, ReviewList,
+    RunOutcome, State, TaskId, WantedSong,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
@@ -519,6 +519,23 @@ impl Runner {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// How many songs are missing a genre: waiting for the enrichment worker, and asked with no
+    /// genre found (F6). With [`Runner::ask_enrichment_again`], the connection point for an
+    /// enrichment command; nothing on screen uses either yet.
+    #[must_use]
+    pub fn enrichment_counts(&self) -> EnrichmentCounts {
+        self.queue.counts()
+    }
+
+    /// Ask `MusicBrainz` again for every song that was asked and has no genre (F6): they wait
+    /// again and the worker takes them in turn. Returns how many that is.
+    ///
+    /// # Errors
+    /// The queue file could not be written; the songs are asked for again all the same.
+    pub fn ask_enrichment_again(&self) -> Result<usize, StoreError> {
+        self.queue.ask_again()
     }
 
     /// A copy of the review list as it is now (its length is the number on the Review row).

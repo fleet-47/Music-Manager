@@ -152,7 +152,7 @@ impl<'a> Intake<'a> {
         if route == Route::Search
             && let Some(source) = place.held_elsewhere(&Library::list(&self.context.config)?)?
         {
-            return self.copy_from(&source, &place).await;
+            return self.copy_from(library, song, &source, &place).await;
         }
         self.context
             .events
@@ -222,11 +222,8 @@ impl<'a> Intake<'a> {
             let files: Vec<String> = from.iter().map(|list| list.file.clone()).collect();
             correct_line(library, &files, &place, format)?;
         }
-        // Genre and totals come later, from the enrichment worker (F6); `MusicBrainz` looks a
-        // song up by its ISRC, so a song without one has nothing to wait for.
-        if song.isrc.is_some() {
-            self.context.queue_enrichment(library.id(), song.clone())?;
-        }
+        // Genre and totals come later, from the enrichment worker (F6).
+        self.context.queue_enrichment(library.id(), song.clone())?;
         Ok(match cover {
             Cover::Stored => Outcome::Added,
             Cover::Missing => Outcome::AddedWithoutCover,
@@ -234,8 +231,16 @@ impl<'a> Intake<'a> {
     }
 
     /// Land a copy of `source` (a file of another library) at `place`. The copy is made to a temp
-    /// file and landed without replacing anything; `source` is only read. It counts as added.
-    async fn copy_from(&self, source: &Path, place: &Place) -> Result<Outcome, TaskError> {
+    /// file and landed without replacing anything; `source` is only read. It counts as added,
+    /// and is queued for enrichment like a download: the copy has the tags its source had, and
+    /// the worker passes it over when that includes a genre (F6).
+    async fn copy_from(
+        &self,
+        library: &Library,
+        song: &WantedSong,
+        source: &Path,
+        place: &Place,
+    ) -> Result<Outcome, TaskError> {
         let format = Format::of(source).unwrap_or_default();
         let scratch = scratch_dir(&self.context.config.music_root)?;
         let copy = scratch.path().join(format!("copy.{}", format.extension()));
@@ -244,7 +249,11 @@ impl<'a> Intake<'a> {
         tokio::task::spawn_blocking(move || std::fs::copy(from, to))
             .await
             .map_err(|error| LibraryError::Task(error.to_string()))??;
-        Ok(land_in_library(&copy, &place.path(format))?)
+        let landed = land_in_library(&copy, &place.path(format))?;
+        if landed == Outcome::Added {
+            self.context.queue_enrichment(library.id(), song.clone())?;
+        }
+        Ok(landed)
     }
 
     async fn find(&self, song: &WantedSong) -> Result<MatchOutcome, TaskError> {
@@ -398,6 +407,19 @@ pub(crate) mod tests {
             b"sams audio",
             "the source is untouched"
         );
+        // What a run adds is queued for enrichment, and saved (F6).
+        assert_eq!(runner.enrichment_counts().waiting, 1);
+        let saved =
+            sdl_core::PendingEnrichment::load_from(&dir.path().join("pending_enrichment.toml"))?;
+        assert_eq!(saved.next().map(|next| next.song.key()), Some("a"));
+        // A song that was already there is not: taking it again adds nothing.
+        assert_eq!(
+            Intake::new(&context)
+                .take(&mine, &wanted, &[], Route::Search)
+                .await?,
+            Outcome::Skipped
+        );
+        assert_eq!(runner.enrichment_counts().waiting, 1);
         Ok(())
     }
 

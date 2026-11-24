@@ -211,13 +211,23 @@ report it; do not substitute another crate or hand-write the capability.
   cover (fetched with `reqwest`, giving up after 20 seconds) as the front cover. A cover that
   cannot be downloaded leaves the song without a cover and the song still completes; the last-run
   line counts songs left without a cover. A failed tag write fails the song.
-- **Enrichment queue** (ruled 2026-11-23): every song a download lands that has an ISRC is added
-  to `~/.config/sdl/pending_enrichment.toml` (`serde` + `toml`): its library and the wanted song,
-  once per library and song (F8's identity). The file's place is worked out from those (F7); no
-  path is stored. The runner is its only writer (F11).
+- **Enrichment queue** (ruled 2026-11-23; kept until a genre, ruled 2026-11-24): every song a
+  download run adds to a library, downloaded or copied from another library (F12), is added to
+  `~/.config/sdl/pending_enrichment.toml` (`serde` + `toml`): its library and the wanted song,
+  once per library and song (F8's identity), and whether MusicBrainz was already asked. The
+  file's place is worked out from those (F7); no path is stored. The runner is its only writer
+  (F11). A song stays until its file has a genre, so the queue is the list of songs missing one:
+  *waiting* (not asked yet) or *asked* (asked, no genre came).
+- **Asking again** is an enrichment command of its own, never a note on a download: the runner's
+  `ask_enrichment_again` marks every asked song as waiting and wakes the worker, and
+  `enrichment_counts` gives how many are waiting and how many were asked. Both are the
+  connection point for the enrichment card; no menu item, key or card calls them until the UI
+  redesign.
 - **Enrichment worker** (ruled 2026-11-23): one background task, started with the app, alive as
   long as the app runs and ended with it; it is not one of the five functions and shows nothing
-  on screen. It takes the queue's songs one at a time, in order, woken when a song is queued:
+  on screen. It takes the queue's waiting songs one at a time, in order, woken when a song is
+  queued or asked again. A song whose file already has a genre leaves the queue without a
+  request. Otherwise it:
   - asks MusicBrainz: recording search `isrc:<code>`, a recording lookup, and one release lookup
     per release ID while the app runs. Genre = the recording's top genre, else its release
     group's, else its first artist's. Track total and disc total from the release whose title
@@ -225,13 +235,15 @@ report it; do not substitute another crate or hand-write the capability.
   - adds genre, track total and disc total to the song's file in the library: read into memory,
     tagged with `lofty`, and written back whole with H2's atomic write, so a crash leaves the old
     file or the new one. No other tag, the cover and the audio are not changed;
-  - MusicBrainz answered, with or without data: the song leaves the queue. Its file is no longer
-    in the library: it leaves the queue. The request or the write failed: it stays, and the
-    worker tries again after 60 seconds.
+  - MusicBrainz gave a genre and it was written: the song leaves the queue. MusicBrainz answered
+    without a genre (or the song has no ISRC to ask with): what it did give is written and the
+    song stays, marked as asked, and is not asked again until `ask_enrichment_again`. Its file
+    is no longer in the library: it leaves the queue. The request or the write failed: it stays
+    waiting, and the worker tries again after 60 seconds.
 - **Not:** no Last.fm, no Spotify genre, no lyrics, no ReplayGain; no MusicBrainz call inside a
-  run; no enrichment of songs without an ISRC, of songs copied from another library (F12) or of
-  songs that were in the library before 2026-11-23; no parallel lookups; no retry limit; no
-  record of what was enriched.
+  run; no scan of the library for files without a genre (songs that were in the library before
+  2026-11-24 are not in the queue); no parallel lookups; no retry limit; no record of what was
+  enriched.
 
 ## F7. Library layout and playlists (`sdl-core` path rules, `sdl-library` playlist files)
 - A song lives at `<music_root>/<Album artist>/<Album>/<Title>.<ext>`: one file however many lists

@@ -252,6 +252,22 @@ pub async fn write_tags(file: &Path, song: &WantedSong) -> Result<Cover, Library
     Ok(cover)
 }
 
+/// Whether a song's `file` has a genre tag (F6: a song with one is not missing anything the
+/// enrichment queue is for). Blocking.
+///
+/// # Errors
+/// The file cannot be read.
+pub fn has_genre(file: &Path) -> Result<bool, LibraryError> {
+    let tagged = lofty::read_from_path(file).map_err(|e| LibraryError::Tag {
+        path: file.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    Ok(tagged
+        .primary_tag()
+        .and_then(Accessor::genre)
+        .is_some_and(|genre| !genre.trim().is_empty()))
+}
+
 /// Add genre, track total and disc total to a song's `file` in the library (F6). The file is
 /// read into memory, tagged there and written back whole ([`write_atomic`]), so a crash leaves
 /// the old file or the new one. Every other tag, the cover and the audio stay as they are; a
@@ -640,6 +656,7 @@ mod tests {
         let file = dir.path().join("t.opus");
         make_audio(&file, 1)?;
         write_tags(&file, &spotify()).await?;
+        assert!(!has_genre(&file)?, "a landed song has no genre yet");
         let bytes = std::fs::read(&file)?;
         add_enrichment(&file, &Enrichment::default())?;
         assert_eq!(std::fs::read(&file)?, bytes, "nothing found: not rewritten");
@@ -651,6 +668,7 @@ mod tests {
         let tag = read_tag(&file)?;
         assert_eq!(tag.genre().as_deref(), Some("Jazz"));
         assert_eq!((tag.track_total(), tag.disk_total()), (None, None));
+        assert!(has_genre(&file)?);
         // A file that is not there is an error naming it, not a new file.
         let gone = dir.path().join("gone.opus");
         assert!(matches!(
